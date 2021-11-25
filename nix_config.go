@@ -10,6 +10,7 @@ import (
 type nixConfig struct {
 	secretKeys        map[string]ed25519.PrivateKey
 	trustedPublicKeys map[string]ed25519.PublicKey
+	substituters      []string
 }
 
 type rawNixConfig struct {
@@ -20,6 +21,10 @@ type rawNixConfig struct {
 	TrustedPublicKeys struct {
 		Value []string `json:"value"`
 	} `json:"trusted-public-keys"`
+
+	Substituters struct {
+		Value []string `json:"value"`
+	} `json:"substituters"`
 }
 
 func loadNixConfig() (*nixConfig, error) {
@@ -39,6 +44,7 @@ func loadNixConfig() (*nixConfig, error) {
 	config := &nixConfig{
 		secretKeys:        map[string]ed25519.PrivateKey{},
 		trustedPublicKeys: map[string]ed25519.PublicKey{},
+		substituters:      rawConfig.Substituters.Value,
 	}
 
 	for _, value := range rawConfig.TrustedPublicKeys.Value {

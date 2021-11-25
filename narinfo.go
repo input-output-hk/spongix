@@ -2,7 +2,6 @@ package main
 
 import (
 	"bufio"
-	"bytes"
 	"crypto/ed25519"
 	"encoding/base64"
 	"fmt"
@@ -240,11 +239,7 @@ func (info *NarInfo) signMsg() string {
 }
 
 func (info *NarInfo) Sign(nixPrivateKey *NixPrivateKey) error {
-	signature, err := info.Signature(nixPrivateKey)
-	if err != nil {
-		return err
-	}
-
+	signature := info.Signature(nixPrivateKey)
 	missing := true
 
 	for _, sig := range info.Sig {
@@ -260,18 +255,7 @@ func (info *NarInfo) Sign(nixPrivateKey *NixPrivateKey) error {
 	return nil
 }
 
-func (info *NarInfo) Signature(nixPrivateKey *NixPrivateKey) (string, error) {
+func (info *NarInfo) Signature(nixPrivateKey *NixPrivateKey) string {
 	signature := ed25519.Sign(nixPrivateKey.key, []byte(info.signMsg()))
-
-	buf := bytes.Buffer{}
-	signedEnc := base64.NewEncoder(base64.StdEncoding, &buf)
-	if _, err := signedEnc.Write(signature); err != nil {
-		return "", err
-	}
-
-	if err := signedEnc.Close(); err != nil {
-		return "", err
-	}
-
-	return nixPrivateKey.name + ":" + buf.String(), nil
+	return nixPrivateKey.name + ":" + base64.StdEncoding.EncodeToString(signature)
 }

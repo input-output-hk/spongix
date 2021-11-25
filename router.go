@@ -19,7 +19,6 @@ import (
 )
 
 var (
-	narXzPattern   = regexp.MustCompile(`\A[0-9a-df-np-sv-z]{52}(\.nar\.xz|\.drv)\z`)
 	narinfoPattern = regexp.MustCompile(`\A[0-9a-df-np-sv-z]{32}\.narinfo\z`)
 )
 
@@ -41,7 +40,7 @@ func (proxy *Proxy) router() *mux.Router {
 	r.HandleFunc(narinfo, proxy.narinfoPut).Methods("PUT")
 	r.HandleFunc(narinfo, proxy.narinfoGet).Methods("GET")
 
-	nar := `/{bucket:[a-z-]+}/nar/{key:[0-9a-df-np-sv-z]{52}(?:\.drv|\.nar(?:\.(?:xz|bz2|zst|lzip|lz4|br))?)}`
+	nar := `/{bucket:[a-z-]+}/nar/{key}`
 	r.HandleFunc(nar, proxy.narHead).Methods("HEAD")
 	r.HandleFunc(nar, proxy.narPut).Methods("PUT")
 	r.HandleFunc(nar, proxy.narGet).Methods("GET")
@@ -60,7 +59,7 @@ func (proxy *Proxy) narinfoPath(r *http.Request) (string, string, error) {
 
 func (proxy *Proxy) narPath(r *http.Request) (string, string, error) {
 	key, ok := mux.Vars(r)["key"]
-	if ok && narXzPattern.MatchString(key) {
+	if ok {
 		return filepath.Join(proxy.Dir, "nar", key), filepath.Join("nar", key), nil
 	} else {
 		return "", "", errors.New("Invalid nar name")
@@ -247,12 +246,10 @@ func (proxy *Proxy) narinfoGet(w http.ResponseWriter, r *http.Request) {
 }
 
 func (proxy *Proxy) parallelRequest(path string) io.ReadCloser {
-	substituters := []string{
-		"https://cache.nixos.org",
-		"https://hydra.iohk.io",
-		"https://hydra.mantis.ist",
-		"https://cache.nixos.org/",
+	if proxy.nixConfig == nil {
+		return nil
 	}
+	substituters := proxy.nixConfig.substituters
 
 	contentChan := make(chan io.ReadCloser, len(substituters))
 	now := time.Now()

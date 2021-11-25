@@ -3,12 +3,19 @@ package main
 import (
 	"bytes"
 	"crypto/ed25519"
+	"log"
 	"net/http"
 	"os"
 	"testing"
 
 	"github.com/steinfletcher/apitest"
 )
+
+const fakeCredentials = `
+[nix-cache-proxy]
+aws_access_key_id = AAAAAAAAAAAAAAAAAAAA
+aws_secret_access_key = 0000000000000000000000000000000000000000
+`
 
 func testProxy() *Proxy {
 	proxy := defaultProxy()
@@ -22,9 +29,9 @@ func testProxy() *Proxy {
 		key:  ed25519.NewKeyFromSeed(bytes.Repeat([]byte{0}, 32)),
 	}
 
-	os.WriteFile(".fake-credentials", []byte(`[nix-cache-proxy]
-aws_access_key_id = AAAAAAAAAAAAAAAAAAAA
-aws_secret_access_key = 0000000000000000000000000000000000000000`), 0777)
+	if err := os.WriteFile(".fake-credentials", []byte(fakeCredentials), 0777); err != nil {
+		log.Panic(err)
+	}
 
 	proxy.Clean()
 	proxy.SetupDir()

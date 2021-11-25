@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"crypto/ed25519"
 	"log"
 	"net/http"
 	"os"
@@ -114,6 +115,7 @@ func main() {
 		log.Panic(err)
 	}
 	proxy.nixConfig = config
+	proxy.nixConfig.trustedPublicKeys[key.name] = key.key.Public().(ed25519.PublicKey)
 
 	r := proxy.router()
 	log.Printf("Running on %q", proxy.Listen)

@@ -71,6 +71,8 @@ func (n notFound) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 func notFoundResponse(w http.ResponseWriter, r *http.Request) {
+	log.Println(r.Method, r.URL.Path)
+
 	parts := strings.Split(r.URL.Path, "/")
 	l := len(parts)
 

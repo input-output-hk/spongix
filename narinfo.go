@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/kr/pretty"
 	"github.com/pkg/errors"
 )
 
@@ -25,6 +26,7 @@ type NarInfo struct {
 	References  []string
 	Deriver     string
 	Sig         []string
+	CA          string
 }
 
 func (info *NarInfo) Marshal(output io.Writer) error {
@@ -63,12 +65,16 @@ func (info *NarInfo) Marshal(output io.Writer) error {
 		return err
 	}
 
-	if err := write("References: %s\n", strings.Join(info.References, " ")); err != nil {
-		return err
+	if len(info.References) > 0 {
+		if err := write("References: %s\n", strings.Join(info.References, " ")); err != nil {
+			return err
+		}
 	}
 
-	if err := write("Deriver: %s\n", info.Deriver); err != nil {
-		return err
+	if len(info.Deriver) > 0 {
+		if err := write("Deriver: %s\n", info.Deriver); err != nil {
+			return err
+		}
 	}
 
 	for _, sig := range info.Sig {
@@ -85,12 +91,16 @@ func (info *NarInfo) Unmarshal(input io.Reader) error {
 	scanner := bufio.NewScanner(input)
 	for scanner.Scan() {
 		line := scanner.Text()
+		pretty.Println(line)
 		parts := strings.SplitN(line, ": ", 2)
 		if len(parts) != 2 {
 			return errors.Errorf("Failed to parse line: %q", line)
 		}
 		key := parts[0]
 		value := parts[1]
+		if value == "" {
+			continue
+		}
 
 		switch key {
 		case "StorePath":
@@ -121,20 +131,29 @@ func (info *NarInfo) Unmarshal(input io.Reader) error {
 			info.Deriver = value
 		case "Sig":
 			info.Sig = append(info.Sig, value)
+		case "CA":
+			info.CA = value
+		default:
+			return errors.Errorf("Unknown narinfo key: %q: %v", key, value)
 		}
 	}
 
 	if err := scanner.Err(); err != nil {
 		return errors.WithMessage(err, "Parsing narinfo")
 	}
-	return errors.WithMessage(info.Validate(), "Validating narinfo")
+
+	if err := info.Validate(); err != nil {
+		return errors.WithMessage(err, "Validating narinfo")
+	}
+
+	return nil
 }
 
 var (
 	nixHash           = `[0-9a-df-np-sv-z]`
 	validNixStorePath = regexp.MustCompile(`\A/nix/store/` + nixHash + `{32}-.+\z`)
 	validStorePath    = regexp.MustCompile(`\A` + nixHash + `{32}-.+\z`)
-	validURL          = regexp.MustCompile(`\Anar/` + nixHash + `{52}\.nar(\.(xz|bz2|zst|lzip|lz4|br))?\z`)
+	validURL          = regexp.MustCompile(`\Anar/` + nixHash + `{52}(\.drv|\.nar(\.(xz|bz2|zst|lzip|lz4|br))?)\z`)
 	validCompression  = regexp.MustCompile(`\A(|none|xz|bzip2|br)\z`)
 	validHash         = regexp.MustCompile(`\Asha256:` + nixHash + `{52}\z`)
 	validDeriver      = regexp.MustCompile(`\A` + nixHash + `{32}-.+\.drv\z`)
@@ -175,7 +194,7 @@ func (info *NarInfo) Validate() error {
 		}
 	}
 
-	if !validDeriver.MatchString(info.Deriver) {
+	if info.Deriver != "" && !validDeriver.MatchString(info.Deriver) {
 		return errors.Errorf("Invalid Deriver: %q", info.Deriver)
 	}
 

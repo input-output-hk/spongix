@@ -5,18 +5,21 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
+	"time"
 
 	"github.com/aws/aws-sdk-go/aws"
 	"github.com/aws/aws-sdk-go/service/s3/s3manager"
 	"github.com/gorilla/mux"
+	"github.com/kr/pretty"
 	"github.com/pkg/errors"
 )
 
 var (
-	narXzPattern   = regexp.MustCompile(`\A[0-9a-df-np-sv-z]{52}\.nar\.xz\z`)
+	narXzPattern   = regexp.MustCompile(`\A[0-9a-df-np-sv-z]{52}(\.nar\.xz|\.drv)\z`)
 	narinfoPattern = regexp.MustCompile(`\A[0-9a-df-np-sv-z]{32}\.narinfo\z`)
 )
 
@@ -38,7 +41,7 @@ func (proxy *Proxy) router() *mux.Router {
 	r.HandleFunc(narinfo, proxy.narinfoPut).Methods("PUT")
 	r.HandleFunc(narinfo, proxy.narinfoGet).Methods("GET")
 
-	nar := `/{bucket:[a-z-]+}/nar/{key:[0-9a-df-np-sv-z]{52}\.nar(?:\.(?:xz|bz2|zst|lzip|lz4|br))?}`
+	nar := `/{bucket:[a-z-]+}/nar/{key:[0-9a-df-np-sv-z]{52}(?:\.drv|\.nar(?:\.(?:xz|bz2|zst|lzip|lz4|br))?)}`
 	r.HandleFunc(nar, proxy.narHead).Methods("HEAD")
 	r.HandleFunc(nar, proxy.narPut).Methods("PUT")
 	r.HandleFunc(nar, proxy.narGet).Methods("GET")
@@ -122,20 +125,35 @@ func (proxy *Proxy) narPut(w http.ResponseWriter, r *http.Request) {
 }
 
 func (proxy *Proxy) narGet(w http.ResponseWriter, r *http.Request) {
-	path, _, err := proxy.narPath(r)
+	path, remotePath, err := proxy.narPath(r)
 	if badRequest(w, err) {
 		return
 	}
 
-	if _, err := os.Stat(path); err != nil {
-		w.Header().Add("Content-Type", "text/html")
-		w.WriteHeader(404)
-		_, _ = w.Write([]byte("404"))
+	if _, err := os.Stat(path); err == nil {
+		log.Printf("Serving %q from disk\n", path)
+		w.Header().Add("Content-Type", "application/x-nix-nar")
+		http.ServeFile(w, r, path)
 		return
 	}
 
-	w.Header().Add("Content-Type", "application/x-nix-nar")
-	http.ServeFile(w, r, path)
+	if content := proxy.parallelRequest(remotePath); content != nil {
+		log.Printf("Fetching %q from substituters\n", path)
+		fd, err := os.Create(path)
+		if internalServerError(w, err) {
+			return
+		}
+		tee := io.TeeReader(content, fd)
+		w.Header().Add("Content-Type", "application/x-nix-nar")
+		w.WriteHeader(200)
+		io.Copy(w, tee)
+		return
+	}
+
+	w.Header().Add("Content-Type", "text/html")
+	w.WriteHeader(404)
+	_, _ = w.Write([]byte("404"))
+	return
 }
 
 func (proxy *Proxy) narinfoPut(w http.ResponseWriter, r *http.Request) {
@@ -154,8 +172,14 @@ func (proxy *Proxy) narinfoPut(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if internalServerError(w, info.Sign(proxy.privateKey)) {
-		return
+	if len(info.Sig) == 0 {
+		if internalServerError(w, info.Sign(proxy.privateKey)) {
+			return
+		}
+	} else {
+		if badRequest(w, info.Verify(proxy.nixConfig.trustedPublicKeys)) {
+			return
+		}
 	}
 
 	signed := &bytes.Buffer{}
@@ -183,15 +207,34 @@ func (proxy *Proxy) narinfoPut(w http.ResponseWriter, r *http.Request) {
 }
 
 func (proxy *Proxy) narinfoGet(w http.ResponseWriter, r *http.Request) {
-	path, _, err := proxy.narinfoPath(r)
+	path, remotePath, err := proxy.narinfoPath(r)
 	if badRequest(w, err) {
 		return
 	}
 
-	if _, err := os.Stat(path); err != nil {
-		vars := mux.Vars(r)
-		w.WriteHeader(404)
-		_, _ = w.Write([]byte(`<?xml version="1.0" encoding="UTF-8"?>
+	if _, err := os.Stat(path); err == nil {
+		log.Printf("Serving %q from disk\n", path)
+		w.Header().Add("Content-Type", "text/x-nix-narinfo")
+		http.ServeFile(w, r, path)
+		return
+	}
+
+	if content := proxy.parallelRequest(remotePath); content != nil {
+		log.Printf("Fetching %q from substituters\n", path)
+		fd, err := os.Create(path)
+		if internalServerError(w, err) {
+			return
+		}
+		tee := io.TeeReader(content, fd)
+		w.Header().Add("Content-Type", "text/x-nix-narinfo")
+		w.WriteHeader(200)
+		io.Copy(w, tee)
+		return
+	}
+
+	vars := mux.Vars(r)
+	w.WriteHeader(404)
+	_, _ = w.Write([]byte(`<?xml version="1.0" encoding="UTF-8"?>
 <Error>
   <Code>NoSuchKey</Code>
   <Message>The specified key does not exist.</Message>
@@ -201,9 +244,52 @@ func (proxy *Proxy) narinfoGet(w http.ResponseWriter, r *http.Request) {
   <RequestId>16B81914FBB8345F</RequestId>
   <HostId>672a09d6-39bb-41a6-bcf3-b0375d351cfe</HostId>
 </Error>`))
-		return
+}
+
+func (proxy *Proxy) parallelRequest(path string) io.ReadCloser {
+	substituters := []string{
+		"https://cache.nixos.org",
+		"https://hydra.iohk.io",
+		"https://hydra.mantis.ist",
+		"https://cache.nixos.org/",
 	}
 
-	w.Header().Add("Content-Type", "text/x-nix-narinfo")
-	http.ServeFile(w, r, path)
+	contentChan := make(chan io.ReadCloser, len(substituters))
+	now := time.Now()
+
+	for _, sub := range substituters {
+		go func(sub string) {
+			subUrl, err := url.Parse(sub)
+			if err != nil {
+				pretty.Logln(err)
+				return
+			}
+			subUrl.Path = path
+
+			res, err := http.Get(subUrl.String())
+			if err != nil {
+				pretty.Logln(err)
+				return
+			}
+
+			pretty.Logln(subUrl.String(), res.StatusCode, time.Now().Sub(now).String())
+			if res.StatusCode == 200 {
+				contentChan <- res.Body
+			} else {
+				contentChan <- nil
+			}
+		}(sub)
+	}
+
+	for count := 1; count < len(substituters); count++ {
+		select {
+		case content := <-contentChan:
+			return content
+		case <-time.After(5 * time.Second):
+			log.Printf("timeout while getting %q", path)
+			return nil
+		}
+	}
+
+	return nil
 }

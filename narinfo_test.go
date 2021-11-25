@@ -73,9 +73,6 @@ func Test_NarinfoValidate(t *testing.T) {
 	v.Equal(t, `Invalid Reference: "invalid"`, info.Validate().Error())
 
 	info.References = []string{"00000000000000000000000000000000-some"}
-	v.Equal(t, `Invalid Deriver: ""`, info.Validate().Error())
-
-	info.Deriver = "r92m816zcm8v9zjr55lmgy4pdibjbyjp-foo.drv"
 	v.Equal(t, nil, info.Validate())
 }
 

@@ -22,21 +22,35 @@ var (
 )
 
 type Proxy struct {
-	BucketName   string `arg:"--bucket-name" env:"AWS_BUCKET_NAME" help:"Bucket to upload to"`
-	BucketRegion string `arg:"--bucket-region" env:"AWS_BUCKET_REGION" help:"AWS region the bucket is in"`
-	AWSProfile   string `arg:"--aws-profile" env:"AWS_PROFILE" help:"Profile to use for authentication"`
-	Dir          string `arg:"--dir" env:"CACHE_DIR" help:"directory for the cache"`
-	Listen       string `arg:"--listen" env:"LISTEN_ADDR" help:"Listen on this address"`
-	NixKeyFile   string `arg:"--key,required" env:"NIX_PRIVATE_KEY_FILE" help:"File containing your private nix signing key"`
+	BucketName        string   `arg:"--bucket-name,env:AWS_BUCKET_NAME" help:"Bucket to upload to"`
+	BucketRegion      string   `arg:"--bucket-region,env:AWS_BUCKET_REGION" help:"AWS region the bucket is in"`
+	AWSProfile        string   `arg:"--aws-profile,env:AWS_PROFILE" help:"Profile to use for authentication"`
+	Dir               string   `arg:"--dir,env:CACHE_DIR" help:"directory for the cache"`
+	Listen            string   `arg:"--listen,env:LISTEN_ADDR" help:"Listen on this address"`
+	SecretKeyFiles    []string `arg:"--secret-key-files,required,env:NIX_SECRET_KEY_FILES" help:"Files containing your private nix signing keys"`
+	Substituters      []string `arg:"--substituters,env:NIX_SUBSTITUTERS"`
+	TrustedPublicKeys []string `arg:"--trusted-public-keys,env:NIX_TRUSTED_PUBLIC_KEYS"`
+	CacheInfoPriority uint64   `arg:"--cache-info-priority,env:CACHE_INFO_PRIORITY" help:"Priority in nix-cache-info"`
 
 	// derived from the above
-	downloader *s3manager.Downloader
-	nixConfig  *nixConfig
-	privateKey *NixPrivateKey
-	uploader   *s3manager.Uploader
+	secretKeys  map[string]ed25519.PrivateKey
+	trustedKeys map[string]ed25519.PublicKey
+	downloader  *s3manager.Downloader
+	uploader    *s3manager.Uploader
 
 	// used for testing
 	awsCredentialsFile string
+}
+
+func defaultProxy() *Proxy {
+	return &Proxy{
+		Dir:               "./cache",
+		Listen:            ":7745",
+		SecretKeyFiles:    []string{},
+		TrustedPublicKeys: []string{},
+		Substituters:      []string{},
+		CacheInfoPriority: 50,
+	}
 }
 
 func (c *Proxy) Version() string { return buildVersion + " (" + buildCommit + ")" }
@@ -91,11 +105,18 @@ func (proxy *Proxy) SetupAWS() {
 	proxy.downloader = s3manager.NewDownloader(sess)
 }
 
-func defaultProxy() *Proxy {
-	return &Proxy{
-		Dir:    "./cache",
-		Listen: ":7070",
+func (proxy *Proxy) SetupNix() {
+	secretKeys, err := LoadNixPrivateKeys(proxy.SecretKeyFiles)
+	if err != nil {
+		log.Panic(err)
 	}
+	proxy.secretKeys = secretKeys
+
+	publicKeys, err := LoadNixPublicKeys(proxy.TrustedPublicKeys)
+	if err != nil {
+		log.Panic(err)
+	}
+	proxy.trustedKeys = publicKeys
 }
 
 func main() {
@@ -103,19 +124,8 @@ func main() {
 	arg.MustParse(proxy)
 	proxy.SetupAWS()
 	proxy.SetupDir()
-
-	key, err := LoadNixPrivateKey(proxy.NixKeyFile)
-	if err != nil {
-		log.Panic(err)
-	}
-	proxy.privateKey = key
-
-	config, err := loadNixConfig()
-	if err != nil {
-		log.Panic(err)
-	}
-	proxy.nixConfig = config
-	proxy.nixConfig.trustedPublicKeys[key.name] = key.key.Public().(ed25519.PublicKey)
+	proxy.SetupNix()
+	proxy.validateStore()
 
 	r := proxy.router()
 	log.Printf("Running on %q", proxy.Listen)

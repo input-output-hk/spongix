@@ -6,6 +6,10 @@ import (
 	"encoding/base64"
 	"fmt"
 	"io"
+	"io/fs"
+	"log"
+	"os"
+	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
@@ -19,13 +23,62 @@ type NarInfo struct {
 	URL         string
 	Compression string
 	FileHash    string
-	FileSize    uint64
+	FileSize    int64
 	NarHash     string
-	NarSize     uint64
+	NarSize     int64
 	References  []string
 	Deriver     string
 	Sig         []string
 	CA          string
+}
+
+func (proxy *Proxy) validateStore() {
+	err := filepath.Walk(proxy.Dir, func(path string, fsInfo fs.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+
+		if fsInfo.IsDir() {
+			return nil
+		}
+
+		if filepath.Ext(path) != ".narinfo" {
+			return filepath.SkipDir
+		}
+
+		info := &NarInfo{}
+		f, err := os.Open(path)
+		if err := info.Unmarshal(f); err != nil {
+			log.Printf("%q is not a valid narinfo: %s", path, err.Error())
+			// os.Remove(path)
+			return nil
+		}
+
+		narPath := filepath.Join(proxy.Dir, info.URL)
+		stat, err := os.Stat(narPath)
+		if err != nil {
+			log.Printf("%q for %q not found, removing narinfo", narPath, path)
+			// os.Remove(path)
+			return nil
+		}
+
+		ssize := stat.Size()
+
+		if ssize != info.FileSize {
+			log.Printf("%q should be size %d but has %d", narPath, info.FileSize, ssize)
+			// os.Remove(path)
+			// os.Remove(narPath)
+			return nil
+		}
+
+		log.Printf("%q is ok", narPath)
+
+		return nil
+	})
+
+	if err != nil {
+		log.Panicln(err)
+	}
 }
 
 func (info *NarInfo) Marshal(output io.Writer) error {
@@ -90,7 +143,6 @@ func (info *NarInfo) Unmarshal(input io.Reader) error {
 	scanner := bufio.NewScanner(input)
 	for scanner.Scan() {
 		line := scanner.Text()
-		pretty.Println(line)
 		parts := strings.SplitN(line, ": ", 2)
 		if len(parts) != 2 {
 			return errors.Errorf("Failed to parse line: %q", line)
@@ -111,7 +163,7 @@ func (info *NarInfo) Unmarshal(input io.Reader) error {
 		case "FileHash":
 			info.FileHash = value
 		case "FileSize":
-			if fileSize, err := strconv.ParseUint(value, 10, 64); err != nil {
+			if fileSize, err := strconv.ParseInt(value, 10, 64); err != nil {
 				return err
 			} else {
 				info.FileSize = fileSize
@@ -119,7 +171,7 @@ func (info *NarInfo) Unmarshal(input io.Reader) error {
 		case "NarHash":
 			info.NarHash = value
 		case "NarSize":
-			if narSize, err := strconv.ParseUint(value, 10, 64); err != nil {
+			if narSize, err := strconv.ParseInt(value, 10, 64); err != nil {
 				return err
 			} else {
 				info.NarSize = narSize
@@ -203,6 +255,8 @@ func (info *NarInfo) Validate() error {
 func (info *NarInfo) Verify(publicKeys map[string]ed25519.PublicKey) error {
 	signMsg := info.signMsg()
 
+	signatures := []string{}
+
 	// finally we need at leaat one matching signature
 	for _, sig := range info.Sig {
 		i := strings.IndexRune(sig, ':')
@@ -220,9 +274,13 @@ func (info *NarInfo) Verify(publicKeys map[string]ed25519.PublicKey) error {
 				return errors.Errorf("Signed by %q but signature doesn't match narinfo", name)
 			}
 		}
+
+		signatures = append(signatures, name)
 	}
 
-	return errors.New("No matching signature found")
+	pretty.Println(info)
+
+	return errors.Errorf("No matching signature found in %q", signatures)
 }
 
 func (info *NarInfo) signMsg() string {
@@ -234,12 +292,12 @@ func (info *NarInfo) signMsg() string {
 	return fmt.Sprintf("1;%s;%s;%s;%s",
 		info.StorePath,
 		info.NarHash,
-		strconv.FormatUint(info.NarSize, 10),
+		strconv.FormatInt(info.NarSize, 10),
 		strings.Join(refs, ","))
 }
 
-func (info *NarInfo) Sign(nixPrivateKey *NixPrivateKey) error {
-	signature := info.Signature(nixPrivateKey)
+func (info *NarInfo) Sign(name string, key ed25519.PrivateKey) error {
+	signature := info.Signature(name, key)
 	missing := true
 
 	for _, sig := range info.Sig {
@@ -255,7 +313,7 @@ func (info *NarInfo) Sign(nixPrivateKey *NixPrivateKey) error {
 	return nil
 }
 
-func (info *NarInfo) Signature(nixPrivateKey *NixPrivateKey) string {
-	signature := ed25519.Sign(nixPrivateKey.key, []byte(info.signMsg()))
-	return nixPrivateKey.name + ":" + base64.StdEncoding.EncodeToString(signature)
+func (info *NarInfo) Signature(name string, key ed25519.PrivateKey) string {
+	signature := ed25519.Sign(key, []byte(info.signMsg()))
+	return name + ":" + base64.StdEncoding.EncodeToString(signature)
 }

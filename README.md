@@ -10,11 +10,11 @@ A proxy that acts as binary cache for Nix.
 
 To add store paths to the cache, you can use `nix copy`:
 
-    nix copy --to 's3://cache?endpoint=127.0.0.1:7070&scheme=http' .#foo
+    nix copy --to 'http://127.0.0.1:7745/cache' .#foo
 
 To use this as your binary cache, specify it as a substituter:
 
-    nix build --option substituters http://127.0.0.1:7070 .#foo
+    nix build .#foo --option substituters http://127.0.0.1:7745/cache
 
 Public and private keys are inherited from the Nix configuration. So if your
 system already has a private key specified, you won't need to that again.
@@ -30,7 +30,7 @@ Set a `post-build-hook` in your nix configuration to a script like this:
     set -euf
     export IFS=' '
     echo "Uploading to cache: $OUT_PATHS"
-    exec nix copy --to 's3://cache?endpoint=127.0.0.1:7070&scheme=http' $OUT_PATHS
+    exec nix copy --to 'http://127.0.0.1:7745/cache' $OUT_PATHS
 
 ## TODO
 

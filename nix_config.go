@@ -14,10 +14,6 @@ type nixConfig struct {
 }
 
 type rawNixConfig struct {
-	SecretKeyFiles struct {
-		Value []string `json:"value"`
-	} `json:"secret-key-files"`
-
 	TrustedPublicKeys struct {
 		Value []string `json:"value"`
 	} `json:"trusted-public-keys"`
@@ -53,14 +49,6 @@ func loadNixConfig() (*nixConfig, error) {
 			return nil, err
 		}
 		config.trustedPublicKeys[name] = ed25519.PublicKey(key)
-	}
-
-	for _, value := range rawConfig.SecretKeyFiles.Value {
-		key, err := LoadNixPrivateKey(value)
-		if err != nil {
-			return nil, err
-		}
-		config.secretKeys[key.name] = key.key
 	}
 
 	return config, nil

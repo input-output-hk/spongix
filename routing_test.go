@@ -24,11 +24,6 @@ func testProxy() *Proxy {
 	proxy.AWSProfile = "nix-cache-proxy"
 	proxy.awsCredentialsFile = ".fake-credentials"
 
-	proxy.privateKey = &NixPrivateKey{
-		name: "test",
-		key:  ed25519.NewKeyFromSeed(bytes.Repeat([]byte{0}, 32)),
-	}
-
 	if err := os.WriteFile(".fake-credentials", []byte(fakeCredentials), 0777); err != nil {
 		log.Panic(err)
 	}
@@ -37,6 +32,10 @@ func testProxy() *Proxy {
 	proxy.SetupDir()
 
 	setupAWS(proxy)
+
+	proxy.secretKeys = map[string]ed25519.PrivateKey{
+		"test": ed25519.NewKeyFromSeed(bytes.Repeat([]byte{0}, 32)),
+	}
 
 	return proxy
 }
@@ -51,7 +50,7 @@ func Test_RoutingNixCacheInfo(t *testing.T) {
 		Header("Content-Type", "text/x-nix-cache-info").
 		Body(`StoreDir: /nix/store
 WantMassQuery: 1
-Priority: 30`).
+Priority: 50`).
 		Status(http.StatusOK).
 		End()
 }

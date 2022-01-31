@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"io"
 	"log"
 	"net/http"
@@ -9,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"time"
 
 	"github.com/aws/aws-sdk-go/aws"
@@ -71,7 +73,7 @@ func (proxy *Proxy) nixCacheInfo(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(200)
 	_, _ = w.Write([]byte(`StoreDir: /nix/store
 WantMassQuery: 1
-Priority: 30`))
+Priority: ` + strconv.FormatUint(proxy.CacheInfoPriority, 10)))
 }
 
 func (proxy *Proxy) narHead(w http.ResponseWriter, r *http.Request) {
@@ -102,6 +104,7 @@ func (proxy *Proxy) narPut(w http.ResponseWriter, r *http.Request) {
 
 	_, err = io.Copy(fdw, r.Body)
 	if internalServerError(w, errors.WithMessage(err, "Copying body")) {
+		os.Remove(path)
 		return
 	}
 
@@ -136,7 +139,12 @@ func (proxy *Proxy) narGet(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if content := proxy.parallelRequest(remotePath); content != nil {
+	ctx, cancel := context.WithTimeout(context.Background(), 1*time.Hour)
+	content := proxy.parallelRequest(ctx, remotePath)
+	defer cancel()
+
+	if content != nil {
+		defer content.Close()
 		log.Printf("Fetching %q from substituters\n", path)
 		fd, err := os.Create(path)
 		if internalServerError(w, err) {
@@ -145,7 +153,10 @@ func (proxy *Proxy) narGet(w http.ResponseWriter, r *http.Request) {
 		tee := io.TeeReader(content, fd)
 		w.Header().Add("Content-Type", "application/x-nix-nar")
 		w.WriteHeader(200)
-		io.Copy(w, tee)
+		_, err = io.Copy(w, tee)
+		if internalServerError(w, err) {
+			os.Remove(path)
+		}
 		return
 	}
 
@@ -172,11 +183,13 @@ func (proxy *Proxy) narinfoPut(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if len(info.Sig) == 0 {
-		if internalServerError(w, info.Sign(proxy.privateKey)) {
-			return
+		for name, key := range proxy.secretKeys {
+			if internalServerError(w, info.Sign(name, key)) {
+				return
+			}
 		}
 	} else {
-		if badRequest(w, info.Verify(proxy.nixConfig.trustedPublicKeys)) {
+		if badRequest(w, info.Verify(proxy.trustedKeys)) {
 			return
 		}
 	}
@@ -218,7 +231,12 @@ func (proxy *Proxy) narinfoGet(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if content := proxy.parallelRequest(remotePath); content != nil {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	content := proxy.parallelRequest(ctx, remotePath)
+	defer cancel()
+
+	if content != nil {
+		defer content.Close()
 		log.Printf("Fetching %q from substituters\n", path)
 		fd, err := os.Create(path)
 		if internalServerError(w, err) {
@@ -227,7 +245,13 @@ func (proxy *Proxy) narinfoGet(w http.ResponseWriter, r *http.Request) {
 		tee := io.TeeReader(content, fd)
 		w.Header().Add("Content-Type", "text/x-nix-narinfo")
 		w.WriteHeader(200)
-		io.Copy(w, tee)
+
+		_, err = io.Copy(w, tee)
+		if internalServerError(w, err) {
+			os.Remove(path)
+			return
+		}
+
 		return
 	}
 
@@ -245,48 +269,78 @@ func (proxy *Proxy) narinfoGet(w http.ResponseWriter, r *http.Request) {
 </Error>`))
 }
 
-func (proxy *Proxy) parallelRequest(path string) io.ReadCloser {
-	if proxy.nixConfig == nil {
-		return nil
-	}
-	substituters := proxy.nixConfig.substituters
+type cancelResponse struct {
+	Response http.Response
+	Cancel   context.CancelFunc
+}
 
-	contentChan := make(chan io.ReadCloser, len(substituters))
+func (proxy *Proxy) parallelRequest(ctx context.Context, path string) io.ReadCloser {
+	contentChan := make(chan io.ReadCloser, len(proxy.Substituters))
+	failureChan := make(chan error, len(proxy.Substituters))
 	now := time.Now()
 
-	for _, sub := range substituters {
-		go func(sub string) {
-			subUrl, err := url.Parse(sub)
-			if err != nil {
-				pretty.Logln(err)
-				return
-			}
-			subUrl.Path = path
-
-			res, err := http.Get(subUrl.String())
-			if err != nil {
-				pretty.Logln(err)
-				return
-			}
-
-			pretty.Logln(subUrl.String(), res.StatusCode, time.Now().Sub(now).String())
-			if res.StatusCode == 200 {
-				contentChan <- res.Body
-			} else {
-				contentChan <- nil
-			}
-		}(sub)
+	for _, sub := range proxy.Substituters {
+		go manageParallelReqeust(ctx, contentChan, failureChan, path, sub, now)
 	}
 
-	for count := 1; count < len(substituters); count++ {
+	for count := 0; count < len(proxy.Substituters); count++ {
 		select {
 		case content := <-contentChan:
+			log.Printf("%q found", path)
 			return content
-		case <-time.After(5 * time.Second):
-			log.Printf("timeout while getting %q", path)
-			return nil
+		case failure := <-failureChan:
+			log.Printf("%q failure %q", path, failure)
 		}
 	}
 
 	return nil
+}
+
+func manageParallelReqeust(
+	ctx context.Context,
+	contentChan chan io.ReadCloser,
+	failureChan chan error,
+	path, sub string,
+	now time.Time) {
+	content, err := doParallelReqeust(ctx, path, sub, now)
+
+	if err != nil {
+		failureChan <- err
+	}
+
+	contentChan <- content
+}
+
+func doParallelReqeust(
+	ctx context.Context,
+	path, sub string,
+	now time.Time) (io.ReadCloser, error) {
+	subUrl, err := url.Parse(sub)
+	if err != nil {
+		return nil, err
+	}
+	subUrl.Path = path
+
+	request, err := http.NewRequestWithContext(ctx, "GET", subUrl.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	res, err := http.DefaultClient.Do(request)
+	if err != nil {
+		urlErr, ok := err.(*url.Error)
+		if ok && urlErr.Err.Error() == "context canceled" {
+			return nil, err
+		}
+
+		return nil, err
+	}
+
+	pretty.Logln(subUrl.String(), res.StatusCode, time.Now().Sub(now).String())
+	if res.StatusCode == 200 {
+		return res.Body, nil
+	} else {
+		res.Body.Close()
+		return nil, errors.Errorf("Request failed with %d", res.StatusCode)
+	}
 }

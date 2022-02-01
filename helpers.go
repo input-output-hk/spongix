@@ -9,7 +9,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/kr/pretty"
 	"github.com/pkg/errors"
 )
 
@@ -88,7 +87,7 @@ func respondError(w http.ResponseWriter, err error, status int) bool {
 		return false
 	}
 
-	pretty.Println(err)
+	log.Printf("Error: %s\n", err.Error())
 	http.Error(w, err.Error(), status)
 	return true
 }
@@ -134,7 +133,8 @@ func notFoundResponse(w http.ResponseWriter, r *http.Request) {
 func loggingMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		now := time.Now()
+		log.Printf("%4s %s\n", r.Method, r.URL.String())
 		next.ServeHTTP(w, r)
-		log.Println(r.Method, r.URL.String(), time.Now().Sub(now).String())
+		log.Printf("%4s %s %s\n", r.Method, r.URL.String(), time.Now().Sub(now).String())
 	})
 }

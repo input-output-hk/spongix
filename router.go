@@ -16,7 +16,6 @@ import (
 	"github.com/aws/aws-sdk-go/aws"
 	"github.com/aws/aws-sdk-go/service/s3/s3manager"
 	"github.com/gorilla/mux"
-	"github.com/kr/pretty"
 	"github.com/pkg/errors"
 )
 
@@ -96,6 +95,7 @@ func (proxy *Proxy) narPut(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	proxy.SetupDir()
 	fdw, err := os.Create(path)
 	if internalServerError(w, errors.WithMessagef(err, "Creating path %q", path)) {
 		return
@@ -145,7 +145,7 @@ func (proxy *Proxy) narGet(w http.ResponseWriter, r *http.Request) {
 
 	if content != nil {
 		defer content.Close()
-		log.Printf("Fetching %q from substituters\n", path)
+		proxy.SetupDir()
 		fd, err := os.Create(path)
 		if internalServerError(w, err) {
 			return
@@ -238,6 +238,7 @@ func (proxy *Proxy) narinfoGet(w http.ResponseWriter, r *http.Request) {
 	if content != nil {
 		defer content.Close()
 		log.Printf("Fetching %q from substituters\n", path)
+		proxy.SetupDir()
 		fd, err := os.Create(path)
 		if internalServerError(w, err) {
 			return
@@ -277,19 +278,17 @@ type cancelResponse struct {
 func (proxy *Proxy) parallelRequest(ctx context.Context, path string) io.ReadCloser {
 	contentChan := make(chan io.ReadCloser, len(proxy.Substituters))
 	failureChan := make(chan error, len(proxy.Substituters))
-	now := time.Now()
 
 	for _, sub := range proxy.Substituters {
-		go manageParallelReqeust(ctx, contentChan, failureChan, path, sub, now)
+		go manageParallelReqeust(ctx, contentChan, failureChan, path, sub)
 	}
 
 	for count := 0; count < len(proxy.Substituters); count++ {
 		select {
 		case content := <-contentChan:
-			log.Printf("%q found", path)
 			return content
 		case failure := <-failureChan:
-			log.Printf("%q failure %q", path, failure)
+			log.Println(failure.Error())
 		}
 	}
 
@@ -301,20 +300,15 @@ func manageParallelReqeust(
 	contentChan chan io.ReadCloser,
 	failureChan chan error,
 	path, sub string,
-	now time.Time) {
-	content, err := doParallelReqeust(ctx, path, sub, now)
-
-	if err != nil {
+) {
+	if content, err := doParallelReqeust(ctx, path, sub); err != nil {
 		failureChan <- err
+	} else {
+		contentChan <- content
 	}
-
-	contentChan <- content
 }
 
-func doParallelReqeust(
-	ctx context.Context,
-	path, sub string,
-	now time.Time) (io.ReadCloser, error) {
+func doParallelReqeust(ctx context.Context, path, sub string) (io.ReadCloser, error) {
 	subUrl, err := url.Parse(sub)
 	if err != nil {
 		return nil, err
@@ -336,11 +330,14 @@ func doParallelReqeust(
 		return nil, err
 	}
 
-	pretty.Logln(subUrl.String(), res.StatusCode, time.Now().Sub(now).String())
-	if res.StatusCode == 200 {
+	switch res.StatusCode {
+	case 200:
 		return res.Body, nil
-	} else {
+	case 404, 403:
 		res.Body.Close()
-		return nil, errors.Errorf("Request failed with %d", res.StatusCode)
+		return nil, errors.Errorf("%s => %d", subUrl.String(), res.StatusCode)
+	default:
+		res.Body.Close()
+		return nil, errors.Errorf("%s => %d", subUrl.String(), res.StatusCode)
 	}
 }

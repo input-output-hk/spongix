@@ -14,7 +14,6 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/kr/pretty"
 	"github.com/pkg/errors"
 )
 
@@ -277,8 +276,6 @@ func (info *NarInfo) Verify(publicKeys map[string]ed25519.PublicKey) error {
 
 		signatures = append(signatures, name)
 	}
-
-	pretty.Println(info)
 
 	return errors.Errorf("No matching signature found in %q", signatures)
 }

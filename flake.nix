@@ -17,7 +17,6 @@
 
       overlay = final: prev: {
         nix-cache-proxy = prev.callPackage ./package.nix {
-          buildGoModule = prev.buildGo117Module;
           inherit (inputs.inclusive.lib) inclusive;
           rev = self.rev or "dirty";
         };

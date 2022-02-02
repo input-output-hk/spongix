@@ -58,7 +58,7 @@ func (c *Proxy) Version() string { return buildVersion + " (" + buildCommit + ")
 func (proxy *Proxy) Clean() {
 	clean := func(path string, d os.DirEntry, err error) error {
 		switch filepath.Ext(path) {
-		case ".narinfo", ".xz":
+		case ".narinfo", ".xz", ".nar":
 			return os.Remove(path)
 		}
 		return nil

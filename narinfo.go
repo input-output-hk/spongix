@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"crypto/ed25519"
+	"crypto/sha256"
 	"encoding/base64"
 	"fmt"
 	"io"
@@ -14,6 +15,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/numtide/go-nix/nixbase32"
 	"github.com/pkg/errors"
 )
 
@@ -41,43 +43,79 @@ func (proxy *Proxy) validateStore() {
 			return nil
 		}
 
-		if filepath.Ext(path) != ".narinfo" {
-			return filepath.SkipDir
+		switch filepath.Ext(path) {
+		case ".narinfo":
+			return validateNarinfo(proxy.Dir, path)
+		case ".xz", ".bzip2", "br", "zst", ".nar":
+			return validateNar(proxy.Dir, path)
 		}
-
-		info := &NarInfo{}
-		f, err := os.Open(path)
-		if err := info.Unmarshal(f); err != nil {
-			log.Printf("%q is not a valid narinfo: %s", path, err.Error())
-			// os.Remove(path)
-			return nil
-		}
-
-		narPath := filepath.Join(proxy.Dir, info.URL)
-		stat, err := os.Stat(narPath)
-		if err != nil {
-			log.Printf("%q for %q not found, removing narinfo", narPath, path)
-			// os.Remove(path)
-			return nil
-		}
-
-		ssize := stat.Size()
-
-		if ssize != info.FileSize {
-			log.Printf("%q should be size %d but has %d", narPath, info.FileSize, ssize)
-			// os.Remove(path)
-			// os.Remove(narPath)
-			return nil
-		}
-
-		log.Printf("%q is ok", narPath)
-
 		return nil
 	})
 
 	if err != nil {
 		log.Panicln(err)
 	}
+
+	log.Println("Cache validated")
+}
+
+func validateNar(dir, path string) error {
+	r := regexp.MustCompile(`([^/.]+)\..+`)
+	match := r.FindStringSubmatch(path)
+
+	dec, err := nixbase32.DecodeString(match[1])
+	if err != nil {
+		return err
+	}
+
+	fd, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	defer fd.Close()
+
+	hash := sha256.New()
+	if _, err := io.Copy(hash, fd); err != nil {
+		return err
+	}
+
+	realSum := fmt.Sprintf("%x", hash.Sum(nil))
+	needSum := fmt.Sprintf("%x", dec)
+
+	if realSum != needSum {
+		fmt.Printf("hash was %s but expected %s\n", realSum, needSum)
+	}
+
+	return nil
+}
+
+func validateNarinfo(dir, path string) error {
+	info := &NarInfo{}
+	f, err := os.Open(path)
+	if err := info.Unmarshal(f); err != nil {
+		log.Printf("%q is not a valid narinfo: %s", path, err.Error())
+		os.Remove(path)
+		return nil
+	}
+
+	narPath := filepath.Join(dir, info.URL)
+	stat, err := os.Stat(narPath)
+	if err != nil {
+		log.Printf("%q for %q not found, removing narinfo", narPath, path)
+		os.Remove(path)
+		return nil
+	}
+
+	ssize := stat.Size()
+
+	if ssize != info.FileSize {
+		log.Printf("%q should be size %d but has %d", narPath, info.FileSize, ssize)
+		os.Remove(path)
+		os.Remove(narPath)
+		return nil
+	}
+
+	return nil
 }
 
 func (info *NarInfo) Marshal(output io.Writer) error {
@@ -154,22 +192,43 @@ func (info *NarInfo) Unmarshal(input io.Reader) error {
 
 		switch key {
 		case "StorePath":
+			if info.StorePath != "" {
+				return errors.Errorf("Duplicate StorePath")
+			}
 			info.StorePath = value
 		case "URL":
+			if info.URL != "" {
+				return errors.Errorf("Duplicate URL")
+			}
 			info.URL = value
 		case "Compression":
+			if info.Compression != "" {
+				return errors.Errorf("Duplicate Compression")
+			}
 			info.Compression = value
 		case "FileHash":
+			if info.FileHash != "" {
+				return errors.Errorf("Duplicate FileHash")
+			}
 			info.FileHash = value
 		case "FileSize":
+			if info.FileSize != 0 {
+				return errors.Errorf("Duplicate FileSize")
+			}
 			if fileSize, err := strconv.ParseInt(value, 10, 64); err != nil {
 				return err
 			} else {
 				info.FileSize = fileSize
 			}
 		case "NarHash":
+			if info.NarHash != "" {
+				return errors.Errorf("Duplicate NarHash")
+			}
 			info.NarHash = value
 		case "NarSize":
+			if info.NarSize != 0 {
+				return errors.Errorf("Duplicate NarSize")
+			}
 			if narSize, err := strconv.ParseInt(value, 10, 64); err != nil {
 				return err
 			} else {
@@ -178,10 +237,16 @@ func (info *NarInfo) Unmarshal(input io.Reader) error {
 		case "References":
 			info.References = append(info.References, strings.Split(value, " ")...)
 		case "Deriver":
+			if info.Deriver != "" {
+				return errors.Errorf("Duplicate Deriver")
+			}
 			info.Deriver = value
 		case "Sig":
 			info.Sig = append(info.Sig, value)
 		case "CA":
+			if info.CA != "" {
+				return errors.Errorf("Duplicate CA")
+			}
 			info.CA = value
 		default:
 			return errors.Errorf("Unknown narinfo key: %q: %v", key, value)
@@ -204,7 +269,7 @@ var (
 	validNixStorePath = regexp.MustCompile(`\A/nix/store/` + nixHash + `{32}-.+\z`)
 	validStorePath    = regexp.MustCompile(`\A` + nixHash + `{32}-.+\z`)
 	validURL          = regexp.MustCompile(`\Anar/` + nixHash + `{52}(\.drv|\.nar(\.(xz|bz2|zst|lzip|lz4|br))?)\z`)
-	validCompression  = regexp.MustCompile(`\A(|none|xz|bzip2|br)\z`)
+	validCompression  = regexp.MustCompile(`\A(|none|xz|bzip2|br|zst)\z`)
 	validHash         = regexp.MustCompile(`\Asha256:` + nixHash + `{52}\z`)
 	validDeriver      = regexp.MustCompile(`\A` + nixHash + `{32}-.+\.drv\z`)
 )

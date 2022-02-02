@@ -95,16 +95,9 @@ func (proxy *Proxy) narPut(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	proxy.SetupDir()
-	fdw, err := os.Create(path)
-	if internalServerError(w, errors.WithMessagef(err, "Creating path %q", path)) {
-		return
-	}
-	defer fdw.Close()
-
-	_, err = io.Copy(fdw, r.Body)
-	if internalServerError(w, errors.WithMessage(err, "Copying body")) {
-		os.Remove(path)
+	if !proxy.safeCreate(w, path, func(_w io.Writer) io.Reader {
+		return r.Body
+	}) {
 		return
 	}
 
@@ -115,8 +108,11 @@ func (proxy *Proxy) narPut(w http.ResponseWriter, r *http.Request) {
 		}
 		defer f.Close()
 
-		input := &s3manager.UploadInput{Bucket: aws.String(proxy.BucketName), Key: aws.String(s3Path), Body: f}
-		result, err := proxy.uploader.Upload(input)
+		result, err := proxy.uploader.Upload(&s3manager.UploadInput{
+			Bucket: aws.String(proxy.BucketName),
+			Key:    aws.String(s3Path),
+			Body:   f,
+		})
 		if err != nil {
 			log.Panicf("failed to upload file, %v", err)
 		}
@@ -145,18 +141,14 @@ func (proxy *Proxy) narGet(w http.ResponseWriter, r *http.Request) {
 
 	if content != nil {
 		defer content.Close()
-		proxy.SetupDir()
-		fd, err := os.Create(path)
-		if internalServerError(w, err) {
-			return
-		}
-		tee := io.TeeReader(content, fd)
-		w.Header().Add("Content-Type", "application/x-nix-nar")
-		w.WriteHeader(200)
-		_, err = io.Copy(w, tee)
-		if internalServerError(w, err) {
-			os.Remove(path)
-		}
+
+		proxy.safeCreate(w, path, func(output io.Writer) io.Reader {
+			tee := io.TeeReader(content, w)
+			w.Header().Add("Content-Type", "application/x-nix-nar")
+			w.WriteHeader(200)
+			return tee
+		})
+
 		return
 	}
 
@@ -199,7 +191,9 @@ func (proxy *Proxy) narinfoPut(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if internalServerError(w, os.WriteFile(path, signed.Bytes(), 0644)) {
+	if !proxy.safeCreate(w, path, func(io.Writer) io.Reader {
+		return bytes.NewReader(signed.Bytes())
+	}) {
 		return
 	}
 
@@ -237,21 +231,13 @@ func (proxy *Proxy) narinfoGet(w http.ResponseWriter, r *http.Request) {
 
 	if content != nil {
 		defer content.Close()
-		log.Printf("Fetching %q from substituters\n", path)
-		proxy.SetupDir()
-		fd, err := os.Create(path)
-		if internalServerError(w, err) {
-			return
-		}
-		tee := io.TeeReader(content, fd)
-		w.Header().Add("Content-Type", "text/x-nix-narinfo")
-		w.WriteHeader(200)
 
-		_, err = io.Copy(w, tee)
-		if internalServerError(w, err) {
-			os.Remove(path)
-			return
-		}
+		proxy.safeCreate(w, path, func(output io.Writer) io.Reader {
+			tee := io.TeeReader(content, w)
+			w.Header().Add("Content-Type", "text/x-nix-narinfo")
+			w.WriteHeader(200)
+			return tee
+		})
 
 		return
 	}
@@ -340,4 +326,37 @@ func doParallelReqeust(ctx context.Context, path, sub string) (io.ReadCloser, er
 		res.Body.Close()
 		return nil, errors.Errorf("%s => %d", subUrl.String(), res.StatusCode)
 	}
+}
+
+func (proxy *Proxy) safeCreate(
+	w http.ResponseWriter,
+	path string,
+	fn func(io.Writer) io.Reader,
+) bool {
+	proxy.SetupDir()
+
+	partial, err := os.Create(path + ".partial")
+	if internalServerError(w, errors.WithMessagef(err, "Creating path %q", path)) {
+		return false
+	}
+	defer partial.Close()
+
+	input := fn(partial)
+
+	_, err = io.Copy(partial, input)
+	if internalServerError(w, errors.WithMessagef(err, "Copying body to %q", path)) {
+		os.Remove(path + ".partial")
+		return false
+	}
+
+	partial.Close()
+
+	err = os.Rename(path+".partial", path)
+	if internalServerError(w, errors.WithMessagef(err, "Renaming %q", path)) {
+		os.Remove(path + ".partial")
+		os.Remove(path)
+		return false
+	}
+
+	return true
 }

@@ -92,6 +92,7 @@ in {
         WorkingDirectory = "/var/lib/private/nix-cache-proxy";
         LoadCredential = lib.mapAttrsToList (name: value: "${name}:${value}")
           cfg.secretKeyFiles;
+        ReadWritePaths = cfg.cacheDir;
       };
     };
   };

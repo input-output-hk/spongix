@@ -125,7 +125,7 @@ func main() {
 	proxy.SetupAWS()
 	proxy.SetupDir()
 	proxy.SetupNix()
-	proxy.validateStore()
+	go proxy.validateStore()
 
 	r := proxy.router()
 	log.Printf("Running on %q", proxy.Listen)

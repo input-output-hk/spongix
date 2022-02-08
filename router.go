@@ -180,10 +180,9 @@ func (proxy *Proxy) narinfoPut(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 		}
-	} else {
-		if badRequest(w, info.Verify(proxy.trustedKeys)) {
-			return
-		}
+	} else if err = info.Verify(proxy.trustedKeys); err != nil {
+		badRequest(w, errors.WithMessagef(err, "Please sign %s", info.StorePath))
+		return
 	}
 
 	signed := &bytes.Buffer{}

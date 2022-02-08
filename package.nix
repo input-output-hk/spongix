@@ -1,7 +1,7 @@
 { buildGoModule, inclusive, rev }:
 buildGoModule rec {
   pname = "nix-cache-proxy";
-  version = "2022.02.08.001";
+  version = "2022.02.08.002";
   vendorSha256 = "sha256-H5Zolka/dLLi4qkmXM16Nnmf8xQAGbKJ3xbEo+h3Imc=";
 
   src = inclusive ./. [

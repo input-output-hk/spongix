@@ -335,8 +335,9 @@ func (proxy *Proxy) safeCreate(
 ) bool {
 	proxy.SetupDir()
 
-	partial, err := os.Create(path + ".partial")
-	if internalServerError(w, errors.WithMessagef(err, "Creating path %q", path)) {
+	partPath := path + ".partial"
+	partial, err := os.Create(partPath)
+	if internalServerError(w, errors.WithMessagef(err, "Creating path %q", partPath)) {
 		return false
 	}
 	defer partial.Close()
@@ -344,16 +345,26 @@ func (proxy *Proxy) safeCreate(
 	input := fn(partial)
 
 	_, err = io.Copy(partial, input)
-	if internalServerError(w, errors.WithMessagef(err, "Copying body to %q", path)) {
-		os.Remove(path + ".partial")
+	if internalServerError(w, errors.WithMessagef(err, "Copying body to %q", partPath)) {
+		os.Remove(partPath)
 		return false
 	}
 
-	partial.Close()
+	err = partial.Sync()
+	if internalServerError(w, errors.WithMessagef(err, "Syncing %q", partPath)) {
+		os.Remove(partPath)
+		return false
+	}
 
-	err = os.Rename(path+".partial", path)
-	if internalServerError(w, errors.WithMessagef(err, "Renaming %q", path)) {
-		os.Remove(path + ".partial")
+	err = partial.Close()
+	if internalServerError(w, errors.WithMessagef(err, "Closing %q", partPath)) {
+		os.Remove(partPath)
+		return false
+	}
+
+	err = os.Rename(partPath, path)
+	if internalServerError(w, errors.WithMessagef(err, "Renaming %q to %q", partPath, path)) {
+		os.Remove(partPath)
 		os.Remove(path)
 		return false
 	}

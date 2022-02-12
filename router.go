@@ -16,7 +16,9 @@ import (
 	"github.com/aws/aws-sdk-go/aws"
 	"github.com/aws/aws-sdk-go/service/s3/s3manager"
 	"github.com/gorilla/mux"
+	"github.com/julienp/httplog"
 	"github.com/pkg/errors"
+	"github.com/sirupsen/logrus"
 )
 
 var (
@@ -24,9 +26,10 @@ var (
 )
 
 func (proxy *Proxy) router() *mux.Router {
+	log := logrus.StandardLogger()
 	r := mux.NewRouter()
 	r.NotFoundHandler = notFound{}
-	r.Use(loggingMiddleware)
+	r.Use(httplog.WithHTTPLogging(log.WithContext(context.Background())))
 
 	// public cache
 	r.HandleFunc("/nix-cache-info", proxy.nixCacheInfo).Methods("GET")
@@ -155,7 +158,6 @@ func (proxy *Proxy) narGet(w http.ResponseWriter, r *http.Request) {
 	w.Header().Add("Content-Type", "text/html")
 	w.WriteHeader(404)
 	_, _ = w.Write([]byte("404"))
-	return
 }
 
 func (proxy *Proxy) narinfoPut(w http.ResponseWriter, r *http.Request) {
@@ -181,7 +183,7 @@ func (proxy *Proxy) narinfoPut(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	} else if err = info.Verify(proxy.trustedKeys); err != nil {
-		badRequest(w, errors.WithMessagef(err, "Please sign %s", info.StorePath))
+		badRequest(w, errors.WithMessagef(err, "%s signatures are untrusted", info.StorePath))
 		return
 	}
 
@@ -253,11 +255,6 @@ func (proxy *Proxy) narinfoGet(w http.ResponseWriter, r *http.Request) {
   <RequestId>16B81914FBB8345F</RequestId>
   <HostId>672a09d6-39bb-41a6-bcf3-b0375d351cfe</HostId>
 </Error>`))
-}
-
-type cancelResponse struct {
-	Response http.Response
-	Cancel   context.CancelFunc
 }
 
 func (proxy *Proxy) parallelRequest(ctx context.Context, path string) io.ReadCloser {
@@ -332,7 +329,7 @@ func (proxy *Proxy) safeCreate(
 	path string,
 	fn func(io.Writer) io.Reader,
 ) bool {
-	proxy.SetupDir()
+	proxy.SetupDir("nar")
 
 	partPath := path + ".partial"
 	partial, err := os.Create(partPath)

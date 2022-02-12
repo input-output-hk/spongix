@@ -27,7 +27,7 @@ in {
 
       cacheDir = lib.mkOption {
         type = lib.types.str;
-        default = "/var/lib/private/nix-cache-proxy/cache";
+        default = "/var/lib/nix-cache-proxy/cache";
       };
 
       host = lib.mkOption {
@@ -89,7 +89,7 @@ in {
         Group = "nix-cache-proxy";
         DynamicUser = true;
         StateDirectory = "nix-cache-proxy";
-        WorkingDirectory = "/var/lib/private/nix-cache-proxy";
+        WorkingDirectory = "/var/lib/nix-cache-proxy";
         LoadCredential = lib.mapAttrsToList (name: value: "${name}:${value}")
           cfg.secretKeyFiles;
         ReadWritePaths = cfg.cacheDir;

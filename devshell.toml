@@ -24,4 +24,6 @@ packages = [
   "nixfmt",
   "gnumake",
   "golangci-lint",
+  "dgraph",
+  "sqlite-interactive",
 ]

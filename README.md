@@ -8,16 +8,26 @@ A proxy that acts as binary cache for Nix.
 
 ## Usage
 
+Start `nix-cache-proxy`:
+
+    nix key generate-secret --key-name foo > skey
+    nix build
+    ./result/bin/nix-cache-proxy \
+      --substituters "https://cache.nixos.org" "https://hydra.iohk.io" \
+      --secret-key-files ./skey \
+      --trusted-public-keys "cache.nixos.org-1:6NCHdD59X431o0gWypbMrAURkbJ16ZPMQFGspcDShjY=" "hydra.iohk.io:f/Ea+s+dFdN+3Y/G+FDgSq+a5NEWhJGzdjvKNGv0/EQ=" \
+      --listen :7745 \
+      --dir /tmp/nix-cache-proxy
+
 To add store paths to the cache, you can use `nix copy`:
 
-    nix copy --to 'http://127.0.0.1:7745/cache' .#foo
+    nix copy --to 'http://127.0.0.1:7745?compression=none' github:nixos/nix
 
 To use this as your binary cache, specify it as a substituter:
 
-    nix build .#foo --option substituters http://127.0.0.1:7745/cache
-
-Public and private keys are inherited from the Nix configuration. So if your
-system already has a private key specified, you won't need to that again.
+    nix build github:nixos/nix \
+      --option substituters http://127.0.0.1:7745 \
+      --option trusted-public-keys "$(< pkey)"
 
 Signatures are checked against the the `trusted-public-keys` of your
 configuration.
@@ -30,13 +40,20 @@ Set a `post-build-hook` in your nix configuration to a script like this:
     set -euf
     export IFS=' '
     echo "Uploading to cache: $OUT_PATHS"
-    exec nix copy --to 'http://127.0.0.1:7745/cache' $OUT_PATHS
+    exec nix copy --to 'http://127.0.0.1:7745?compression=none' $OUT_PATHS
 
 ## TODO
 
-- [x] Write tests
-- [x] Distribute lookups across multiple caches
-- [x] Proper CLI usage
+- [ ] Write better integration tests (with cicero)
 - [x] Verify existing signatures
+- [x] Store narinfo in a database
+- [ ] Upload to S3 as well as the local store
+- [ ] Identify and solve concurrency issues
+- [ ] A way to horizontally scale (probably by just locking via consul, s3, raft, postgres, rqlite, dqlite, ...)
+- [ ] Additional signing for a set of allowed public keys
 - [ ] Disk cache size limits and LRU eviction
-- [ ] Metrics for cache usage
+- [ ] Benchmark of desync index vs db lookup performance
+- [ ] Forward lookups across multiple upstream caches
+- [ ] Proper CLI usage
+- [ ] Prometheus metrics
+- [ ] Healthchecks

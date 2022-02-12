@@ -20,6 +20,7 @@ import (
 )
 
 type NarInfo struct {
+	Name        string
 	StorePath   string
 	URL         string
 	Compression string
@@ -45,7 +46,7 @@ func (proxy *Proxy) validateStore() {
 
 		switch filepath.Ext(path) {
 		case ".narinfo":
-			return validateNarinfo(proxy.Dir, path)
+			return validateNarinfo(proxy.Dir, path, true)
 		case ".xz", ".bzip2", "br", "zst", ".nar":
 			return validateNar(proxy.Dir, path)
 		}
@@ -89,12 +90,19 @@ func validateNar(dir, path string) error {
 	return nil
 }
 
-func validateNarinfo(dir, path string) error {
+func validateNarinfo(dir, path string, remove bool) error {
 	info := &NarInfo{}
 	f, err := os.Open(path)
+	if err != nil {
+		log.Printf("%q couldn't be opened: %s", path, err.Error())
+		return nil
+	}
+
 	if err := info.Unmarshal(f); err != nil {
 		log.Printf("%q is not a valid narinfo: %s", path, err.Error())
-		os.Remove(path)
+		if remove {
+			os.Remove(path)
+		}
 		return nil
 	}
 
@@ -102,7 +110,9 @@ func validateNarinfo(dir, path string) error {
 	stat, err := os.Stat(narPath)
 	if err != nil {
 		log.Printf("%q for %q not found, removing narinfo", narPath, path)
-		os.Remove(path)
+		if remove {
+			os.Remove(path)
+		}
 		return nil
 	}
 
@@ -110,8 +120,10 @@ func validateNarinfo(dir, path string) error {
 
 	if ssize != info.FileSize {
 		log.Printf("%q should be size %d but has %d", narPath, info.FileSize, ssize)
-		os.Remove(path)
-		os.Remove(narPath)
+		if remove {
+			os.Remove(path)
+			os.Remove(narPath)
+		}
 		return nil
 	}
 
@@ -196,6 +208,8 @@ func (info *NarInfo) Unmarshal(input io.Reader) error {
 				return errors.Errorf("Duplicate StorePath")
 			}
 			info.StorePath = value
+			parts := strings.SplitN(filepath.Base(value), "-", 2)
+			info.Name = parts[0]
 		case "URL":
 			if info.URL != "" {
 				return errors.Errorf("Duplicate URL")
@@ -378,4 +392,20 @@ func (info *NarInfo) Sign(name string, key ed25519.PrivateKey) error {
 func (info *NarInfo) Signature(name string, key ed25519.PrivateKey) string {
 	signature := ed25519.Sign(key, []byte(info.signMsg()))
 	return name + ":" + base64.StdEncoding.EncodeToString(signature)
+}
+
+func (info *NarInfo) NarHashType() string {
+	return strings.SplitN(info.NarHash, ":", 2)[0]
+}
+
+func (info *NarInfo) NarHashValue() string {
+	return strings.SplitN(info.NarHash, ":", 2)[1]
+}
+
+func (info *NarInfo) FileHashType() string {
+	return strings.SplitN(info.FileHash, ":", 2)[0]
+}
+
+func (info *NarInfo) FileHashValue() string {
+	return strings.SplitN(info.FileHash, ":", 2)[1]
 }

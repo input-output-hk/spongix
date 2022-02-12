@@ -3,11 +3,11 @@ package main
 import (
 	"crypto/ed25519"
 	"encoding/base64"
+	"fmt"
 	"log"
 	"net/http"
 	"os"
 	"strings"
-	"time"
 
 	"github.com/pkg/errors"
 )
@@ -87,7 +87,6 @@ func respondError(w http.ResponseWriter, err error, status int) bool {
 		return false
 	}
 
-	log.Printf("Error: %s\n", err.Error())
 	http.Error(w, err.Error(), status)
 	return true
 }
@@ -100,41 +99,26 @@ func (n notFound) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 func notFoundResponse(w http.ResponseWriter, r *http.Request) {
 	log.Println(r.Method, r.URL.Path)
-
-	parts := strings.Split(r.URL.Path, "/")
-	l := len(parts)
-
-	var bucket, key string
-
-	if l == 0 {
-		w.WriteHeader(404)
-		return
-	}
-	if l > 0 {
-		bucket = parts[0]
-	}
-	if l > 1 {
-		key = parts[l-1]
-	}
-
 	w.WriteHeader(404)
-	_, _ = w.Write([]byte(`<?xml version="1.0" encoding="UTF-8"?>
-<Error>
-  <Code>NoSuchKey</Code>
-  <Message>The specified key does not exist.</Message>
-  <Key>` + key + `</Key>
-  <BucketName>` + bucket + `</BucketName>
-  <Resource>` + r.RequestURI + `</Resource>
-  <RequestId>16B81914FBB8345F</RequestId>
-  <HostId>672a09d6-39bb-41a6-bcf3-b0375d351cfe</HostId>
-</Error>`))
+	_, _ = w.Write([]byte(r.RequestURI + " not found"))
 }
 
-func loggingMiddleware(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		now := time.Now()
-		log.Printf("%4s %s\n", r.Method, r.URL.String())
-		next.ServeHTTP(w, r)
-		log.Printf("%4s %s %s\n", r.Method, r.URL.String(), time.Now().Sub(now).String())
-	})
+func fatal(err error) {
+	if err != nil {
+		log.Panic(err)
+	}
+}
+
+func ByteCountSI(b int64) string {
+	const unit = 1000
+	if b < unit {
+		return fmt.Sprintf("%d B", b)
+	}
+	div, exp := int64(unit), 0
+	for n := b / unit; n >= unit; n /= unit {
+		div *= unit
+		exp++
+	}
+	return fmt.Sprintf("%.1f %cB",
+		float64(b)/float64(div), "kMGTPE"[exp])
 }

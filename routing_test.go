@@ -29,7 +29,7 @@ func testProxy() *Proxy {
 	}
 
 	proxy.Clean()
-	proxy.SetupDir()
+	proxy.SetupDir("nar")
 
 	setupAWS(proxy)
 

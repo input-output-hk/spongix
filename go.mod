@@ -4,14 +4,14 @@ go 1.17
 
 require (
 	github.com/alexflint/go-arg v1.4.2
-	github.com/aws/aws-sdk-go v1.33.13
 	github.com/folbricht/desync v0.9.2
 	github.com/gorilla/mux v1.8.0
-	github.com/julienp/httplog v0.1.1
+	github.com/kr/pretty v0.1.0
 	github.com/mattn/go-sqlite3 v1.14.11
+	github.com/minio/minio-go/v6 v6.0.57
 	github.com/numtide/go-nix v0.0.0-20211215191921-37a8ad2f9e4f
 	github.com/pkg/errors v0.9.1
-	github.com/sirupsen/logrus v1.7.0
+	github.com/smartystreets/assertions v0.0.0-20180927180507-b2de0cb4f26d
 	github.com/steinfletcher/apitest v1.5.11
 	go.uber.org/zap v1.10.0
 )
@@ -29,20 +29,20 @@ require (
 	github.com/golang/protobuf v1.4.3 // indirect
 	github.com/googleapis/gax-go/v2 v2.0.5 // indirect
 	github.com/hanwen/go-fuse/v2 v2.0.3 // indirect
-	github.com/jmespath/go-jmespath v0.3.0 // indirect
 	github.com/json-iterator/go v1.1.9 // indirect
 	github.com/jstemmer/go-junit-report v0.9.1 // indirect
 	github.com/klauspost/compress v1.11.4 // indirect
 	github.com/klauspost/cpuid v1.2.3 // indirect
 	github.com/kr/fs v0.1.0 // indirect
+	github.com/kr/text v0.1.0 // indirect
 	github.com/minio/md5-simd v1.1.0 // indirect
-	github.com/minio/minio-go/v6 v6.0.57 // indirect
 	github.com/minio/sha256-simd v0.1.1 // indirect
 	github.com/mitchellh/go-homedir v1.1.0 // indirect
 	github.com/modern-go/concurrent v0.0.0-20180306012644-bacd9c7ef1dd // indirect
 	github.com/modern-go/reflect2 v1.0.1 // indirect
 	github.com/pkg/sftp v1.12.0 // indirect
 	github.com/pkg/xattr v0.4.3 // indirect
+	github.com/sirupsen/logrus v1.7.0 // indirect
 	go.opencensus.io v0.22.5 // indirect
 	go.uber.org/atomic v1.4.0 // indirect
 	go.uber.org/multierr v1.1.0 // indirect

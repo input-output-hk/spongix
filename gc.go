@@ -166,29 +166,29 @@ func (proxy *Proxy) gcOnce(cache map[string]*ChunkStat) {
 	}
 
 	proxy.log.Debug("gc",
-		zap.String("max", ByteCountSI(int64(maxCacheSize))),
-		zap.String("total", ByteCountSI(int64(onDiskSize))),
-		zap.Uint64("total_bytes", onDiskSize),
-		zap.String("indexed", ByteCountSI(int64(indicesSize))),
-		zap.Uint64("indexed_bytes", indicesSize),
-		zap.Duration("store_walk_duration", time.Since(startWalkStore)),
-		zap.Duration("index_walk_duration", time.Since(startIndexWalk)),
+		zap.String("cache_max", ByteCountSI(int64(maxCacheSize))),
+		zap.Uint64("cache_max_bytes", maxCacheSize),
+		zap.Int("chunk_files", len(oldChunks)+len(newChunks)),
+		zap.String("chunk_human", ByteCountSI(int64(onDiskSize))),
+		zap.Uint64("chunk_bytes", onDiskSize),
+		zap.String("index_human", ByteCountSI(int64(indicesSize))),
+		zap.Uint64("index_bytes", indicesSize),
+		zap.Duration("store_walk", time.Since(startWalkStore)),
+		zap.Duration("index_walk", time.Since(startIndexWalk)),
 		zap.Int("chunks", len(chunkStats)),
+		zap.Int("index_gc_files", len(indicesToDelete)),
+		zap.Uint64("index_gc_bytes", indicesToDeleteSize),
+		zap.Uint64("chunk_gc_bytes", chunksToDeleteSize),
 	)
 
 	if len(indicesToDelete) == 0 {
-		proxy.log.Debug("no indices to remove",
-			zap.Duration("duration", time.Since(startIndexWalk)),
-		)
-
 		return
 	}
 
 	proxy.log.Debug("indices to remove",
-		zap.Duration("duration", time.Since(startIndexWalk)),
-		zap.Int("indices", len(indicesToDelete)),
-		zap.Uint64("indices_size", indicesToDeleteSize),
-		zap.Uint64("chunks_size", chunksToDeleteSize),
+		zap.Int("index_files", len(indicesToDelete)),
+		zap.Uint64("index_files", indicesToDeleteSize),
+		zap.Uint64("chunk_fies", chunksToDeleteSize),
 	)
 
 	if err := proxy.deleteNarinfos(indicesToDelete); err != nil {

@@ -6,9 +6,10 @@
     inclusive.url = "github:input-output-hk/nix-inclusive";
     nixpkgs.url = "github:nixos/nixpkgs/nixpkgs-unstable";
     utils.url = "github:kreisys/flake-utils";
+    cicero.url = "github:input-output-hk/cicero";
   };
 
-  outputs = { self, nixpkgs, utils, devshell, ... }@inputs:
+  outputs = { self, nixpkgs, utils, devshell, cicero, ... }@inputs:
     utils.lib.simpleFlake {
       systems = [ "x86_64-linux" ];
       inherit nixpkgs;
@@ -32,5 +33,11 @@
       nixosModules.nix-cache-proxy = import ./module.nix;
 
       devShell = { devshell }: devshell.fromTOML ./devshell.toml;
+
+      extraOutputs.ciceroActions = cicero.lib.callActionsWithExtraArgs rec {
+        inherit (cicero.lib) std;
+        inherit (nixpkgs) lib;
+        actionLib = import "${cicero}/action-lib.nix" { inherit std lib; };
+      } ./cicero/actions;
     };
 }

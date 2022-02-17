@@ -26,4 +26,5 @@ packages = [
   "golangci-lint",
   "dgraph",
   "sqlite-interactive",
+  "minio",
 ]

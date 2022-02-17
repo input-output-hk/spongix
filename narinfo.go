@@ -17,9 +17,10 @@ import (
 
 	"github.com/numtide/go-nix/nixbase32"
 	"github.com/pkg/errors"
+	"go.uber.org/zap"
 )
 
-type NarInfo struct {
+type Narinfo struct {
 	Name        string
 	StorePath   string
 	URL         string
@@ -34,7 +35,7 @@ type NarInfo struct {
 	CA          string
 }
 
-func (proxy *Proxy) validateStore() {
+func (proxy *Proxy) ValidateStore() {
 	err := filepath.Walk(proxy.Dir, func(path string, fsInfo fs.FileInfo, err error) error {
 		if err != nil {
 			return err
@@ -46,7 +47,7 @@ func (proxy *Proxy) validateStore() {
 
 		switch filepath.Ext(path) {
 		case ".narinfo":
-			return validateNarinfo(proxy.Dir, path, true)
+			return proxy.validateNarinfo(proxy.Dir, path, true)
 		case ".xz", ".bzip2", "br", "zst", ".nar":
 			return validateNar(proxy.Dir, path)
 		}
@@ -57,7 +58,7 @@ func (proxy *Proxy) validateStore() {
 		log.Panicln(err)
 	}
 
-	log.Println("Cache validated")
+	proxy.log.Info("Cache validated")
 }
 
 func validateNar(dir, path string) error {
@@ -90,16 +91,16 @@ func validateNar(dir, path string) error {
 	return nil
 }
 
-func validateNarinfo(dir, path string, remove bool) error {
-	info := &NarInfo{}
+func (proxy *Proxy) validateNarinfo(dir, path string, remove bool) error {
+	info := &Narinfo{}
 	f, err := os.Open(path)
 	if err != nil {
-		log.Printf("%q couldn't be opened: %s", path, err.Error())
+		proxy.log.Error("Failed to open narinfo", zap.String("path", path), zap.Error(err))
 		return nil
 	}
 
 	if err := info.Unmarshal(f); err != nil {
-		log.Printf("%q is not a valid narinfo: %s", path, err.Error())
+		proxy.log.Error("Failed to unmarshal narinfo", zap.String("path", path), zap.Error(err))
 		if remove {
 			os.Remove(path)
 		}
@@ -109,7 +110,7 @@ func validateNarinfo(dir, path string, remove bool) error {
 	narPath := filepath.Join(dir, info.URL)
 	stat, err := os.Stat(narPath)
 	if err != nil {
-		log.Printf("%q for %q not found, removing narinfo", narPath, path)
+		proxy.log.Error("Failed to find NAR", zap.String("nar_path", narPath), zap.String("path", path), zap.Error(err))
 		if remove {
 			os.Remove(path)
 		}
@@ -120,6 +121,7 @@ func validateNarinfo(dir, path string, remove bool) error {
 
 	if ssize != info.FileSize {
 		log.Printf("%q should be size %d but has %d", narPath, info.FileSize, ssize)
+		proxy.log.Error("NAR has wrong size", zap.String("nar_path", narPath), zap.String("path", path), zap.Int64("expected", info.FileSize), zap.Int64("actual", ssize))
 		if remove {
 			os.Remove(path)
 			os.Remove(narPath)
@@ -130,7 +132,7 @@ func validateNarinfo(dir, path string, remove bool) error {
 	return nil
 }
 
-func (info *NarInfo) Marshal(output io.Writer) error {
+func (info *Narinfo) Marshal(output io.Writer) error {
 	out := bufio.NewWriter(output)
 
 	write := func(format string, arg interface{}) error {
@@ -188,10 +190,11 @@ func (info *NarInfo) Marshal(output io.Writer) error {
 }
 
 // TODO: replace with a validating parser
-func (info *NarInfo) Unmarshal(input io.Reader) error {
+func (info *Narinfo) Unmarshal(input io.Reader) error {
 	scanner := bufio.NewScanner(input)
 	for scanner.Scan() {
 		line := scanner.Text()
+
 		parts := strings.SplitN(line, ": ", 2)
 		if len(parts) != 2 {
 			return errors.Errorf("Failed to parse line: %q", line)
@@ -288,7 +291,7 @@ var (
 	validDeriver      = regexp.MustCompile(`\A` + nixHash + `{32}-.+\.drv\z`)
 )
 
-func (info *NarInfo) Validate() error {
+func (info *Narinfo) Validate() error {
 	if !validNixStorePath.MatchString(info.StorePath) {
 		return errors.Errorf("Invalid StorePath: %q", info.StorePath)
 	}
@@ -330,10 +333,21 @@ func (info *NarInfo) Validate() error {
 	return nil
 }
 
-func (info *NarInfo) Verify(publicKeys map[string]ed25519.PublicKey) error {
-	signMsg := info.signMsg()
+// ensures only valid sigantures are kept in the Narinfo
+func (info *Narinfo) SanitizeSignatures(publicKeys map[string]ed25519.PublicKey) {
+	valid, _ := info.ValidInvalidSignatures(publicKeys)
+	info.Sig = valid
+}
 
-	signatures := []string{}
+// Returns valid and invalid signatures
+func (info *Narinfo) ValidInvalidSignatures(publicKeys map[string]ed25519.PublicKey) ([]string, []string) {
+	if len(info.Sig) == 0 {
+		return nil, nil
+	}
+
+	signMsg := info.signMsg()
+	valid := []string{}
+	invalid := []string{}
 
 	// finally we need at leaat one matching signature
 	for _, sig := range info.Sig {
@@ -342,24 +356,20 @@ func (info *NarInfo) Verify(publicKeys map[string]ed25519.PublicKey) error {
 		sigStr := sig[i+1:]
 		signature, err := base64.StdEncoding.DecodeString(sigStr)
 		if err != nil {
-			return errors.Errorf("Signature decoding failed for %q", sigStr)
-		}
-
-		if key, ok := publicKeys[name]; ok {
+			invalid = append(invalid, sig)
+		} else if key, ok := publicKeys[name]; ok {
 			if ed25519.Verify(key, []byte(signMsg), signature) {
-				return nil
+				valid = append(valid, sig)
 			} else {
-				return errors.Errorf("Signed by %q but signature doesn't match narinfo", name)
+				invalid = append(invalid, sig)
 			}
 		}
-
-		signatures = append(signatures, name)
 	}
 
-	return errors.Errorf("No matching signature found in %q", signatures)
+	return valid, invalid
 }
 
-func (info *NarInfo) signMsg() string {
+func (info *Narinfo) signMsg() string {
 	refs := []string{}
 	for _, ref := range info.References {
 		refs = append(refs, "/nix/store/"+ref)
@@ -372,7 +382,7 @@ func (info *NarInfo) signMsg() string {
 		strings.Join(refs, ","))
 }
 
-func (info *NarInfo) Sign(name string, key ed25519.PrivateKey) error {
+func (info *Narinfo) Sign(name string, key ed25519.PrivateKey) error {
 	signature := info.Signature(name, key)
 	missing := true
 
@@ -389,23 +399,23 @@ func (info *NarInfo) Sign(name string, key ed25519.PrivateKey) error {
 	return nil
 }
 
-func (info *NarInfo) Signature(name string, key ed25519.PrivateKey) string {
+func (info *Narinfo) Signature(name string, key ed25519.PrivateKey) string {
 	signature := ed25519.Sign(key, []byte(info.signMsg()))
 	return name + ":" + base64.StdEncoding.EncodeToString(signature)
 }
 
-func (info *NarInfo) NarHashType() string {
+func (info *Narinfo) NarHashType() string {
 	return strings.SplitN(info.NarHash, ":", 2)[0]
 }
 
-func (info *NarInfo) NarHashValue() string {
+func (info *Narinfo) NarHashValue() string {
 	return strings.SplitN(info.NarHash, ":", 2)[1]
 }
 
-func (info *NarInfo) FileHashType() string {
+func (info *Narinfo) FileHashType() string {
 	return strings.SplitN(info.FileHash, ":", 2)[0]
 }
 
-func (info *NarInfo) FileHashValue() string {
+func (info *Narinfo) FileHashValue() string {
 	return strings.SplitN(info.FileHash, ":", 2)[1]
 }

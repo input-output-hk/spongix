@@ -1,73 +1,39 @@
 package main
 
 import (
-	"bytes"
 	"context"
-	"io"
-	"log"
+	"database/sql"
+	"io/ioutil"
 	"net/http"
-	"net/url"
 	"os"
 	"path/filepath"
-	"regexp"
 	"strconv"
-	"time"
 
-	"github.com/aws/aws-sdk-go/aws"
-	"github.com/aws/aws-sdk-go/service/s3/s3manager"
+	"github.com/folbricht/desync"
 	"github.com/gorilla/mux"
-	"github.com/julienp/httplog"
+	_ "github.com/mattn/go-sqlite3"
 	"github.com/pkg/errors"
-	"github.com/sirupsen/logrus"
+	"go.uber.org/zap"
 )
 
-var (
-	narinfoPattern = regexp.MustCompile(`\A[0-9a-df-np-sv-z]{32}\.narinfo\z`)
-)
-
-func (proxy *Proxy) router() *mux.Router {
-	log := logrus.StandardLogger()
+func (proxy *Proxy) routerV2() *mux.Router {
 	r := mux.NewRouter()
 	r.NotFoundHandler = notFound{}
-	r.Use(httplog.WithHTTPLogging(log.WithContext(context.Background())))
+	r.Use(withHTTPLogging(proxy.log))
 
-	// public cache
 	r.HandleFunc("/nix-cache-info", proxy.nixCacheInfo).Methods("GET")
-	r.HandleFunc("/{key}", proxy.narinfoGet).Methods("GET")
-	r.HandleFunc("/nar/{key}", proxy.narHead).Methods("HEAD")
-	r.HandleFunc("/nar/{key}", proxy.narGet).Methods("GET")
 
-	// S3 compat endpoints used by `nix copy`
-	r.HandleFunc("/{bucket:[a-z-]+}/nix-cache-info", proxy.nixCacheInfo).Methods("GET")
+	narinfo := "/{hash:[0-9a-df-np-sv-z]{32}}.narinfo"
+	r.HandleFunc(narinfo, proxy.narinfoHeadV2).Methods("HEAD")
+	r.HandleFunc(narinfo, proxy.narinfoGetV2).Methods("GET")
+	r.HandleFunc(narinfo, proxy.narinfoPutV2).Methods("PUT")
 
-	narinfo := "/{bucket:[a-z-]+}/{key}"
-	r.HandleFunc(narinfo, proxy.narinfoPut).Methods("PUT")
-	r.HandleFunc(narinfo, proxy.narinfoGet).Methods("GET")
-
-	nar := `/{bucket:[a-z-]+}/nar/{key}`
-	r.HandleFunc(nar, proxy.narHead).Methods("HEAD")
-	r.HandleFunc(nar, proxy.narPut).Methods("PUT")
-	r.HandleFunc(nar, proxy.narGet).Methods("GET")
+	nar := "/nar/{hash:[0-9a-df-np-sv-z]{52}}.{ext:nar}"
+	r.HandleFunc(nar, proxy.narHeadV2).Methods("HEAD")
+	r.HandleFunc(nar, proxy.narGetV2).Methods("GET")
+	r.HandleFunc(nar, proxy.narPutV2).Methods("PUT")
 
 	return r
-}
-
-func (proxy *Proxy) narinfoPath(r *http.Request) (string, string, error) {
-	key, ok := mux.Vars(r)["key"]
-	if ok && narinfoPattern.MatchString(key) {
-		return filepath.Join(proxy.Dir, key), key, nil
-	} else {
-		return "", "", errors.New("Invalid narinfo name")
-	}
-}
-
-func (proxy *Proxy) narPath(r *http.Request) (string, string, error) {
-	key, ok := mux.Vars(r)["key"]
-	if ok {
-		return filepath.Join(proxy.Dir, "nar", key), filepath.Join("nar", key), nil
-	} else {
-		return "", "", errors.New("Invalid nar name")
-	}
 }
 
 func (proxy *Proxy) nixCacheInfo(w http.ResponseWriter, r *http.Request) {
@@ -78,292 +44,220 @@ WantMassQuery: 1
 Priority: ` + strconv.FormatUint(proxy.CacheInfoPriority, 10)))
 }
 
-func (proxy *Proxy) narHead(w http.ResponseWriter, r *http.Request) {
-	path, _, err := proxy.narPath(r)
-	if badRequest(w, err) {
+func (proxy *Proxy) narHeadV2(w http.ResponseWriter, r *http.Request) {
+	vars := mux.Vars(r)
+	hash := vars["hash"]
+	proxy.touchNar(hash)
+
+	_, err := proxy.narIndex.GetIndex(hash)
+	if err != nil {
+		if err = proxy.deleteNarinfos(map[string]struct{}{hash: {}}); err != nil {
+			proxy.log.Error("removing missing db entry", zap.Error(err))
+		}
+
+		w.Header().Add("Content-Type", "text/plain")
+		w.WriteHeader(404)
 		return
 	}
 
-	if _, err := os.Stat(path); err != nil {
-		w.Header().Add("Content-Type", "text/html")
-		w.WriteHeader(404)
-	} else {
-		w.WriteHeader(200)
-	}
+	w.Header().Add("Content-Type", "application/x-nix-nar")
+	w.WriteHeader(200)
 }
 
-func (proxy *Proxy) narPut(w http.ResponseWriter, r *http.Request) {
-	path, s3Path, err := proxy.narPath(r)
-	if badRequest(w, errors.WithMessage(err, "Calculating nar path")) {
+func (proxy *Proxy) narGetV2(w http.ResponseWriter, r *http.Request) {
+	vars := mux.Vars(r)
+	hash := vars["hash"]
+	proxy.touchNar(hash)
+	tmpFile, err := ioutil.TempFile(filepath.Join(proxy.Dir, "sync/tmp"), hash)
+	if internalServerError(w, err) {
+		return
+	}
+	defer func() {
+		tmpFile.Close()
+		os.Remove(tmpFile.Name())
+	}()
+
+	index, err := proxy.narIndex.GetIndex(hash)
+	if err != nil {
+		if err = proxy.deleteNarinfos(map[string]struct{}{hash: {}}); err != nil {
+			proxy.log.Error("removing missing db entry", zap.Error(err))
+		}
+
+		w.Header().Add("Content-Type", "text/plain")
+		w.WriteHeader(404)
+		_, _ = w.Write([]byte("not found"))
 		return
 	}
 
-	if !proxy.safeCreate(w, path, func(_w io.Writer) io.Reader {
-		return r.Body
-	}) {
+	var cache desync.Store
+	if proxy.s3Store != nil {
+		cache = desync.NewCache(proxy.s3Store, proxy.narStore)
+	} else {
+		cache = proxy.narStore
+	}
+
+	_, err = desync.AssembleFile(
+		context.Background(),
+		tmpFile.Name(),
+		index,
+		cache,
+		nil,
+		threads,
+		nil)
+
+	if internalServerError(w, err) {
+		proxy.log.Error("Failed to assemble file", zap.Error(err))
 		return
 	}
 
-	if proxy.uploader != nil {
-		f, err := os.Open(path)
-		if err != nil {
-			log.Panicf("failed to open file %q, %v", path, err)
-		}
-		defer f.Close()
+	w.Header().Add("Content-Type", "application/x-nix-nar")
+	http.ServeFile(w, r, tmpFile.Name())
+}
 
-		result, err := proxy.uploader.Upload(&s3manager.UploadInput{
-			Bucket: aws.String(proxy.BucketName),
-			Key:    aws.String(s3Path),
-			Body:   f,
-		})
-		if err != nil {
-			log.Panicf("failed to upload file, %v", err)
+func (proxy *Proxy) narPutV2(w http.ResponseWriter, r *http.Request) {
+	vars := mux.Vars(r)
+	hash := vars["hash"]
+	proxy.touchNar(hash)
+	// ext := vars["ext"]
+	if r.ContentLength < 1 {
+		w.WriteHeader(http.StatusLengthRequired)
+		return
+	}
+
+	chunker, err := desync.NewChunker(r.Body, proxy.AverageChunkSize/4, proxy.AverageChunkSize, proxy.AverageChunkSize*4)
+	if internalServerError(w, errors.WithMessagef(err, "NewChunker %q", hash)) {
+		proxy.log.Error("failed creating chunker", zap.String("hash", hash), zap.Error(err))
+		return
+	}
+
+	index, err := desync.ChunkStream(context.Background(), chunker, proxy.narStore, 8)
+	if internalServerError(w, errors.WithMessagef(err, "ChunkStream %q", hash)) {
+		proxy.log.Error("failed chunking stream", zap.String("hash", hash), zap.Error(err))
+		return
+	}
+
+	err = proxy.narIndex.StoreIndex(hash, index)
+	if internalServerError(w, errors.WithMessagef(err, "StoreIndex %q", hash)) {
+		proxy.log.Error("failed storing index", zap.String("hash", hash), zap.Error(err))
+		return
+	}
+
+	if proxy.s3Store != nil {
+		for _, indexChunk := range index.Chunks {
+			chunk, err := proxy.narStore.GetChunk(indexChunk.ID)
+			if err != nil {
+				proxy.log.Error("Couldn't get chunk", zap.Error(err))
+				w.WriteHeader(500)
+				return
+			}
+
+			err = proxy.s3Store.StoreChunk(chunk)
+			if err != nil {
+				proxy.log.Error("Couldn't store chunk in S3", zap.Error(err))
+				w.WriteHeader(500)
+				return
+			}
 		}
-		log.Printf("file uploaded to %q\n", aws.StringValue(&result.Location))
 	}
 
 	w.WriteHeader(200)
 }
 
-func (proxy *Proxy) narGet(w http.ResponseWriter, r *http.Request) {
-	path, remotePath, err := proxy.narPath(r)
-	if badRequest(w, err) {
+func (proxy *Proxy) narinfoHeadV2(w http.ResponseWriter, r *http.Request) {
+	vars := mux.Vars(r)
+	hash := vars["hash"]
+
+	proxy.touchNarinfo(hash)
+
+	narHash := proxy.selectNarHash(hash)
+
+	if narHash == "" {
+		w.Header().Add("Content-Type", "text/plain")
+		w.WriteHeader(404)
 		return
 	}
 
-	if _, err := os.Stat(path); err == nil {
-		log.Printf("Serving %q from disk\n", path)
-		w.Header().Add("Content-Type", "application/x-nix-nar")
-		http.ServeFile(w, r, path)
+	_, err := proxy.narIndex.GetIndex(narHash)
+	if err != nil {
+		if err = proxy.deleteNarinfos(map[string]struct{}{narHash: {}}); err != nil {
+			proxy.log.Error("removing missing db entry", zap.Error(err))
+		}
+
+		w.Header().Add("Content-Type", "text/plain")
+		w.WriteHeader(404)
 		return
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 1*time.Hour)
-	content := proxy.parallelRequest(ctx, remotePath)
-	defer cancel()
-
-	if content != nil {
-		defer content.Close()
-
-		proxy.safeCreate(w, path, func(output io.Writer) io.Reader {
-			tee := io.TeeReader(content, w)
-			w.Header().Add("Content-Type", "application/x-nix-nar")
-			w.WriteHeader(200)
-			return tee
-		})
-
-		return
-	}
-
-	w.Header().Add("Content-Type", "text/html")
-	w.WriteHeader(404)
-	_, _ = w.Write([]byte("404"))
+	w.Header().Add("Content-Type", "text/x-nix-narinfo")
+	w.WriteHeader(200)
 }
 
-func (proxy *Proxy) narinfoPut(w http.ResponseWriter, r *http.Request) {
-	path, s3Path, err := proxy.narinfoPath(r)
-	if badRequest(w, err) {
+func (proxy *Proxy) narinfoGetV2(w http.ResponseWriter, r *http.Request) {
+	vars := mux.Vars(r)
+	hash := vars["hash"]
+
+	proxy.touchNarinfo(hash)
+
+	info, err := proxy.selectNarinfo(hash)
+	if err == sql.ErrNoRows {
+		w.Header().Add("Content-Type", "text/html")
+		w.WriteHeader(404)
+		_, _ = w.Write([]byte("not found in db"))
+		return
+	} else if internalServerError(w, err) {
+		proxy.log.Error("Failed to get narinfo", zap.Error(err))
 		return
 	}
 
-	body, err := io.ReadAll(r.Body)
-	if badRequest(w, err) {
-		return
-	}
+	info.SanitizeSignatures(proxy.trustedKeys)
 
-	info := &NarInfo{}
-	if badRequest(w, info.Unmarshal(bytes.NewBuffer(body))) {
-		return
-	}
-
-	if len(info.Sig) == 0 {
-		for name, key := range proxy.secretKeys {
-			if internalServerError(w, info.Sign(name, key)) {
-				return
-			}
-		}
-	} else if err = info.Verify(proxy.trustedKeys); err != nil {
-		badRequest(w, errors.WithMessagef(err, "%s signatures are untrusted", info.StorePath))
-		return
-	}
-
-	signed := &bytes.Buffer{}
-	if internalServerError(w, info.Marshal(signed)) {
-		return
-	}
-
-	if !proxy.safeCreate(w, path, func(io.Writer) io.Reader {
-		return bytes.NewReader(signed.Bytes())
-	}) {
-		return
-	}
-
-	if proxy.uploader != nil {
-		_, err = proxy.uploader.Upload(&s3manager.UploadInput{
-			Bucket: aws.String(proxy.BucketName),
-			Key:    aws.String(s3Path),
-			Body:   signed,
-		})
-
-		if internalServerError(w, err) {
+	for name, key := range proxy.secretKeys {
+		if internalServerError(w, info.Sign(name, key)) {
+			proxy.log.Error("Failed signing narinfo", zap.Error(err), zap.String("hash", hash))
 			return
 		}
 	}
 
-	w.WriteHeader(200)
-}
-
-func (proxy *Proxy) narinfoGet(w http.ResponseWriter, r *http.Request) {
-	path, remotePath, err := proxy.narinfoPath(r)
-	if badRequest(w, err) {
+	if err != nil {
+		proxy.log.Error("Invalid signature", zap.Error(err))
+		w.Header().Add("Content-Type", "text/plain")
+		w.WriteHeader(404)
+		_, _ = w.Write([]byte(info.StorePath + " signatures are untrusted"))
 		return
-	}
-
-	if _, err := os.Stat(path); err == nil {
-		log.Printf("Serving %q from disk\n", path)
-		w.Header().Add("Content-Type", "text/x-nix-narinfo")
-		http.ServeFile(w, r, path)
-		return
-	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	content := proxy.parallelRequest(ctx, remotePath)
-	defer cancel()
-
-	if content != nil {
-		defer content.Close()
-
-		proxy.safeCreate(w, path, func(output io.Writer) io.Reader {
-			tee := io.TeeReader(content, w)
-			w.Header().Add("Content-Type", "text/x-nix-narinfo")
-			w.WriteHeader(200)
-			return tee
-		})
-
-		return
-	}
-
-	vars := mux.Vars(r)
-	w.WriteHeader(404)
-	_, _ = w.Write([]byte(`<?xml version="1.0" encoding="UTF-8"?>
-<Error>
-  <Code>NoSuchKey</Code>
-  <Message>The specified key does not exist.</Message>
-  <Resource>` + r.URL.Path + `</Resource>
-  <BucketName>` + vars["bucket"] + `</BucketName>
-  <Key>` + vars["key"] + `</Key>
-  <RequestId>16B81914FBB8345F</RequestId>
-  <HostId>672a09d6-39bb-41a6-bcf3-b0375d351cfe</HostId>
-</Error>`))
-}
-
-func (proxy *Proxy) parallelRequest(ctx context.Context, path string) io.ReadCloser {
-	contentChan := make(chan io.ReadCloser, len(proxy.Substituters))
-	failureChan := make(chan error, len(proxy.Substituters))
-
-	for _, sub := range proxy.Substituters {
-		go manageParallelReqeust(ctx, contentChan, failureChan, path, sub)
-	}
-
-	for count := 0; count < len(proxy.Substituters); count++ {
-		select {
-		case content := <-contentChan:
-			return content
-		case failure := <-failureChan:
-			log.Println(failure.Error())
-		}
-	}
-
-	return nil
-}
-
-func manageParallelReqeust(
-	ctx context.Context,
-	contentChan chan io.ReadCloser,
-	failureChan chan error,
-	path, sub string,
-) {
-	if content, err := doParallelReqeust(ctx, path, sub); err != nil {
-		failureChan <- err
 	} else {
-		contentChan <- content
-	}
-}
-
-func doParallelReqeust(ctx context.Context, path, sub string) (io.ReadCloser, error) {
-	subUrl, err := url.Parse(sub)
-	if err != nil {
-		return nil, err
-	}
-	subUrl.Path = path
-
-	request, err := http.NewRequestWithContext(ctx, "GET", subUrl.String(), nil)
-	if err != nil {
-		return nil, err
-	}
-
-	res, err := http.DefaultClient.Do(request)
-	if err != nil {
-		urlErr, ok := err.(*url.Error)
-		if ok && urlErr.Err.Error() == "context canceled" {
-			return nil, err
+		for name, key := range proxy.secretKeys {
+			if internalServerError(w, info.Sign(name, key)) {
+				proxy.log.Error("Failed signing narinfo", zap.Error(err), zap.String("hash", hash))
+				return
+			}
 		}
-
-		return nil, err
 	}
 
-	switch res.StatusCode {
-	case 200:
-		return res.Body, nil
-	case 404, 403:
-		res.Body.Close()
-		return nil, errors.Errorf("%s => %d", subUrl.String(), res.StatusCode)
-	default:
-		res.Body.Close()
-		return nil, errors.Errorf("%s => %d", subUrl.String(), res.StatusCode)
+	w.Header().Add("Content-Type", "text/x-nix-narinfo")
+	w.WriteHeader(200)
+	err = info.Marshal(w)
+	if internalServerError(w, err) {
+		proxy.log.Error("Failed sending narinfo", zap.Error(err))
+		return
 	}
 }
 
-func (proxy *Proxy) safeCreate(
-	w http.ResponseWriter,
-	path string,
-	fn func(io.Writer) io.Reader,
-) bool {
-	proxy.SetupDir("nar")
+func (proxy *Proxy) narinfoPutV2(w http.ResponseWriter, r *http.Request) {
+	vars := mux.Vars(r)
+	hash := vars["hash"]
 
-	partPath := path + ".partial"
-	partial, err := os.Create(partPath)
-	if internalServerError(w, errors.WithMessagef(err, "Creating path %q", partPath)) {
-		return false
-	}
-	defer partial.Close()
-
-	input := fn(partial)
-
-	_, err = io.Copy(partial, input)
-	if internalServerError(w, errors.WithMessagef(err, "Copying body to %q", partPath)) {
-		os.Remove(partPath)
-		return false
+	info := &Narinfo{}
+	err := info.Unmarshal(r.Body)
+	if badRequest(w, errors.WithMessagef(err, "Parsing narinfo %q", hash)) {
+		proxy.log.Error("Failed parsing narinfo", zap.String("hash", hash), zap.Error(err))
+		return
 	}
 
-	err = partial.Sync()
-	if internalServerError(w, errors.WithMessagef(err, "Syncing %q", partPath)) {
-		os.Remove(partPath)
-		return false
+	err = proxy.insertNarinfo(info)
+	if internalServerError(w, err) {
+		proxy.log.Error("insertNarinfo", zap.Error(err), zap.String("hash", hash))
+		return
 	}
 
-	err = partial.Close()
-	if internalServerError(w, errors.WithMessagef(err, "Closing %q", partPath)) {
-		os.Remove(partPath)
-		return false
-	}
-
-	err = os.Rename(partPath, path)
-	if internalServerError(w, errors.WithMessagef(err, "Renaming %q to %q", partPath, path)) {
-		os.Remove(partPath)
-		os.Remove(path)
-		return false
-	}
-
-	return true
+	w.WriteHeader(200)
 }

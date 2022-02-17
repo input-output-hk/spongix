@@ -23,7 +23,7 @@ in {
     in std.chain args [
       actionLib.simpleJob
 
-      { resources.memory = 1024 * 3; }
+      { resources.memory = 1024 * 6; }
 
       (lib.optionalAttrs (facts ? statuses_url)
         (std.github.reportStatus facts.statuses_url))

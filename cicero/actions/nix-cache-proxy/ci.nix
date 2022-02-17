@@ -9,15 +9,17 @@ in {
     }
   '';
 
-  output = { start }: {
-    success."${name}" = {
-      ok = true;
-      inherit (start.value."${name}".start) clone_url;
+  output = { start }:
+    let facts = start.value."${name}".start;
+    in {
+      success."${name}" = {
+        ok = true;
+        inherit (facts) clone_url sha;
+      };
     };
-  };
 
   job = { start }:
-    let facts = start.value."cicero/ci".start;
+    let facts = start.value."${name}".start;
     in std.chain args [
       actionLib.simpleJob
 

@@ -24,14 +24,14 @@ in {
       {
         resources.memory = 1024 * 3;
         config.packages = std.data-merge.append [
-          "github:input-output-hk/nix-cache-proxy/${cfg.sha}#devShell.x86_64-linux"
+          "github:input-output-hk/nix-cache-proxy/${facts.sha}#devShell.x86_64-linux"
         ];
       }
 
-      (lib.optionalAttrs (cfg ? statuses_url)
-        (std.github.reportStatus cfg.statuses_url))
+      (lib.optionalAttrs (facts ? statuses_url)
+        (std.github.reportStatus facts.statuses_url))
 
-      (std.git.clone cfg)
+      (std.git.clone facts)
 
       (std.script "bash" ''
         set -ex

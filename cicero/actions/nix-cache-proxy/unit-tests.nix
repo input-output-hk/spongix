@@ -33,11 +33,11 @@ in {
 
       (std.git.clone facts)
 
-      (std.script "bash" ''
+      (std.script "bash" (next: ''
         set -ex
         lint
         ${lib.escapeShellArgs next}
-      '')
+      ''))
 
       std.nix.build
     ];

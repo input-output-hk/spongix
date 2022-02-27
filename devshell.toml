@@ -12,7 +12,7 @@ command = "go test -v -coverprofile cover.out ./..."
 help = "Run code coverage"
 
 [devshell]
-name = "nix-cache-proxy"
+name = "spongix"
 packages = [
   "diffutils",
   "go_1_17",

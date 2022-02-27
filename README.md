@@ -1,4 +1,4 @@
-# Nix Store Proxy
+# Spongix
 
 A proxy that acts as binary cache for Nix.
 
@@ -8,16 +8,16 @@ A proxy that acts as binary cache for Nix.
 
 ## Usage
 
-Start `nix-cache-proxy`:
+Start `spongix`:
 
     nix key generate-secret --key-name foo > skey
     nix build
-    ./result/bin/nix-cache-proxy \
+    ./result/bin/spongix \
       --substituters "https://cache.nixos.org" "https://hydra.iohk.io" \
       --secret-key-files ./skey \
       --trusted-public-keys "cache.nixos.org-1:6NCHdD59X431o0gWypbMrAURkbJ16ZPMQFGspcDShjY=" "hydra.iohk.io:f/Ea+s+dFdN+3Y/G+FDgSq+a5NEWhJGzdjvKNGv0/EQ=" \
       --listen :7745 \
-      --dir /tmp/nix-cache-proxy
+      --dir /tmp/spongix
 
 To add store paths to the cache, you can use `nix copy`:
 

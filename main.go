@@ -3,8 +3,6 @@ package main
 import (
 	"context"
 	"crypto/ed25519"
-	"database/sql"
-	"fmt"
 	"log"
 	"net/http"
 	"net/url"
@@ -21,16 +19,20 @@ import (
 	"go.uber.org/zap"
 )
 
-const threads = 2
+const (
+	defaultThreads      = 2
+	defaultChunkAverage = 65536
+)
 
 func main() {
-	proxy := defaultProxy()
+	proxy := NewProxy()
 	arg.MustParse(proxy)
+	proxy.SetupLogger()
 	proxy.SetupDesync()
-	proxy.SetupNix()
-	proxy.SetupDB()
+	proxy.SetupKeys()
 	proxy.SetupS3()
 	go proxy.gc()
+	go proxy.verify()
 	go func() {
 		t := time.Tick(5 * time.Second)
 		for range t {
@@ -48,7 +50,7 @@ func main() {
 	const timeout = 15 * time.Second
 
 	srv := &http.Server{
-		Handler:      proxy.routerV2(),
+		Handler:      proxy.router(),
 		Addr:         proxy.Listen,
 		ReadTimeout:  timeout,
 		WriteTimeout: timeout,
@@ -86,30 +88,39 @@ func main() {
 }
 
 type Proxy struct {
-	BucketURL         string   `arg:"--bucket-url,env:BUCKET_URL" help:"Bucket URL like s3+http://127.0.0.1:9000/ncp"`
-	BucketRegion      string   `arg:"--bucket-region,env:BUCKET_REGION" help:"Region the bucket is in"`
-	Dir               string   `arg:"--dir,env:CACHE_DIR" help:"directory for the cache"`
-	Listen            string   `arg:"--listen,env:LISTEN_ADDR" help:"Listen on this address"`
-	SecretKeyFiles    []string `arg:"--secret-key-files,required,env:NIX_SECRET_KEY_FILES" help:"Files containing your private nix signing keys"`
-	Substituters      []string `arg:"--substituters,env:NIX_SUBSTITUTERS"`
-	TrustedPublicKeys []string `arg:"--trusted-public-keys,env:NIX_TRUSTED_PUBLIC_KEYS"`
-	CacheInfoPriority uint64   `arg:"--cache-info-priority,env:CACHE_INFO_PRIORITY" help:"Priority in nix-cache-info"`
-	DatabaseDSN       string   `arg:"--database,env:DATABASE_DSN" help:"DSN for the db, like file:test.db"`
-	AverageChunkSize  uint64   `arg:"--average-chunk-size,env:AVERAGE_CHUNK_SIZE" help:"Chunk size will be between /4 and *4 of this value"`
+	BucketURL         string        `arg:"--bucket-url,env:BUCKET_URL" help:"Bucket URL like s3+http://127.0.0.1:9000/ncp"`
+	BucketRegion      string        `arg:"--bucket-region,env:BUCKET_REGION" help:"Region the bucket is in"`
+	Dir               string        `arg:"--dir,env:CACHE_DIR" help:"directory for the cache"`
+	Listen            string        `arg:"--listen,env:LISTEN_ADDR" help:"Listen on this address"`
+	SecretKeyFiles    []string      `arg:"--secret-key-files,required,env:NIX_SECRET_KEY_FILES" help:"Files containing your private nix signing keys"`
+	Substituters      []string      `arg:"--substituters,env:NIX_SUBSTITUTERS"`
+	TrustedPublicKeys []string      `arg:"--trusted-public-keys,env:NIX_TRUSTED_PUBLIC_KEYS"`
+	CacheInfoPriority uint64        `arg:"--cache-info-priority,env:CACHE_INFO_PRIORITY" help:"Priority in nix-cache-info"`
+	AverageChunkSize  uint64        `arg:"--average-chunk-size,env:AVERAGE_CHUNK_SIZE" help:"Chunk size will be between /4 and *4 of this value"`
+	CacheSize         uint64        `arg:"--cache-size,env:CACHE_SIZE" help:"Number of gigabytes to keep in the disk cache"`
+	VerifyInterval    time.Duration `arg:"--verify-interval,env:VERIFY_INTERVAL" help:"Seconds between verification runs"`
+	GcInterval        time.Duration `arg:"--gc-interval,env:GC_INTERVAL" help:"Seconds between store garbage collection runs"`
+	LogLevel          string        `arg:"--log-level,env:LOG_LEVEL" help:"One of debug, info, warn, error, dpanic, panic, fatal"`
+	LogMode           string        `arg:"--log-mode,env:LOG_MODE" help:"development or production"`
 
 	// derived from the above
 	secretKeys  map[string]ed25519.PrivateKey
 	trustedKeys map[string]ed25519.PublicKey
-	s3Store     desync.WriteStore
-	narStore    desync.WriteStore
-	narIndex    desync.IndexWriteStore
-	db          *sql.DB
-	log         *zap.Logger
+
+	s3Store desync.WriteStore
+	s3Index desync.IndexWriteStore
+
+	localStore desync.WriteStore
+	localIndex desync.IndexWriteStore
+
+	log *zap.Logger
 }
 
-func defaultProxy() *Proxy {
-	logger, err := zap.NewDevelopment()
-	fatal(err)
+func NewProxy() *Proxy {
+	devLog, err := zap.NewDevelopment()
+	if err != nil {
+		panic(err)
+	}
 
 	return &Proxy{
 		Dir:               "./cache",
@@ -118,9 +129,13 @@ func defaultProxy() *Proxy {
 		TrustedPublicKeys: []string{},
 		Substituters:      []string{},
 		CacheInfoPriority: 50,
-		log:               logger,
-		DatabaseDSN:       "file:nix-cache-proxy.sqlite",
-		AverageChunkSize:  65536,
+		DatabaseDSN:       "file:spongix.sqlite",
+		AverageChunkSize:  defaultChunkAverage,
+		VerifyInterval:    time.Hour,
+		GcInterval:        time.Minute,
+		log:               devLog,
+		LogLevel:          "debug",
+		LogMode:           "production",
 	}
 }
 
@@ -129,33 +144,29 @@ var (
 	buildCommit  = "dirty"
 )
 
-func (c *Proxy) Version() string { return buildVersion + " (" + buildCommit + ")" }
+func (proxy *Proxy) Version() string {
+	return buildVersion + " (" + buildCommit + ")"
+}
 
-func (proxy *Proxy) Clean() {
-	for _, name := range proxy.StateDirs() {
-		dir := filepath.Join(proxy.Dir, name)
-		proxy.log.Debug(fmt.Sprintf("Removing directory: %q\n", dir))
-		os.RemoveAll(dir)
-	}
+func (proxy Proxy) minChunkSize() uint64 {
+	return proxy.AverageChunkSize / 4
+}
 
-	clean := func(path string, d os.DirEntry, err error) error {
-		switch filepath.Ext(path) {
-		case ".narinfo", ".xz", ".nar":
-			return os.Remove(path)
-		}
-		return nil
-	}
+func (proxy Proxy) avgChunkSize() uint64 {
+	return proxy.AverageChunkSize
+}
 
-	if err := filepath.WalkDir(proxy.Dir, clean); err != nil {
-		panic(err)
-	}
+func (proxy Proxy) maxChunkSize() uint64 {
+	return proxy.AverageChunkSize * 4
 }
 
 func (proxy *Proxy) SetupDir(path string) {
 	dir := filepath.Join(proxy.Dir, path)
 	if _, err := os.Stat(dir); err != nil {
-		proxy.log.Debug(fmt.Sprintf("Creating directory: %q\n", dir))
-		fatal(os.MkdirAll(dir, 0o755))
+		proxy.log.Debug("Creating directory", zap.String("dir", dir))
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			proxy.log.Fatal("couldn't create directory", zap.String("dir", dir))
+		}
 	}
 }
 
@@ -171,7 +182,9 @@ func (proxy *Proxy) SetupS3() {
 	}
 
 	s3Url, err := url.Parse(proxy.BucketURL)
-	fatal(err)
+	if err != nil {
+		proxy.log.Fatal("couldn't parse bucket url", zap.Error(err), zap.String("url", proxy.BucketURL))
+	}
 	creds := credentials.NewChainCredentials(
 		[]credentials.Provider{
 			&credentials.EnvMinio{},
@@ -187,23 +200,33 @@ func (proxy *Proxy) SetupS3() {
 			Uncompressed: false,
 			SkipVerify:   false,
 		}, minio.BucketLookupAuto)
-	fatal(err)
+	if err != nil {
+		proxy.log.Fatal("failed creating s3 store",
+			zap.Error(err),
+			zap.String("url", s3Url.String()),
+			zap.String("region", proxy.BucketRegion),
+		)
+	}
 
 	proxy.s3Store = store
 }
 
-func (proxy *Proxy) SetupNix() {
+func (proxy *Proxy) SetupKeys() {
 	secretKeys, err := LoadNixPrivateKeys(proxy.SecretKeyFiles)
-	fatal(err)
+	if err != nil {
+		proxy.log.Fatal("failed loading private keys", zap.Error(err), zap.Strings("files", proxy.SecretKeyFiles))
+	}
 	proxy.secretKeys = secretKeys
 
 	publicKeys, err := LoadNixPublicKeys(proxy.TrustedPublicKeys)
-	fatal(err)
+	if err != nil {
+		proxy.log.Fatal("failed loading public keys", zap.Error(err), zap.Strings("files", proxy.TrustedPublicKeys))
+	}
 	proxy.trustedKeys = publicKeys
 }
 
 func (proxy *Proxy) StateDirs() []string {
-	return []string{"sync/store", "sync/index", "sync/tmp"}
+	return []string{"store", "index", "tmp"}
 }
 
 func (proxy *Proxy) SetupDesync() {
@@ -211,19 +234,55 @@ func (proxy *Proxy) SetupDesync() {
 		proxy.SetupDir(name)
 	}
 
-	narStore, err := desync.NewLocalStore(filepath.Join(proxy.Dir, "sync/store"), desync.StoreOptions{
+	storeDir := filepath.Join(proxy.Dir, "store")
+	narStore, err := desync.NewLocalStore(storeDir, desync.StoreOptions{
 		N:            1,
 		Timeout:      1 * time.Second,
 		ErrorRetry:   0,
 		Uncompressed: false,
 		SkipVerify:   false,
 	})
-	fatal(err)
+	if err != nil {
+		proxy.log.Fatal("failed creating local store", zap.Error(err), zap.String("dir", storeDir))
+	}
 	narStore.UpdateTimes = true
 
-	narIndex, err := desync.NewLocalIndexStore(filepath.Join(proxy.Dir, "sync/index"))
-	fatal(err)
+	indexDir := filepath.Join(proxy.Dir, "index")
+	narIndex, err := desync.NewLocalIndexStore(indexDir)
+	if err != nil {
+		proxy.log.Fatal("failed creating local index", zap.Error(err), zap.String("dir", indexDir))
+	}
 
-	proxy.narStore = narStore
-	proxy.narIndex = narIndex
+	proxy.localStore = narStore
+	proxy.localIndex = narIndex
+}
+
+func (proxy *Proxy) SetupLogger() {
+	lvl := zap.NewAtomicLevel()
+	lvl.UnmarshalText([]byte(proxy.LogLevel))
+	development := proxy.LogMode == "development"
+	encoding := "json"
+	encoderConfig := zap.NewProductionEncoderConfig()
+	if development {
+		encoding = "console"
+		encoderConfig = zap.NewDevelopmentEncoderConfig()
+	}
+
+	l := zap.Config{
+		Level:             lvl,
+		Development:       development,
+		DisableCaller:     false,
+		DisableStacktrace: false,
+		Sampling:          &zap.SamplingConfig{Initial: 1, Thereafter: 2},
+		Encoding:          encoding,
+		EncoderConfig:     encoderConfig,
+		OutputPaths:       []string{"stderr"},
+		ErrorOutputPaths:  []string{"stderr"},
+	}
+
+	var err error
+	proxy.log, err = l.Build()
+	if err != nil {
+		panic(err)
+	}
 }

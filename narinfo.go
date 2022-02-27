@@ -191,6 +191,10 @@ func (info *Narinfo) Marshal(output io.Writer) error {
 
 // TODO: replace with a validating parser
 func (info *Narinfo) Unmarshal(input io.Reader) error {
+	if input == nil {
+		return errors.New("can't unmarshal nil reader")
+	}
+
 	scanner := bufio.NewScanner(input)
 	for scanner.Scan() {
 		line := scanner.Text()

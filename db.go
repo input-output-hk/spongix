@@ -1,17 +1,12 @@
 package main
 
-import (
-	"database/sql"
-	"net/url"
-	"time"
-
-	"github.com/pkg/errors"
-	"go.uber.org/zap"
-)
-
+/*
 func (proxy *Proxy) SetupDB() {
 	dsn, err := url.Parse(proxy.DatabaseDSN)
-	fatal(err)
+	if err != nil {
+		proxy.log.Fatal("parsing database dsn", zap.Error(err))
+	}
+
 	query := dsn.Query()
 	// query.Add("cache", "shared")
 	// query.Add("mode", "memory")
@@ -23,7 +18,9 @@ func (proxy *Proxy) SetupDB() {
 	dsn.RawQuery = query.Encode()
 
 	db, err := sql.Open("sqlite3", dsn.String())
-	fatal(err)
+	if err != nil {
+		proxy.log.Fatal("opening sqlite db", zap.Error(err))
+	}
 
 	_, err = db.Exec(`
 CREATE TABLE IF NOT EXISTS narinfos (
@@ -43,7 +40,9 @@ CREATE TABLE IF NOT EXISTS narinfos (
 	accessed_at datetime
 );
 `)
-	fatal(err)
+	if err != nil {
+		proxy.log.Fatal("creating narinfos table", zap.Error(err))
+	}
 
 	_, err = db.Exec(`
 CREATE TABLE IF NOT EXISTS refs (
@@ -52,7 +51,9 @@ CREATE TABLE IF NOT EXISTS refs (
   FOREIGN KEY(parent) REFERENCES narinfos(name) DEFERRABLE INITIALLY DEFERRED
 );
 `)
-	fatal(err)
+	if err != nil {
+		proxy.log.Fatal("creating refs table", zap.Error(err))
+	}
 
 	_, err = db.Exec(`
 CREATE TABLE IF NOT EXISTS signatures (
@@ -61,12 +62,14 @@ CREATE TABLE IF NOT EXISTS signatures (
 	FOREIGN KEY(name) REFERENCES narinfos(name) DEFERRABLE INITIALLY DEFERRED
 );
 `)
-	fatal(err)
+	if err != nil {
+		proxy.log.Fatal("creating signatures table", zap.Error(err))
+	}
 
 	proxy.db = db
 }
 
-func (proxy *Proxy) selectNarinfo(name string) (*Narinfo, error) {
+func (proxy *Proxy) selectNarinfo(selector, name string) (*Narinfo, error) {
 	res := proxy.db.QueryRow(`
 	SELECT
 		store_path, url, compression,
@@ -74,7 +77,7 @@ func (proxy *Proxy) selectNarinfo(name string) (*Narinfo, error) {
 		nar_hash_type, nar_hash, nar_size,
 		deriver, ca
 	FROM narinfos
-	WHERE name = ?`, name)
+	WHERE `+selector+` = ?`, name)
 
 	var (
 		store_path, url, compression,
@@ -230,3 +233,4 @@ func (proxy *Proxy) touchNar(name string) {
 		proxy.log.Error("failed to touch nar in db", zap.String("name", name), zap.Error(err))
 	}
 }
+*/

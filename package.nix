@@ -1,27 +1,39 @@
 { buildGoModule, inclusive, rev }:
-buildGoModule rec {
-  pname = "nix-cache-proxy";
-  version = "2022.02.17.001";
-  vendorSha256 = "sha256-wUfj/ba+7RLy8xPsc9ClaeA0oh85DZdsipQEErF7lHg=";
+let
+  final = package "sha256-Z7pTznhsyKQLkemTx7dM9V6/Leva88XfQM81yl3yPnE=";
+  package = vendorSha256:
+    buildGoModule rec {
+      pname = "spongix";
+      version = "2022.02.22.005";
+      inherit vendorSha256;
 
-  src = inclusive ./. [
-    ./fixtures
-    ./go.mod
-    ./go.sum
+      passthru.invalidHash =
+        package "sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
 
-    ./db.go
-    ./gc.go
-    ./helpers.go
-    ./log_record.go
-    ./main.go
-    ./narinfo.go
-    ./narinfo_test.go
-    ./router.go
-    ./router_test.go
-  ];
+      src = inclusive ./. [
+        ./fixtures
+        ./go.mod
+        ./go.sum
 
-  CGO_ENABLED = "1";
+        ./actions.go
+        ./assemble.go
+        ./fake.go
+        ./gc.go
+        ./helpers.go
+        ./log_record.go
+        ./main.go
+        ./narinfo.go
+        ./narinfo_test.go
+        ./router.go
+        ./router_test.go
+      ];
 
-  ldflags =
-    [ "-s" "-w" "-X main.buildVersion=${version} -X main.buildCommit=${rev}" ];
-}
+      CGO_ENABLED = "1";
+
+      ldflags = [
+        "-s"
+        "-w"
+        "-X main.buildVersion=${version} -X main.buildCommit=${rev}"
+      ];
+    };
+in final

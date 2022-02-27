@@ -1,15 +1,19 @@
 package main
 
 import (
+	"context"
 	"crypto/ed25519"
 	"encoding/base64"
 	"fmt"
-	"log"
+	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"strings"
+	"sync"
 
 	"github.com/pkg/errors"
+	"go.uber.org/zap"
 )
 
 func LoadNixPublicKeys(rawKeys []string) (map[string]ed25519.PublicKey, error) {
@@ -98,15 +102,8 @@ func (n notFound) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 func notFoundResponse(w http.ResponseWriter, r *http.Request) {
-	log.Println(r.Method, r.URL.Path)
 	w.WriteHeader(404)
 	_, _ = w.Write([]byte(r.RequestURI + " not found"))
-}
-
-func fatal(err error) {
-	if err != nil {
-		log.Panic(err)
-	}
 }
 
 func ByteCountSI(b int64) string {
@@ -121,4 +118,82 @@ func ByteCountSI(b int64) string {
 	}
 	return fmt.Sprintf("%.1f %cB",
 		float64(b)/float64(div), "kMGTPE"[exp])
+}
+
+type parallelResponse struct {
+	body io.ReadCloser
+	url  string
+	code int
+}
+
+func (proxy *Proxy) parallelRequest(ctx context.Context, method, path string) *parallelResponse {
+	c := make(chan *parallelResponse, len(proxy.Substituters))
+
+	go func() {
+		var wg sync.WaitGroup
+		wg.Add(len(proxy.Substituters))
+
+		for _, substituter := range proxy.Substituters {
+			go func(sub string) {
+				res, err := doParallelReqeust(ctx, method, sub, path)
+				if err != nil {
+					if !errors.Is(err, context.Canceled) {
+						proxy.log.Error("parallel request error", zap.Error(err))
+					}
+				} else {
+					if res.code == 200 {
+						select {
+						case c <- res:
+						case <-ctx.Done():
+							proxy.log.Warn("timeout", zap.String("url", res.url))
+						}
+					}
+				}
+
+				wg.Done()
+			}(substituter)
+		}
+
+		wg.Wait()
+		close(c)
+	}()
+
+	var found *parallelResponse
+	select {
+	case found = <-c:
+	case <-ctx.Done():
+	}
+
+	return found
+}
+
+func doParallelReqeust(ctx context.Context, method, sub, path string) (*parallelResponse, error) {
+	subUrl, err := url.Parse(sub)
+	if err != nil {
+		return nil, err
+	}
+	subUrl.Path = path
+
+	request, err := http.NewRequestWithContext(ctx, method, subUrl.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	res, err := http.DefaultClient.Do(request)
+	if err != nil {
+		urlErr, ok := err.(*url.Error)
+		if ok && urlErr.Err.Error() == "context canceled" {
+			return nil, err
+		}
+
+		return nil, err
+	}
+
+	switch res.StatusCode {
+	case 200:
+		return &parallelResponse{body: res.Body, url: subUrl.String(), code: res.StatusCode}, nil
+	default:
+		res.Body.Close()
+		return &parallelResponse{url: subUrl.String(), code: res.StatusCode}, nil
+	}
 }

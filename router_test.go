@@ -8,19 +8,25 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/steinfletcher/apitest"
-	"go.uber.org/zap"
 )
 
 var (
-	fixtures = map[string][]byte{}
+	testdata = map[string][]byte{}
 	fNar     = "0m8sd5qbmvfhyamwfv3af1ff18ykywf3zx5qwawhhp3jv1h777xz.nar"
+	fNarXz   = "0m8sd5qbmvfhyamwfv3af1ff18ykywf3zx5qwawhhp3jv1h777xz.nar.xz"
 	fNarinfo = "8ckxc8biqqfdwyhr0w70jgrcb4h7a4y5.narinfo"
 )
 
 func TestMain(m *testing.M) {
-	err := filepath.WalkDir("fixtures", func(path string, info fs.DirEntry, err error) error {
+	narinfoGetTimeout = 2 * time.Second
+
+	walkErr := filepath.WalkDir("testdata", func(path string, info fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
 		if info.IsDir() {
 			return nil
 		}
@@ -31,13 +37,13 @@ func TestMain(m *testing.M) {
 			return err
 		}
 
-		fixtures[base] = content
+		testdata[base] = content
 
 		return nil
 	})
 
-	if err != nil {
-		panic(err)
+	if walkErr != nil {
+		panic(walkErr)
 	}
 
 	os.Exit(m.Run())
@@ -48,12 +54,19 @@ func testProxy(t *testing.T) *Proxy {
 	proxy.Substituters = []string{"http://example.com"}
 	proxy.localIndex = newFakeIndex()
 	proxy.localStore = newFakeStore()
-	proxy.s3Index = newFakeIndex()
-	proxy.s3Store = newFakeStore()
+	// proxy.s3Index = newFakeIndex()
+	// proxy.s3Store = newFakeStore()
 	proxy.Dir = t.TempDir()
 	proxy.TrustedPublicKeys = []string{"cache.nixos.org-1:6NCHdD59X431o0gWypbMrAURkbJ16ZPMQFGspcDShjY="}
 	proxy.SetupKeys()
-	proxy.log = zap.NewNop()
+	proxy.startNarFetchers()
+	// proxy.log = zap.NewNop()
+	return proxy
+}
+
+func withS3(proxy *Proxy) *Proxy {
+	proxy.s3Index = newFakeIndex()
+	proxy.s3Store = newFakeStore()
 	return proxy
 }
 
@@ -119,7 +132,7 @@ func TestRouterNarinfoHead(t *testing.T) {
 	t.Run("found local", func(tt *testing.T) {
 		proxy := testProxy(tt)
 		defer proxy.log.Sync()
-		insertFake(tt, proxy.localStore, proxy.localIndex, fNarinfo, fixtures[fNarinfo])
+		insertFake(tt, proxy.localStore, proxy.localIndex, fNarinfo, testdata[fNarinfo])
 
 		mock := apitest.NewMock().
 			Head("/" + fNarinfo).
@@ -141,9 +154,9 @@ func TestRouterNarinfoHead(t *testing.T) {
 	})
 
 	t.Run("found s3", func(tt *testing.T) {
-		proxy := testProxy(tt)
+		proxy := withS3(testProxy(tt))
 		defer proxy.log.Sync()
-		insertFake(tt, proxy.s3Store, proxy.s3Index, fNarinfo, fixtures[fNarinfo])
+		insertFake(tt, proxy.s3Store, proxy.s3Index, fNarinfo, testdata[fNarinfo])
 
 		mock := apitest.NewMock().
 			Head("/" + fNarinfo).
@@ -195,20 +208,26 @@ func TestRouterNarHead(t *testing.T) {
 		proxy := testProxy(tt)
 		defer proxy.log.Sync()
 
-		mock := apitest.NewMock().
+		mock1 := apitest.NewMock().
 			Head(url).
+			RespondWith().
+			Status(http.StatusNotFound).
+			End()
+
+		mock2 := apitest.NewMock().
+			Head(url + ".xz").
 			RespondWith().
 			Status(http.StatusOK).
 			End()
 
 		apitest.New().
-			Mocks(mock).
+			Mocks(mock2, mock1).
 			Handler(proxy.router()).
 			Method("HEAD").
 			URL(url).
 			Expect(tt).
 			Header(headerCache, headerCacheRemote).
-			Header(headerCacheUpstream, "http://example.com/nar/"+fNar).
+			Header(headerCacheUpstream, "http://example.com/nar/"+fNar+".xz").
 			Header(headerContentType, mimeNar).
 			Body(``).
 			Status(http.StatusOK).
@@ -218,7 +237,7 @@ func TestRouterNarHead(t *testing.T) {
 	t.Run("found local", func(tt *testing.T) {
 		proxy := testProxy(tt)
 		defer proxy.log.Sync()
-		insertFake(tt, proxy.localStore, proxy.localIndex, "nar/"+fNar, fixtures[fNar])
+		insertFake(tt, proxy.localStore, proxy.localIndex, "nar/"+fNar, testdata[fNar])
 
 		mock := apitest.NewMock().
 			Head(url).
@@ -240,9 +259,9 @@ func TestRouterNarHead(t *testing.T) {
 	})
 
 	t.Run("found s3", func(tt *testing.T) {
-		proxy := testProxy(tt)
+		proxy := withS3(testProxy(tt))
 		defer proxy.log.Sync()
-		insertFake(tt, proxy.s3Store, proxy.s3Index, "nar/"+fNar, fixtures[fNar])
+		insertFake(tt, proxy.s3Store, proxy.s3Index, "nar/"+fNar, testdata[fNar])
 
 		mock := apitest.NewMock().
 			Head(url).
@@ -290,27 +309,35 @@ func TestRouterNarGet(t *testing.T) {
 			End()
 	})
 
-	t.Run("found remote", func(tt *testing.T) {
+	t.Run("found remote xz", func(tt *testing.T) {
 		proxy := testProxy(tt)
+		proxy.parallelRequestOrdered = true
 		defer proxy.log.Sync()
 
-		mock := apitest.NewMock().
+		mock1 := apitest.NewMock().
 			Get(url).
 			RespondWith().
-			Body(string(fixtures[fNar])).
+			Body(``).
+			Status(http.StatusNotFound).
+			End()
+
+		mock2 := apitest.NewMock().
+			Get(url + ".xz").
+			RespondWith().
+			Body(string(testdata[fNarXz])).
 			Status(http.StatusOK).
 			End()
 
 		apitest.New().
-			Mocks(mock).
+			Mocks(mock2, mock1).
 			Handler(proxy.router()).
 			Method("GET").
 			URL(url).
 			Expect(tt).
 			Header(headerCache, headerCacheRemote).
-			Header(headerCacheUpstream, "http://example.com/nar/"+fNar).
+			Header(headerCacheUpstream, "http://example.com/nar/"+fNar+".xz").
 			Header(headerContentType, mimeNar).
-			Body(``).
+			Body(string(testdata[fNar])).
 			Status(http.StatusOK).
 			End()
 	})
@@ -318,7 +345,7 @@ func TestRouterNarGet(t *testing.T) {
 	t.Run("found local", func(tt *testing.T) {
 		proxy := testProxy(tt)
 		defer proxy.log.Sync()
-		insertFake(tt, proxy.localStore, proxy.localIndex, "nar/"+fNar, fixtures[fNar])
+		insertFake(tt, proxy.localStore, proxy.localIndex, "nar/"+fNar, testdata[fNar])
 
 		mock := apitest.NewMock().
 			Head(url).
@@ -340,9 +367,9 @@ func TestRouterNarGet(t *testing.T) {
 	})
 
 	t.Run("found s3", func(tt *testing.T) {
-		proxy := testProxy(tt)
+		proxy := withS3(testProxy(tt))
 		defer proxy.log.Sync()
-		insertFake(tt, proxy.s3Store, proxy.s3Index, "nar/"+fNar, fixtures[fNar])
+		insertFake(tt, proxy.s3Store, proxy.s3Index, "nar/"+fNar, testdata[fNar])
 
 		mock := apitest.NewMock().
 			Get(url).
@@ -404,7 +431,7 @@ func TestRouterNarinfoGet(t *testing.T) {
 
 	t.Run("found local", func(tt *testing.T) {
 		proxy := testProxy(tt)
-		insertFake(tt, proxy.localStore, proxy.localIndex, fNarinfo, fixtures[fNarinfo])
+		insertFake(tt, proxy.localStore, proxy.localIndex, fNarinfo, testdata[fNarinfo])
 		defer proxy.log.Sync()
 
 		mock := apitest.NewMock().
@@ -421,14 +448,14 @@ func TestRouterNarinfoGet(t *testing.T) {
 			Expect(tt).
 			Header(headerCache, headerCacheHit).
 			Header(headerContentType, mimeNarinfo).
-			Body(string(fixtures[fNarinfo])).
+			Body(string(testdata[fNarinfo])).
 			Status(http.StatusOK).
 			End()
 	})
 
 	t.Run("found s3", func(tt *testing.T) {
-		proxy := testProxy(tt)
-		insertFake(tt, proxy.s3Store, proxy.s3Index, fNarinfo, fixtures[fNarinfo])
+		proxy := withS3(testProxy(tt))
+		insertFake(tt, proxy.s3Store, proxy.s3Index, fNarinfo, testdata[fNarinfo])
 		defer proxy.log.Sync()
 
 		mock := apitest.NewMock().
@@ -445,7 +472,7 @@ func TestRouterNarinfoGet(t *testing.T) {
 			Expect(tt).
 			Header(headerCache, headerCacheHit).
 			Header(headerContentType, mimeNarinfo).
-			Body(string(fixtures[fNarinfo])).
+			Body(string(testdata[fNarinfo])).
 			Status(http.StatusOK).
 			End()
 	})
@@ -457,11 +484,13 @@ func TestRouterNarinfoGet(t *testing.T) {
 		mock := apitest.NewMock().
 			Get(url).
 			RespondWith().
-			Body(string(fixtures[fNarinfo])).
+			FixedDelay((narinfoGetTimeout - (1 * time.Second)).Milliseconds()).
+			Body(string(testdata[fNarinfo])).
 			Status(http.StatusOK).
 			End()
 
 		apitest.New().
+			EnableMockResponseDelay().
 			Mocks(mock).
 			Handler(proxy.router()).
 			Method("GET").
@@ -470,7 +499,45 @@ func TestRouterNarinfoGet(t *testing.T) {
 			Header(headerCache, headerCacheRemote).
 			Header(headerCacheUpstream, "http://example.com"+url).
 			Header(headerContentType, mimeNarinfo).
-			Body(string(fixtures[fNarinfo])).
+			Body(string(testdata[fNarinfo])).
+			Status(http.StatusOK).
+			End()
+	})
+
+	t.Run("copies remote to local", func(tt *testing.T) {
+		proxy := testProxy(tt)
+		defer proxy.log.Sync()
+
+		mock := apitest.NewMock().
+			Get(url).
+			RespondWith().
+			FixedDelay((narinfoGetTimeout - (500 * time.Millisecond)).Milliseconds()).
+			Body(string(testdata[fNarinfo])).
+			Status(http.StatusOK).
+			End()
+
+		apitest.New().
+			EnableMockResponseDelay().
+			Mocks(mock).
+			Handler(proxy.router()).
+			Method("GET").
+			URL(url).
+			Expect(tt).
+			Header(headerCache, headerCacheRemote).
+			Header(headerCacheUpstream, "http://example.com"+url).
+			Header(headerContentType, mimeNarinfo).
+			Body(string(testdata[fNarinfo])).
+			Status(http.StatusOK).
+			End()
+
+		apitest.New().
+			Handler(proxy.router()).
+			Method("GET").
+			URL(url).
+			Expect(tt).
+			Header(headerCache, headerCacheHit).
+			Header(headerContentType, mimeNarinfo).
+			Body(string(testdata[fNarinfo])).
 			Status(http.StatusOK).
 			End()
 	})
@@ -483,7 +550,7 @@ func TestRouterNarinfoGet(t *testing.T) {
 		proxy.secretKeys["foo"] = ed25519.NewKeyFromSeed(seed)
 
 		emptyInfo := &Narinfo{}
-		if err := emptyInfo.Unmarshal(bytes.NewReader(fixtures[fNarinfo])); err != nil {
+		if err := emptyInfo.Unmarshal(bytes.NewReader(testdata[fNarinfo])); err != nil {
 			tt.Error(err)
 		}
 		emptyInfo.Sig = []string{}
@@ -493,7 +560,7 @@ func TestRouterNarinfoGet(t *testing.T) {
 		}
 
 		expectInfo := &Narinfo{}
-		if err := expectInfo.Unmarshal(bytes.NewReader(fixtures[fNarinfo])); err != nil {
+		if err := expectInfo.Unmarshal(bytes.NewReader(testdata[fNarinfo])); err != nil {
 			tt.Error(err)
 		}
 		expectInfo.Sig = []string{"foo:MGrENumWZ1kbm23vCTyYrw6hRBJtLGIIpfHjpZszs2D1G1AALMKvl49T66WIhx2X02s8n/zsfUPpga2bL6PmBQ=="}
@@ -528,17 +595,17 @@ func TestRouterNarinfoPut(t *testing.T) {
 	url := "/" + fNarinfo
 
 	t.Run("upload success", func(tt *testing.T) {
-		proxy := testProxy(tt)
+		proxy := withS3(testProxy(tt))
 		defer proxy.log.Sync()
 
 		apitest.New().
 			Handler(proxy.router()).
 			Method("PUT").
 			URL(url).
-			Body(string(fixtures[fNarinfo])).
+			Body(string(testdata[fNarinfo])).
 			Expect(tt).
 			Header(headerContentType, mimeText).
-			Body(``).
+			Body(`ok`).
 			Status(http.StatusOK).
 			End()
 
@@ -578,7 +645,7 @@ func TestRouterNarinfoPut(t *testing.T) {
 			Body("blah").
 			Expect(tt).
 			Header(headerContentType, mimeText).
-			Body(``).
+			Body(`Failed to parse line: "blah"`).
 			Status(http.StatusBadRequest).
 			End()
 	})
@@ -588,17 +655,17 @@ func TestRouterNarPut(t *testing.T) {
 	url := "/nar/" + fNar
 
 	t.Run("upload success", func(tt *testing.T) {
-		proxy := testProxy(tt)
+		proxy := withS3(testProxy(tt))
 		defer proxy.log.Sync()
 
 		apitest.New().
 			Handler(proxy.router()).
 			Method("PUT").
 			URL(url).
-			Body(string(fixtures[fNar])).
+			Body(string(testdata[fNar])).
 			Expect(tt).
 			Header(headerContentType, mimeText).
-			Body(``).
+			Body(`ok`).
 			Status(http.StatusOK).
 			End()
 
@@ -625,5 +692,40 @@ func TestRouterNarPut(t *testing.T) {
 		if !hasChunk {
 			tt.Error("Chunk not present in s3 store")
 		}
+	})
+}
+
+func TestStoryRemoteNarWithXz(t *testing.T) {
+	// url := "/nar/" + fNar
+
+	t.Run("found remote", func(tt *testing.T) {
+		proxy := testProxy(tt)
+		defer proxy.log.Sync()
+
+		mock1 := apitest.NewMock().
+			Get("/nar/0a0i3igcs6ri8crf4cd8gxc67zrnxh7pdq0gs0gdmw9mb86m5mhz.nar").
+			RespondWith().
+			Status(http.StatusNotFound).
+			End()
+
+		mock2 := apitest.NewMock().
+			Get("/nar/0a0i3igcs6ri8crf4cd8gxc67zrnxh7pdq0gs0gdmw9mb86m5mhz.nar.xz").
+			RespondWith().
+			Body(string(testdata[fNarXz])).
+			Status(http.StatusOK).
+			End()
+
+		apitest.New().
+			Report(apitest.SequenceDiagram()).
+			Mocks(mock2, mock1).
+			Handler(proxy.router()).
+			Method("GET").
+			URL("/nar/0a0i3igcs6ri8crf4cd8gxc67zrnxh7pdq0gs0gdmw9mb86m5mhz.nar").
+			Body(string(testdata[fNar])).
+			Expect(tt).
+			Header(headerContentType, mimeNar).
+			Body(string(testdata[fNar])).
+			Status(http.StatusOK).
+			End()
 	})
 }

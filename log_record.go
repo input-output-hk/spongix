@@ -27,6 +27,17 @@ func (r *LogRecord) WriteHeader(status int) {
 func withHTTPLogging(log *zap.Logger) func(http.Handler) http.Handler {
 	return func(h http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			url := r.URL.String()
+			isMetric := url == "/metrics"
+
+			if !isMetric {
+				log.Info("REQ",
+					zap.String("ident", r.Host),
+					zap.String("method", r.Method),
+					zap.String("url", url),
+				)
+			}
+
 			start := time.Now()
 			record := &LogRecord{
 				ResponseWriter: w,
@@ -39,13 +50,15 @@ func withHTTPLogging(log *zap.Logger) func(http.Handler) http.Handler {
 				level = log.Error
 			}
 
-			level("Request",
-				zap.Int("status_code", record.status),
-				zap.String("ident", r.Host),
-				zap.String("url", r.URL.String()),
-				zap.String("method", r.Method),
-				zap.Duration("duration", time.Since(start)),
-			)
+			if !(isMetric && record.status == 200) {
+				level("RES",
+					zap.String("ident", r.Host),
+					zap.String("method", r.Method),
+					zap.String("url", url),
+					zap.Int("status_code", record.status),
+					zap.Duration("duration", time.Since(start)),
+				)
+			}
 		})
 	}
 }

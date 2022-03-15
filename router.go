@@ -6,7 +6,9 @@ import (
 	"os"
 	"strconv"
 
+	"github.com/gorilla/handlers"
 	"github.com/gorilla/mux"
+	"github.com/numtide/go-nix/nar"
 	"github.com/pascaldekloe/metrics"
 	"go.uber.org/zap"
 )
@@ -21,7 +23,7 @@ const (
 func (proxy *Proxy) router() *mux.Router {
 	r := mux.NewRouter()
 	r.NotFoundHandler = notFound{}
-	r.Use(withHTTPLogging(proxy.log))
+	r.Use(withHTTPLogging(proxy.log), handlers.RecoveryHandler())
 
 	r.HandleFunc("/nix-cache-info", proxy.nixCacheInfo).Methods("GET")
 	r.HandleFunc("/metrics", metrics.ServeHTTP)
@@ -31,7 +33,7 @@ func (proxy *Proxy) router() *mux.Router {
 	r.HandleFunc(narinfo, proxy.narinfoGet).Methods("GET")
 	r.HandleFunc(narinfo, proxy.narinfoPut).Methods("PUT")
 
-	nar := "/nar/{hash:[0-9a-df-np-sv-z]{52}}.{ext:nar}"
+	nar := "/nar/{hash:[0-9a-df-np-sv-z]{52}}{ext:\\.nar(?:\\.xz|)}"
 	r.HandleFunc(nar, proxy.narHead).Methods("HEAD")
 	r.HandleFunc(nar, proxy.narGet).Methods("GET")
 	r.HandleFunc(nar, proxy.narPut).Methods("PUT")
@@ -66,6 +68,7 @@ func (proxy *Proxy) narinfoHead(w http.ResponseWriter, r *http.Request) {
 // GET /<hash>.narinfo
 func (proxy *Proxy) narinfoGet(w http.ResponseWriter, r *http.Request) {
 	rd := proxy.narinfoGetInner(w, r)
+
 	if rd == nil {
 		w.Header().Add(headerCache, headerCacheMiss)
 		w.Header().Add(headerContentType, mimeText)
@@ -76,9 +79,13 @@ func (proxy *Proxy) narinfoGet(w http.ResponseWriter, r *http.Request) {
 
 	info := &Narinfo{}
 	err := info.Unmarshal(rd)
+	rd.Close()
 	if internalServerError(w, err) {
+		proxy.log.Error("unmarshaling narinfo", zap.Error(err))
 		return
 	}
+
+	info.SanitizeNar()
 
 	if len(info.Sig) == 0 {
 		for name, key := range proxy.secretKeys {
@@ -87,9 +94,11 @@ func (proxy *Proxy) narinfoGet(w http.ResponseWriter, r *http.Request) {
 	} else {
 		info.SanitizeSignatures(proxy.trustedKeys)
 		if len(info.Sig) == 0 {
-			return
+			// return
 		}
 	}
+
+	fetchNars <- info
 
 	w.Header().Add(headerContentType, mimeNarinfo)
 	if err := info.Marshal(w); err != nil {
@@ -99,10 +108,65 @@ func (proxy *Proxy) narinfoGet(w http.ResponseWriter, r *http.Request) {
 	// proxy.serveChunks(w, r, mimeNarinfo, proxy.narinfoGetInner(w, r))
 }
 
+var fetchNars chan *Narinfo
+
+func (proxy *Proxy) startNarFetchers() {
+	fetchNars = make(chan *Narinfo, 1000)
+
+	for n := 0; n < 2; n++ {
+		go func() {
+			for info := range fetchNars {
+				url := info.URL
+
+				_, err := proxy.getIndex(url)
+				if err == nil {
+					continue
+				}
+
+				narRes := proxy.parallelRequest(narGetTimeout, "GET", url)
+				if narRes == nil {
+					continue
+				}
+
+				proxy.log.Debug("Fetching NAR for narinfo", zap.String("nar", url), zap.String("name", info.Name))
+				l, err := io.Copy(io.Discard, narRes)
+				if err != nil {
+					proxy.log.Error("copying NAR", zap.Error(err), zap.String("url", url), zap.Int64("len", l))
+					continue
+				}
+
+				idx, err := proxy.getIndex(url)
+				if err != nil {
+					proxy.log.Error("get NAR index", zap.Error(err), zap.String("url", url))
+					continue
+				}
+
+				narRd := nar.NewReader(newAssembler(proxy.localStore, idx))
+				for {
+					_, err := narRd.Next()
+					if err != nil {
+						if err == io.EOF {
+							break
+						}
+						proxy.log.Error("checking NAR", zap.Error(err), zap.String("url", url))
+						break
+					}
+				}
+			}
+		}()
+	}
+}
+
 // PUT /<hash>.narinfo
 func (proxy *Proxy) narinfoPut(w http.ResponseWriter, r *http.Request) {
+	status, err := proxy.narinfoPutInner(w, r)
 	w.Header().Add(headerContentType, mimeText)
-	w.WriteHeader(proxy.narinfoPutInner(w, r))
+	w.WriteHeader(status)
+	if err != nil {
+		w.Write([]byte(err.Error()))
+	} else {
+		w.Write([]byte("ok"))
+	}
 }
 
 // NAR handling
@@ -129,6 +193,7 @@ func (proxy *Proxy) narPut(w http.ResponseWriter, r *http.Request) {
 	if proxy.narPutInner(w, r) {
 		w.Header().Add(headerContentType, mimeText)
 		w.WriteHeader(200)
+		w.Write([]byte("ok"))
 	} else {
 		w.Header().Add(headerContentType, mimeText)
 		w.WriteHeader(500)
@@ -149,14 +214,25 @@ func (proxy *Proxy) serveChunks(w http.ResponseWriter, r *http.Request, mime str
 		}()
 
 		w.Header().Add(headerContentType, mime)
-		w.WriteHeader(200)
 		http.ServeFile(w, r, res.Name())
-	case io.Reader:
+	case *parallelResponse:
 		w.Header().Add(headerContentType, mime)
 		w.WriteHeader(200)
-		if _, err := io.Copy(w, res); err != nil {
+		if n, err := io.Copy(w, res); err != nil {
 			proxy.log.Error("failed copying chunks to response", zap.Error(err))
+		} else {
+			proxy.log.Debug("copied parallelResponse", zap.Int64("bytes", n))
 		}
+		res.cancel()
+	case io.ReadCloser:
+		w.Header().Add(headerContentType, mime)
+		w.WriteHeader(200)
+		if n, err := io.Copy(w, res); err != nil {
+			proxy.log.Error("failed copying chunks to response", zap.Error(err))
+		} else {
+			proxy.log.Debug("copied io.ReadCloser", zap.Int64("bytes", n))
+		}
+		res.Close()
 	default:
 		proxy.log.DPanic("unknown type", zap.Any("value", res))
 	}

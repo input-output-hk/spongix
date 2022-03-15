@@ -1,4 +1,8 @@
-{ lib, pkgs, inputs }:
+{
+  lib,
+  pkgs,
+  inputs,
+}:
 pkgs.nixosTest {
   name = "spongix";
 
@@ -9,7 +13,7 @@ pkgs.nixosTest {
 
   nodes = {
     cache = {
-      imports = [ inputs.self.nixosModules.spongix ];
+      imports = [inputs.self.nixosModules.spongix];
       services.spongix = {
         package = pkgs.spongix;
         cacheDir = "/cache";

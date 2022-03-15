@@ -21,10 +21,10 @@ packages = [
   "gocode",
   "gcc",
   "fd",
-  "nixfmt",
   "gnumake",
   "golangci-lint",
-  "dgraph",
-  "sqlite-interactive",
   "minio",
+  "minio-client",
+  "alejandra",
+  "diffoscope",
 ]

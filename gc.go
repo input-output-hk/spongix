@@ -2,14 +2,14 @@ package main
 
 import (
 	"context"
-	"database/sql"
-	"fmt"
 	"io/fs"
 	"math"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/folbricht/desync"
@@ -24,17 +24,20 @@ var (
 	metricChunkGcSize  = metrics.MustCounter("spongix_chunk_gc_bytes_local", "Size of chunks deleted by GC")
 	metricChunkSize    = metrics.MustInteger("spongix_chunk_size_local", "Size of the chunks in bytes")
 	metricChunkWalk    = metrics.MustCounter("spongix_chunk_walk_local", "Total time spent walking the cache in ms")
+	metricChunkDirs    = metrics.MustInteger("spongix_chunk_dir_count", "Number of directories the chunks are stored in")
 
 	metricIndexCount   = metrics.MustInteger("spongix_index_count_local", "Number of indices")
-	metricIndexGcCount = metrics.MustCounter("spongix_index_gc_count_local", "Number of indices deleted by GC")
-	metricIndexGcSize  = metrics.MustCounter("spongix_index_gc_bytes_local", "Size of indices deleted by GC")
 	metricIndexSize    = metrics.MustInteger("spongix_index_size_local", "Size of index files in bytes")
+	metricIndexGcCount = metrics.MustCounter("spongix_index_gc_count_local", "Number of indices deleted by GC")
 	metricIndexWalk    = metrics.MustCounter("spongix_index_walk_local", "Total time spent walking the index in ms")
 
+	metricInflated   = metrics.MustInteger("spongix_inflated_size_local", "Size of cache in bytes contents if they were inflated")
 	metricMaxSize    = metrics.MustInteger("spongix_max_size_local", "Limit for the local cache in bytes")
 	metricGcTime     = metrics.MustCounter("spongix_gc_time_local", "Total time spent in GC")
 	metricVerifyTime = metrics.MustCounter("spongix_verify_time_local", "Total time spent in verification")
 )
+
+var yes = struct{}{}
 
 func measure(metric *metrics.Counter, f func()) {
 	start := time.Now()
@@ -56,20 +59,24 @@ func (proxy *Proxy) gc() {
 
 func (proxy *Proxy) verify() {
 	proxy.log.Debug("Initializing Verifier", zap.Duration("interval", proxy.VerifyInterval))
+	// measure(metricVerifyTime, func() { proxy.verifyOnce() })
 
 	ticker := time.NewTicker(proxy.VerifyInterval)
 	for {
 		<-ticker.C
-		measure(metricVerifyTime, func() { proxy.verifyOnce() })
+		// measure(metricVerifyTime, func() { proxy.verifyOnce() })
 	}
 }
 
 func (proxy *Proxy) verifyOnce() {
+	proxy.log.Info("store verify started")
 	store := proxy.localStore.(desync.LocalStore)
-	err := store.Verify(context.Background(), 1, false, os.Stderr)
+	err := store.Verify(context.Background(), runtime.GOMAXPROCS(0), true, os.Stderr)
 
 	if err != nil {
 		proxy.log.Error("store verify failed", zap.Error(err))
+	} else {
+		proxy.log.Info("store verify completed")
 	}
 }
 
@@ -79,10 +86,68 @@ type ChunkStat struct {
 	mtime time.Time
 }
 
+type LRU struct {
+	live        []*ChunkStat
+	liveSize    uint64
+	liveSizeMax uint64
+	dead        map[desync.ChunkID]struct{}
+	deadSize    uint64
+}
+
+func NewLRU(liveSizeMax uint64) *LRU {
+	return &LRU{
+		live:        []*ChunkStat{},
+		liveSizeMax: liveSizeMax,
+		dead:        map[desync.ChunkID]struct{}{},
+	}
+}
+
+func (l *LRU) AddDead(stat *ChunkStat) {
+	l.dead[stat.id] = yes
+	l.deadSize += uint64(stat.size)
+}
+
+func (l *LRU) Add(stat *ChunkStat) {
+	isOlder := func(i int) bool { return l.live[i].mtime.Before(stat.mtime) }
+	i := sort.Search(len(l.live), isOlder)
+	l.insertAt(i, stat)
+	l.liveSize += uint64(stat.size)
+	for l.liveSize > l.liveSizeMax {
+		die := l.live[len(l.live)-1]
+		l.dead[die.id] = yes
+		l.live = l.live[:len(l.live)-1]
+		l.deadSize += uint64(die.size)
+		l.liveSize -= uint64(die.size)
+	}
+}
+
+func (l *LRU) insertAt(i int, v *ChunkStat) {
+	if i == len(l.live) {
+		l.live = append(l.live, v)
+	} else {
+		l.live = append(l.live[:i+1], l.live[i:]...)
+		l.live[i] = v
+	}
+}
+
+func (l *LRU) IsDead(id desync.ChunkID) bool {
+	_, found := l.dead[id]
+	return found
+}
+
+func (l *LRU) Dead() map[desync.ChunkID]struct{} {
+	return l.dead
+}
+
 // we assume every directory requires 4KB of size (one block) desync stores
 // files in directories with a 4 hex prefix, so we need to keep at least this
 // amount of space reserved.
 const maxCacheDirPortion = 0xffff * 4096
+
+type integrityCheck struct {
+	path  string
+	index desync.Index
+}
 
 /*
 Local GC strategies:
@@ -94,223 +159,218 @@ Local GC strategies:
   	If last access is too old, delete it.
 */
 func (proxy *Proxy) gcOnce(cacheStat map[string]*ChunkStat) {
-	// Keep cache size on disk below this size
 	maxCacheSize := (uint64(math.Pow(2, 30)) * proxy.CacheSize) - maxCacheDirPortion
-	metricMaxSize.Set(int64(maxCacheSize))
-
 	store := proxy.localStore.(desync.LocalStore)
 	indices := proxy.localIndex.(desync.LocalIndexStore)
+	lru := NewLRU(maxCacheSize)
+	walkStoreStart := time.Now()
+	chunkDirs := int64(0)
 
-	chunkStats := []*ChunkStat{}
-	onDiskSize := uint64(0)
-	startWalkStore := time.Now()
+	metricMaxSize.Set(int64(maxCacheSize))
 
-	err := filepath.WalkDir(store.Base, func(path string, info fs.DirEntry, err error) error {
+	// filepath.Walk is faster for our usecase because we need the stat result anyway.
+	walkStoreErr := filepath.Walk(store.Base, func(path string, info fs.FileInfo, err error) error {
 		if err != nil {
-			return err
-		}
-		if chunkStat, found := cacheStat[path]; found {
-			onDiskSize += uint64(chunkStat.size)
-			chunkStats = append(chunkStats, chunkStat)
-		} else {
-			if info.IsDir() {
+			if err == os.ErrNotExist {
 				return nil
-			}
-
-			name := info.Name()
-			if strings.HasPrefix(name, ".tmp") {
-				return nil
-			}
-
-			ext := filepath.Ext(name)
-			if ext != desync.CompressedChunkExt {
-				return nil
-			}
-
-			idstr := name[0 : len(name)-len(ext)]
-
-			id, err := desync.ChunkIDFromString(idstr)
-			if err != nil {
+			} else {
 				return err
 			}
-
-			i, err := info.Info()
-			if err != nil {
-				fmt.Println(err)
-				return err
-			}
-
-			onDiskSize += uint64(i.Size())
-
-			chunkStat := &ChunkStat{id: id, size: i.Size(), mtime: i.ModTime()}
-			chunkStats = append(chunkStats, chunkStat)
-			cacheStat[path] = chunkStat
 		}
 
-		return nil
-	})
-	if err != nil {
-		proxy.log.Error("Failure while walking store", zap.Error(err))
-		return
-	}
-
-	sort.Slice(chunkStats, func(i, j int) bool {
-		return chunkStats[i].mtime.Before(chunkStats[j].mtime)
-	})
-
-	oldChunks := map[desync.ChunkID]struct{}{}
-	newChunks := map[desync.ChunkID]struct{}{}
-	chunksToDeleteSize := uint64(0)
-	for _, stat := range chunkStats {
-		if (onDiskSize - chunksToDeleteSize) > maxCacheSize {
-			oldChunks[stat.id] = struct{}{}
-			chunksToDeleteSize += uint64(stat.size)
-		} else {
-			newChunks[stat.id] = struct{}{}
-		}
-	}
-
-	indicesToDelete := map[string]struct{}{}
-	indicesSize := int64(0)
-	indicesCount := int64(0)
-	indicesToDeleteSize := uint64(0)
-
-	startIndexWalk := time.Now()
-
-	err = filepath.WalkDir(indices.Path, func(path string, info fs.DirEntry, err error) error {
-		if err != nil {
-			return errors.WithMessage(err, "walking indices")
-		}
 		if info.IsDir() {
+			chunkDirs++
 			return nil
 		}
 
-		narHash := info.Name()
-		index, err := indices.GetIndex(narHash)
-		if err != nil {
-			return errors.WithMessage(err, "getting index from narHash")
+		name := info.Name()
+		if strings.HasPrefix(name, ".tmp") {
+			return nil
 		}
 
-		indicesSize += int64(index.Length())
+		ext := filepath.Ext(name)
+		if ext != desync.CompressedChunkExt {
+			return nil
+		}
+
+		idstr := name[0 : len(name)-len(ext)]
+
+		id, err := desync.ChunkIDFromString(idstr)
+		if err != nil {
+			return err
+		}
+
+		stat := &ChunkStat{id: id, size: info.Size(), mtime: info.ModTime()}
+
+		if _, err := store.GetChunk(id); err != nil {
+			proxy.log.Error("getting chunk", zap.Error(err), zap.String("chunk", id.String()))
+			lru.AddDead(stat)
+		} else {
+			lru.Add(stat)
+		}
+
+		return nil
+	})
+
+	metricChunkWalk.Add(uint64(time.Since(walkStoreStart).Milliseconds()))
+	metricChunkDirs.Set(chunkDirs)
+
+	if walkStoreErr != nil {
+		proxy.log.Error("While walking store", zap.Error(walkStoreErr))
+		return
+	}
+
+	metricChunkCount.Set(int64(len(lru.live)))
+	metricChunkGcCount.Add(uint64(len(lru.dead)))
+	metricChunkGcSize.Add(lru.deadSize)
+	metricChunkSize.Set(int64(lru.liveSize))
+
+	deadIndices := &sync.Map{}
+	walkIndicesStart := time.Now()
+	indicesCount := int64(0)
+	inflatedSize := int64(0)
+	ignoreBeforeTime := time.Now().Add(10 * time.Minute)
+
+	integrity := make(chan integrityCheck)
+	wg := &sync.WaitGroup{}
+
+	for i := 0; i < 3; i++ {
+		wg.Add(1)
+
+		go func(n int) {
+			defer wg.Done()
+
+			for {
+				select {
+				case <-time.After(1 * time.Second):
+					return
+				case check := <-integrity:
+					switch filepath.Ext(check.path) {
+					case ".nar":
+						// TODO: fix the go-nix NAR parser.
+						/*
+							asm := newAssembler(store, check.index)
+							io.ReadAll(asm)
+							narRd := nar.NewReader(newAssembler(store, check.index))
+							for {
+								e, err := narRd.Next()
+								pp(e.Name, e.Type)
+								if err != nil {
+									if err == io.EOF {
+										break
+									}
+									proxy.log.Error("checking NAR", zap.Error(err), zap.String("path", check.path))
+									pp(check.index)
+									narRd1 := nar.NewReader(newAssembler(store, check.index))
+									fd, err := proxy.tempFile()
+									if err != nil {
+										panic(err)
+									}
+									io.Copy(fd, narRd1)
+									pp(fd.Name())
+
+									deadIndices.Store(check.path, yes)
+									break
+								}
+							}
+						*/
+					case ".narinfo":
+						info, err := assembleNarinfo(store, check.index)
+						if err != nil {
+							proxy.log.Error("checking narinfo", zap.Error(err), zap.String("path", check.path))
+							pp(check.index)
+							pp(info)
+							deadIndices.Store(check.path, yes)
+						}
+					}
+				}
+			}
+		}(i)
+	}
+
+	walkIndicesErr := filepath.Walk(indices.Path, func(path string, info fs.FileInfo, err error) error {
+		if err != nil || info.IsDir() {
+			return err
+		}
+
+		isOld := info.ModTime().Before(ignoreBeforeTime)
+
+		ext := filepath.Ext(path)
+		isNar := ext == ".nar"
+		isNarinfo := ext == ".narinfo"
+
+		if !(isNar || isNarinfo || isOld) {
+			return nil
+		}
+
+		name := path[len(indices.Path):]
+
+		index, err := indices.GetIndex(name)
+		if err != nil {
+			return errors.WithMessage(err, "while getting narinfo index")
+		}
+
+		integrity <- integrityCheck{path: path, index: index}
+
+		inflatedSize += index.Length()
 		indicesCount++
 
-		for _, chunk := range index.Chunks {
-			_, found := oldChunks[chunk.ID]
-			if found {
-				indicesToDelete[narHash] = struct{}{}
-				indicesToDeleteSize += uint64(index.Length())
+		if len(index.Chunks) == 0 {
+			proxy.log.Debug("index chunks are empty", zap.String("path", path))
+			deadIndices.Store(path, yes)
+		} else {
+			for _, indexChunk := range index.Chunks {
+				if lru.IsDead(indexChunk.ID) {
+					proxy.log.Debug("some chunks are dead", zap.String("path", path))
+					deadIndices.Store(path, yes)
+					break
+				}
 			}
 		}
 
 		return nil
 	})
-	if err != nil {
-		proxy.log.Error("While walking index", zap.Error(err))
-		return
-	}
 
-	metricChunkCount.Set(int64(len(oldChunks) + len(newChunks)))
-	metricChunkGcCount.Add(uint64(len(oldChunks)))
-	metricChunkGcSize.Add(chunksToDeleteSize)
-	metricChunkSize.Set(int64(onDiskSize))
-	metricChunkWalk.Add(uint64(time.Since(startWalkStore).Milliseconds()))
+	wg.Wait()
+	close(integrity)
 
 	metricIndexCount.Set(indicesCount)
-	metricIndexGcCount.Add(uint64(len(indicesToDelete)))
-	metricIndexGcSize.Add(indicesToDeleteSize)
-	metricIndexSize.Set(indicesSize)
-	metricIndexWalk.Add(uint64(time.Since(startIndexWalk).Milliseconds()))
+	metricIndexWalk.Add(uint64(time.Since(walkIndicesStart).Milliseconds()))
+	metricInflated.Set(inflatedSize)
 
-	if len(indicesToDelete) == 0 {
+	if walkIndicesErr != nil {
+		proxy.log.Error("While walking index", zap.Error(walkIndicesErr))
 		return
 	}
+	deadIndexCount := uint64(0)
+	// time.Sleep(10 * time.Minute)
+	deadIndices.Range(func(key, value interface{}) bool {
+		path := key.(string)
+		proxy.log.Debug("moving index to trash", zap.String("path", path))
+		os.Rename(path, filepath.Join(proxy.Dir, "trash/index", filepath.Base(path)))
+		deadIndexCount++
+		return true
+	})
 
-	proxy.log.Debug("indices to remove",
-		zap.Int("index_files", len(indicesToDelete)),
-		zap.Uint64("index_files", indicesToDeleteSize),
-		zap.Uint64("chunk_fies", chunksToDeleteSize),
+	metricIndexGcCount.Add(deadIndexCount)
+
+	// we don't use store.Prune because it does another filepath.Walk and no
+	// added benefit for us.
+
+	for id := range lru.Dead() {
+		if err := store.RemoveChunk(id); err != nil {
+			proxy.log.Error("Removing chunk", zap.Error(err), zap.String("id", id.String()))
+		}
+	}
+
+	proxy.log.Debug(
+		"GC stats",
+		zap.Uint64("live_bytes", lru.liveSize),
+		zap.Uint64("live_max_bytes", lru.liveSizeMax),
+		zap.Int("live_chunk_count", len(lru.live)),
+		zap.Uint64("dead_bytes", lru.deadSize),
+		zap.Int("dead_chunk_count", len(lru.dead)),
+		zap.Uint64("dead_index_count", deadIndexCount),
+		zap.Duration("walk_indices_time", time.Since(walkIndicesStart)),
 	)
-
-	if err := proxy.deleteNarinfos(indicesToDelete); err != nil {
-		proxy.log.Error("Failed to delete narinfos", zap.Error(err))
-	}
-
-	startPrune := time.Now()
-
-	if err = store.Prune(context.Background(), newChunks); err != nil {
-		proxy.log.Error("Failed to prune store", zap.Error(err))
-	}
-
-	proxy.log.Debug("pruned store",
-		zap.Duration("duration", time.Since(startPrune)),
-	)
-}
-
-func (proxy *Proxy) deleteNarinfos(narinfos map[string]struct{}) error {
-	indexDir := proxy.localIndex.(desync.LocalIndexStore).Path
-
-	for narHash := range narinfos {
-		if narHash == "" {
-			continue
-		}
-		proxy.log.Debug("Delete narinfo", zap.String("narHash", narHash), zap.String("indexDir", indexDir))
-
-		tx, err := proxy.db.BeginTx(context.Background(), nil)
-		if err != nil {
-			proxy.log.Error("failed to start transaction", zap.Error(err))
-			return err
-		}
-
-		res := tx.QueryRow(`SELECT name FROM narinfos WHERE nar_hash = ?`, narHash)
-		var name string
-		if err = res.Scan(&name); err != nil && err != sql.ErrNoRows {
-			proxy.log.Error("failed delete narinfo", zap.String("hash", narHash), zap.Error(err))
-			if err = tx.Rollback(); err != nil {
-				return err
-			}
-			return err
-		}
-
-		_, err = tx.Exec(`DELETE FROM signatures WHERE name = ?`, name)
-		if err != nil && err != sql.ErrNoRows {
-			proxy.log.Error("failed delete narinfo sigs", zap.String("name", name), zap.String("hash", narHash), zap.Error(err))
-			if err = tx.Rollback(); err != nil {
-				return err
-			}
-			return err
-		}
-
-		_, err = tx.Exec(`DELETE FROM refs WHERE parent = ?`, name)
-		if err != nil && err != sql.ErrNoRows {
-			proxy.log.Error("failed delete narinfo refs", zap.String("name", name), zap.String("hash", narHash), zap.Error(err))
-			if err = tx.Rollback(); err != nil {
-				return err
-			}
-			return err
-		}
-
-		_, err = tx.Exec(`DELETE FROM narinfos WHERE nar_hash = ?`, narHash)
-		if err != nil && err != sql.ErrNoRows {
-			proxy.log.Error("failed delete narinfo", zap.String("hash", narHash), zap.Error(err))
-			if err = tx.Rollback(); err != nil {
-				return err
-			}
-			return err
-		}
-
-		if err = tx.Commit(); err != nil {
-			proxy.log.Error("failed to commit transaction", zap.String("name", name), zap.String("hash", narHash), zap.Error(err))
-			return err
-		}
-
-		indexFilePath := filepath.Join(indexDir, narHash)
-		if err = os.Remove(indexFilePath); err != nil && !os.IsNotExist(err) {
-			proxy.log.Error("failed to remove index", zap.String("path", indexFilePath), zap.String("name", name), zap.String("hash", narHash), zap.Error(err))
-			return err
-		}
-
-		proxy.log.Debug("Deleted narinfo", zap.String("path", indexFilePath))
-	}
-
-	return nil
 }

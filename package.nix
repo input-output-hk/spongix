@@ -1,17 +1,20 @@
-{ buildGoModule, inclusive, rev }:
-let
-  final = package "sha256-Z7pTznhsyKQLkemTx7dM9V6/Leva88XfQM81yl3yPnE=";
+{
+  buildGoModule,
+  inclusive,
+  rev,
+}: let
+  final = package "sha256-wPHiDqvOib/pA/4hp4Z8GIW4SXM+iIKADjpDUr6Xa0A=";
   package = vendorSha256:
     buildGoModule rec {
       pname = "spongix";
-      version = "2022.02.22.005";
+      version = "2022.03.12.003";
       inherit vendorSha256;
 
       passthru.invalidHash =
         package "sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
 
       src = inclusive ./. [
-        ./fixtures
+        ./testdata
         ./go.mod
         ./go.sum
 
@@ -26,6 +29,7 @@ let
         ./narinfo_test.go
         ./router.go
         ./router_test.go
+        ./tee.go
       ];
 
       CGO_ENABLED = "1";
@@ -36,4 +40,5 @@ let
         "-X main.buildVersion=${version} -X main.buildCommit=${rev}"
       ];
     };
-in final
+in
+  final

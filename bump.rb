@@ -19,7 +19,7 @@ version_date = Date.new(md[:y].to_i, md[:m].to_i, md[:d].to_i)
 old_version = version
 
 new_version =
-  if today != version_date
+  if today == version_date
     old_version.succ
   else
     today.strftime('%Y.%m.%d.001')

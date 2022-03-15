@@ -25,12 +25,22 @@ const (
 )
 
 func main() {
+	// cpuprofile := "spongix.pprof"
+	// f, err := os.Create(cpuprofile)
+	// if err != nil {
+	// 	log.Fatal(err)
+	// }
+	// pprof.StartCPUProfile(f)
+	// defer pprof.StopCPUProfile()
+
 	proxy := NewProxy()
 	arg.MustParse(proxy)
 	proxy.SetupLogger()
 	proxy.SetupDesync()
 	proxy.SetupKeys()
 	proxy.SetupS3()
+	proxy.startNarFetchers()
+
 	go proxy.gc()
 	go proxy.verify()
 	go func() {
@@ -47,7 +57,7 @@ func main() {
 	// nolint
 	defer proxy.log.Sync()
 
-	const timeout = 15 * time.Second
+	const timeout = 15 * time.Minute
 
 	srv := &http.Server{
 		Handler:      proxy.router(),
@@ -98,8 +108,8 @@ type Proxy struct {
 	CacheInfoPriority uint64        `arg:"--cache-info-priority,env:CACHE_INFO_PRIORITY" help:"Priority in nix-cache-info"`
 	AverageChunkSize  uint64        `arg:"--average-chunk-size,env:AVERAGE_CHUNK_SIZE" help:"Chunk size will be between /4 and *4 of this value"`
 	CacheSize         uint64        `arg:"--cache-size,env:CACHE_SIZE" help:"Number of gigabytes to keep in the disk cache"`
-	VerifyInterval    time.Duration `arg:"--verify-interval,env:VERIFY_INTERVAL" help:"Seconds between verification runs"`
-	GcInterval        time.Duration `arg:"--gc-interval,env:GC_INTERVAL" help:"Seconds between store garbage collection runs"`
+	VerifyInterval    time.Duration `arg:"--verify-interval,env:VERIFY_INTERVAL" help:"Time between verification runs"`
+	GcInterval        time.Duration `arg:"--gc-interval,env:GC_INTERVAL" help:"Time between store garbage collection runs"`
 	LogLevel          string        `arg:"--log-level,env:LOG_LEVEL" help:"One of debug, info, warn, error, dpanic, panic, fatal"`
 	LogMode           string        `arg:"--log-mode,env:LOG_MODE" help:"development or production"`
 
@@ -113,7 +123,8 @@ type Proxy struct {
 	localStore desync.WriteStore
 	localIndex desync.IndexWriteStore
 
-	log *zap.Logger
+	log                    *zap.Logger
+	parallelRequestOrdered bool
 }
 
 func NewProxy() *Proxy {
@@ -129,7 +140,6 @@ func NewProxy() *Proxy {
 		TrustedPublicKeys: []string{},
 		Substituters:      []string{},
 		CacheInfoPriority: 50,
-		DatabaseDSN:       "file:spongix.sqlite",
 		AverageChunkSize:  defaultChunkAverage,
 		VerifyInterval:    time.Hour,
 		GcInterval:        time.Minute,
@@ -226,7 +236,7 @@ func (proxy *Proxy) SetupKeys() {
 }
 
 func (proxy *Proxy) StateDirs() []string {
-	return []string{"store", "index", "tmp"}
+	return []string{"store", "index", "index/nar", "tmp", "trash/index"}
 }
 
 func (proxy *Proxy) SetupDesync() {

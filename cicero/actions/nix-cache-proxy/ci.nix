@@ -1,5 +1,11 @@
-{ name, std, lib, actionLib, ... }@args:
-let startOf = of: of.value."${name}".start;
+{
+  name,
+  std,
+  lib,
+  actionLib,
+  ...
+} @ args: let
+  startOf = of: of.value."${name}".start;
 in {
   inputs.start = ''
     "${name}": start: {
@@ -9,21 +15,22 @@ in {
     }
   '';
 
-  output = { start }:
-    let facts = start.value."${name}".start;
-    in {
-      success."${name}" = {
-        ok = true;
-        inherit (facts) clone_url sha;
-      };
+  output = {start}: let
+    facts = start.value."${name}".start;
+  in {
+    success."${name}" = {
+      ok = true;
+      inherit (facts) clone_url sha;
     };
+  };
 
-  job = { start }:
-    let facts = start.value."${name}".start;
-    in std.chain args [
+  job = {start}: let
+    facts = start.value."${name}".start;
+  in
+    std.chain args [
       actionLib.simpleJob
 
-      { resources.memory = 1024 * 6; }
+      {resources.memory = 1024 * 6;}
 
       (lib.optionalAttrs (facts ? statuses_url)
         (std.github.reportStatus facts.statuses_url))

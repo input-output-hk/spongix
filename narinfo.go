@@ -21,21 +21,21 @@ import (
 )
 
 type Narinfo struct {
-	Name        string
-	StorePath   string
-	URL         string
-	Compression string
-	FileHash    string
-	FileSize    int64
-	NarHash     string
-	NarSize     int64
-	References  []string
-	Deriver     string
-	Sig         []string
-	CA          string
+	Name        string   `json:"name"`
+	StorePath   string   `json:"store_path"`
+	URL         string   `json:"url"`
+	Compression string   `json:"compression"`
+	FileHash    string   `json:"file_hash"`
+	FileSize    int64    `json:"file_size"`
+	NarHash     string   `json:"nar_hash"`
+	NarSize     int64    `json:"nar_size"`
+	References  []string `json:"references"`
+	Deriver     string   `json:"deriver"`
+	Sig         []string `json:"sig"`
+	CA          string   `json:"ca"`
 }
 
-func (proxy *Proxy) ValidateStore() {
+func (proxy *Proxy) validateStore() {
 	err := filepath.Walk(proxy.Dir, func(path string, fsInfo fs.FileInfo, err error) error {
 		if err != nil {
 			return err
@@ -48,7 +48,7 @@ func (proxy *Proxy) ValidateStore() {
 		switch filepath.Ext(path) {
 		case ".narinfo":
 			return proxy.validateNarinfo(proxy.Dir, path, true)
-		case ".xz", ".bzip2", "br", "zst", ".nar":
+		case ".xz", ".bzip2", ".br", ".zst", ".nar":
 			return validateNar(proxy.Dir, path)
 		}
 		return nil
@@ -196,6 +196,10 @@ func (info *Narinfo) Unmarshal(input io.Reader) error {
 	}
 
 	scanner := bufio.NewScanner(input)
+	capacity := 1024 * 1024
+	buf := make([]byte, 0, capacity)
+	scanner.Buffer(buf, capacity)
+
 	for scanner.Scan() {
 		line := scanner.Text()
 
@@ -236,10 +240,10 @@ func (info *Narinfo) Unmarshal(input io.Reader) error {
 			if info.FileSize != 0 {
 				return errors.Errorf("Duplicate FileSize")
 			}
-			if fileSize, err := strconv.ParseInt(value, 10, 64); err != nil {
-				return err
-			} else {
+			if fileSize, err := strconv.ParseInt(value, 10, 64); err == nil {
 				info.FileSize = fileSize
+			} else {
+				return err
 			}
 		case "NarHash":
 			if info.NarHash != "" {
@@ -250,10 +254,10 @@ func (info *Narinfo) Unmarshal(input io.Reader) error {
 			if info.NarSize != 0 {
 				return errors.Errorf("Duplicate NarSize")
 			}
-			if narSize, err := strconv.ParseInt(value, 10, 64); err != nil {
-				return err
-			} else {
+			if narSize, err := strconv.ParseInt(value, 10, 64); err == nil {
 				info.NarSize = narSize
+			} else {
+				return err
 			}
 		case "References":
 			info.References = append(info.References, strings.Split(value, " ")...)
@@ -276,6 +280,10 @@ func (info *Narinfo) Unmarshal(input io.Reader) error {
 
 	if err := scanner.Err(); err != nil {
 		return errors.WithMessage(err, "Parsing narinfo")
+	}
+
+	if info.Compression == "" {
+		info.Compression = "bzip2"
 	}
 
 	if err := info.Validate(); err != nil {
@@ -335,6 +343,21 @@ func (info *Narinfo) Validate() error {
 	}
 
 	return nil
+}
+
+// modifies the Narinfo to point to an uncompressed NAR file.
+// This doesn't affect validity of the signature.
+func (info *Narinfo) SanitizeNar() {
+	if info.Compression == "none" {
+		return
+	}
+
+	info.FileHash = info.NarHash
+	info.FileSize = info.NarSize
+	info.Compression = "none"
+
+	ext := filepath.Ext(info.URL)
+	info.URL = info.URL[0 : len(info.URL)-len(ext)]
 }
 
 // ensures only valid sigantures are kept in the Narinfo

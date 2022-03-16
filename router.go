@@ -238,8 +238,22 @@ func (proxy *Proxy) serveChunks(w http.ResponseWriter, r *http.Request, mime str
 				w.Header().Add(headerContentType, mimeText)
 				w.WriteHeader(500)
 				w.Write([]byte(err.Error()))
+				return
 			} else {
 				wr = xzWr
+				w.Header().Add(headerContentType, mime)
+				w.WriteHeader(200)
+
+				if n, err := io.Copy(wr, res); err != nil {
+					proxy.log.Error("failed copying chunks to response", zap.Error(err))
+				} else {
+					proxy.log.Debug("copied io.ReadCloser through xz", zap.Int64("bytes", n))
+				}
+				res.Close()
+				if err := xzWr.Close(); err != nil {
+					proxy.log.Error("failed closing xz writer", zap.Error(err))
+				}
+				return
 			}
 		}
 
@@ -251,7 +265,6 @@ func (proxy *Proxy) serveChunks(w http.ResponseWriter, r *http.Request, mime str
 		} else {
 			proxy.log.Debug("copied io.ReadCloser", zap.Int64("bytes", n))
 		}
-
 		res.Close()
 	default:
 		proxy.log.DPanic("unknown type", zap.Any("value", res))

@@ -7,7 +7,7 @@
   package = vendorSha256:
     buildGoModule rec {
       pname = "spongix";
-      version = "2022.03.12.003";
+      version = "2022.03.16.002";
       inherit vendorSha256;
 
       passthru.invalidHash =

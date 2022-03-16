@@ -4,12 +4,14 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strconv"
 
 	"github.com/gorilla/handlers"
 	"github.com/gorilla/mux"
 	"github.com/numtide/go-nix/nar"
 	"github.com/pascaldekloe/metrics"
+	"github.com/ulikunitz/xz"
 	"go.uber.org/zap"
 )
 
@@ -225,13 +227,31 @@ func (proxy *Proxy) serveChunks(w http.ResponseWriter, r *http.Request, mime str
 		}
 		res.cancel()
 	case io.ReadCloser:
+		wr := io.Writer(w)
+		// NOTE: this is a hack to work around clients that have existing .narinfo
+		// files that reference .nar.xz URLs.
+		// Nix doesn't know which cache a .narinfo came from, so it will just ask
+		// us for it.
+		if filepath.Ext(r.URL.String()) == ".xz" {
+			xzWr, err := xz.NewWriter(w)
+			if err != nil {
+				w.Header().Add(headerContentType, mimeText)
+				w.WriteHeader(500)
+				w.Write([]byte(err.Error()))
+			} else {
+				wr = xzWr
+			}
+		}
+
 		w.Header().Add(headerContentType, mime)
 		w.WriteHeader(200)
-		if n, err := io.Copy(w, res); err != nil {
+
+		if n, err := io.Copy(wr, res); err != nil {
 			proxy.log.Error("failed copying chunks to response", zap.Error(err))
 		} else {
 			proxy.log.Debug("copied io.ReadCloser", zap.Int64("bytes", n))
 		}
+
 		res.Close()
 	default:
 		proxy.log.DPanic("unknown type", zap.Any("value", res))

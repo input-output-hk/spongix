@@ -1,8 +1,8 @@
-# Spongix
-
-![Spongix mascot](img/spongix.svg)
-
-A proxy that acts as binary cache for Nix.
+<div align="center">
+  <img src="https://github.cominput-output-hk/spongix/raw/main/img/spongix.svg" width="250" />
+  <h1>Spongix</h1>
+  <p>A proxy that acts as binary cache for Nix</span>
+</div>
 
 * Signs Narinfo in flight with own private key
 * Authenticates with S3 to forward NARs for long-term storage

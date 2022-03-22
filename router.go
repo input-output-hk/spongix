@@ -24,24 +24,28 @@ func (proxy *Proxy) router() *mux.Router {
 		handlers.RecoveryHandler(),
 	)
 
-	r.HandleFunc("/nix-cache-info", proxy.nixCacheInfo).Methods("GET")
 	r.HandleFunc("/metrics", metrics.ServeHTTP)
 
-	narinfo := r.Name("narinfo").Path("/{hash:[0-9a-df-np-sv-z]{32}}.narinfo").Subrouter()
-	narinfo.Use(
-		proxy.withLocalCacheHandler(),
-		proxy.withS3CacheHandler(),
-		withRemoteHandler(proxy.log, proxy.Substituters, []string{""}, proxy.cacheChan),
-	)
-	narinfo.Methods("HEAD", "GET", "PUT").HandlerFunc(serveNotFound)
+	// backwards compat
+	for _, prefix := range []string{"/cache", ""} {
+		r.HandleFunc(prefix+"/nix-cache-info", proxy.nixCacheInfo).Methods("GET")
 
-	nar := r.Name("nar").Path("/nar/{hash:[0-9a-df-np-sv-z]{52}}{ext:\\.nar(?:\\.xz|)}").Subrouter()
-	nar.Use(
-		proxy.withLocalCacheHandler(),
-		proxy.withS3CacheHandler(),
-		withRemoteHandler(proxy.log, proxy.Substituters, []string{"", ".xz"}, proxy.cacheChan),
-	)
-	nar.Methods("HEAD", "GET", "PUT").HandlerFunc(serveNotFound)
+		narinfo := r.Name("narinfo").Path(prefix + "/{hash:[0-9a-df-np-sv-z]{32}}.narinfo").Subrouter()
+		narinfo.Use(
+			proxy.withLocalCacheHandler(),
+			proxy.withS3CacheHandler(),
+			withRemoteHandler(proxy.log, proxy.Substituters, []string{""}, proxy.cacheChan),
+		)
+		narinfo.Methods("HEAD", "GET", "PUT").HandlerFunc(serveNotFound)
+
+		nar := r.Name("nar").Path(prefix + "/nar/{hash:[0-9a-df-np-sv-z]{52}}{ext:\\.nar(?:\\.xz|)}").Subrouter()
+		nar.Use(
+			proxy.withLocalCacheHandler(),
+			proxy.withS3CacheHandler(),
+			withRemoteHandler(proxy.log, proxy.Substituters, []string{"", ".xz"}, proxy.cacheChan),
+		)
+		nar.Methods("HEAD", "GET", "PUT").HandlerFunc(serveNotFound)
+	}
 
 	return r
 }

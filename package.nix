@@ -21,6 +21,7 @@
         ./go.sum
 
         ./assemble.go
+        ./assemble_test.go
         ./cache.go
         ./fake.go
         ./gc.go

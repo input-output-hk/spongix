@@ -108,7 +108,7 @@ func Test_NarinfoVerify(t *testing.T) {
 	a.So(invalid, assertions.ShouldHaveLength, 1)
 
 	info.Sig = []string{}
-	a.So(info.Sign(name, key), assertions.ShouldBeNil)
+	info.Sign(name, key)
 	valid, invalid = info.ValidInvalidSignatures(publicKeys)
 	a.So(valid, assertions.ShouldHaveLength, 1)
 	a.So(invalid, assertions.ShouldHaveLength, 0)

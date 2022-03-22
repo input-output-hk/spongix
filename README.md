@@ -47,15 +47,15 @@ Set a `post-build-hook` in your nix configuration to a script like this:
 ## TODO
 
 - [ ] Write better integration tests (with cicero)
-- [x] Verify existing signatures
-- [x] Store narinfo in a database
-- [x] Upload to S3 as well as the local store
-- [x] Identify and solve concurrency issues
+- [ ] Healthchecks
 - [ ] A way to horizontally scale (probably by just locking via consul, s3, raft, postgres, rqlite, dqlite, ...)
+- [ ] Proper CLI usage
+- [ ] Benchmark of desync index vs db lookup performance
 - [x] Additional signing for a set of allowed public keys
 - [x] Disk cache size limits and LRU eviction
-- [ ] Benchmark of desync index vs db lookup performance
 - [x] Forward lookups across multiple upstream caches
-- [ ] Proper CLI usage
+- [x] Identify and solve concurrency issues
 - [x] Prometheus metrics
-- [ ] Healthchecks
+- [x] Store narinfo in a database
+- [x] Upload to S3 as well as the local store
+- [x] Verify existing signatures

@@ -2,10 +2,8 @@ package main
 
 import (
 	"bytes"
-	"context"
 	"io"
 	"os"
-	"testing"
 
 	"github.com/folbricht/desync"
 	"github.com/pkg/errors"
@@ -87,29 +85,4 @@ func (s fakeIndex) GetIndexReader(id string) (io.ReadCloser, error) {
 		return io.NopCloser(bytes.NewBuffer(idx)), nil
 	}
 	return nil, os.ErrNotExist
-}
-
-func insertFake(
-	t *testing.T,
-	store desync.WriteStore,
-	index desync.IndexWriteStore,
-	path string,
-	content []byte) {
-	chunker, err := desync.NewChunker(
-		bytes.NewBuffer(content),
-		defaultChunkAverage/4,
-		defaultChunkAverage,
-		defaultChunkAverage*4)
-	if err != nil {
-		t.Error(err)
-	}
-
-	idx, err := desync.ChunkStream(context.Background(), chunker, store, 1)
-	if err != nil {
-		t.Error(err)
-	}
-
-	if err := index.StoreIndex(path, idx); err != nil {
-		t.Error(err)
-	}
 }

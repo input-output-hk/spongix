@@ -1,13 +1,15 @@
 {
   buildGoModule,
+  lzma,
+  pkg-config,
   inclusive,
   rev,
 }: let
-  final = package "sha256-wPHiDqvOib/pA/4hp4Z8GIW4SXM+iIKADjpDUr6Xa0A=";
+  final = package "sha256-Pq/tTYY7kg8RK+XnooCa0CtW05A19HjazzVU+UzgdUg=";
   package = vendorSha256:
     buildGoModule rec {
       pname = "spongix";
-      version = "2022.03.16.002";
+      version = "2022.03.22.001";
       inherit vendorSha256;
 
       passthru.invalidHash =
@@ -18,8 +20,8 @@
         ./go.mod
         ./go.sum
 
-        ./actions.go
         ./assemble.go
+        ./cache.go
         ./fake.go
         ./gc.go
         ./helpers.go
@@ -29,9 +31,9 @@
         ./narinfo_test.go
         ./router.go
         ./router_test.go
-        ./tee.go
       ];
 
+      proxyVendor = true;
       CGO_ENABLED = "1";
 
       ldflags = [

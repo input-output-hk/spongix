@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"io"
 	"io/fs"
 	"math"
 	"os"
@@ -13,6 +14,7 @@ import (
 	"time"
 
 	"github.com/folbricht/desync"
+	"github.com/numtide/go-nix/nar"
 	"github.com/pascaldekloe/metrics"
 	"github.com/pkg/errors"
 	"go.uber.org/zap"
@@ -27,7 +29,6 @@ var (
 	metricChunkDirs    = metrics.MustInteger("spongix_chunk_dir_count", "Number of directories the chunks are stored in")
 
 	metricIndexCount   = metrics.MustInteger("spongix_index_count_local", "Number of indices")
-	metricIndexSize    = metrics.MustInteger("spongix_index_size_local", "Size of index files in bytes")
 	metricIndexGcCount = metrics.MustCounter("spongix_index_gc_count_local", "Number of indices deleted by GC")
 	metricIndexWalk    = metrics.MustCounter("spongix_index_walk_local", "Total time spent walking the index in ms")
 
@@ -47,7 +48,7 @@ func measure(metric *metrics.Counter, f func()) {
 
 func (proxy *Proxy) gc() {
 	proxy.log.Debug("Initializing GC", zap.Duration("interval", proxy.GcInterval))
-	cacheStat := map[string]*ChunkStat{}
+	cacheStat := map[string]*chunkStat{}
 	measure(metricGcTime, func() { proxy.gcOnce(cacheStat) })
 
 	ticker := time.NewTicker(proxy.GcInterval)
@@ -59,12 +60,12 @@ func (proxy *Proxy) gc() {
 
 func (proxy *Proxy) verify() {
 	proxy.log.Debug("Initializing Verifier", zap.Duration("interval", proxy.VerifyInterval))
-	// measure(metricVerifyTime, func() { proxy.verifyOnce() })
+	measure(metricVerifyTime, func() { proxy.verifyOnce() })
 
 	ticker := time.NewTicker(proxy.VerifyInterval)
 	for {
 		<-ticker.C
-		// measure(metricVerifyTime, func() { proxy.verifyOnce() })
+		measure(metricVerifyTime, func() { proxy.verifyOnce() })
 	}
 }
 
@@ -80,34 +81,34 @@ func (proxy *Proxy) verifyOnce() {
 	}
 }
 
-type ChunkStat struct {
+type chunkStat struct {
 	id    desync.ChunkID
 	size  int64
 	mtime time.Time
 }
 
-type LRU struct {
-	live        []*ChunkStat
+type chunkLRU struct {
+	live        []*chunkStat
 	liveSize    uint64
 	liveSizeMax uint64
 	dead        map[desync.ChunkID]struct{}
 	deadSize    uint64
 }
 
-func NewLRU(liveSizeMax uint64) *LRU {
-	return &LRU{
-		live:        []*ChunkStat{},
+func NewLRU(liveSizeMax uint64) *chunkLRU {
+	return &chunkLRU{
+		live:        []*chunkStat{},
 		liveSizeMax: liveSizeMax,
 		dead:        map[desync.ChunkID]struct{}{},
 	}
 }
 
-func (l *LRU) AddDead(stat *ChunkStat) {
+func (l *chunkLRU) AddDead(stat *chunkStat) {
 	l.dead[stat.id] = yes
 	l.deadSize += uint64(stat.size)
 }
 
-func (l *LRU) Add(stat *ChunkStat) {
+func (l *chunkLRU) Add(stat *chunkStat) {
 	isOlder := func(i int) bool { return l.live[i].mtime.Before(stat.mtime) }
 	i := sort.Search(len(l.live), isOlder)
 	l.insertAt(i, stat)
@@ -121,7 +122,7 @@ func (l *LRU) Add(stat *ChunkStat) {
 	}
 }
 
-func (l *LRU) insertAt(i int, v *ChunkStat) {
+func (l *chunkLRU) insertAt(i int, v *chunkStat) {
 	if i == len(l.live) {
 		l.live = append(l.live, v)
 	} else {
@@ -130,12 +131,12 @@ func (l *LRU) insertAt(i int, v *ChunkStat) {
 	}
 }
 
-func (l *LRU) IsDead(id desync.ChunkID) bool {
+func (l *chunkLRU) IsDead(id desync.ChunkID) bool {
 	_, found := l.dead[id]
 	return found
 }
 
-func (l *LRU) Dead() map[desync.ChunkID]struct{} {
+func (l *chunkLRU) Dead() map[desync.ChunkID]struct{} {
 	return l.dead
 }
 
@@ -149,6 +150,27 @@ type integrityCheck struct {
 	index desync.Index
 }
 
+func checkNarContents(store desync.Store, idx desync.Index) error {
+	buf := newAssembler(store, idx)
+	narRd := nar.NewReader(buf)
+	none := true
+	for {
+		if _, err := narRd.Next(); err == nil {
+			none = false
+		} else if err == io.EOF {
+			break
+		} else {
+			return err
+		}
+	}
+
+	if none {
+		return errors.New("no contents in NAR")
+	}
+
+	return nil
+}
+
 /*
 Local GC strategies:
   Check every index file:
@@ -158,7 +180,7 @@ Local GC strategies:
     If index is missing, delete it.
   	If last access is too old, delete it.
 */
-func (proxy *Proxy) gcOnce(cacheStat map[string]*ChunkStat) {
+func (proxy *Proxy) gcOnce(cacheStat map[string]*chunkStat) {
 	maxCacheSize := (uint64(math.Pow(2, 30)) * proxy.CacheSize) - maxCacheDirPortion
 	store := proxy.localStore.(desync.LocalStore)
 	indices := proxy.localIndex.(desync.LocalIndexStore)
@@ -200,7 +222,7 @@ func (proxy *Proxy) gcOnce(cacheStat map[string]*ChunkStat) {
 			return err
 		}
 
-		stat := &ChunkStat{id: id, size: info.Size(), mtime: info.ModTime()}
+		stat := &chunkStat{id: id, size: info.Size(), mtime: info.ModTime()}
 
 		if _, err := store.GetChunk(id); err != nil {
 			proxy.log.Error("getting chunk", zap.Error(err), zap.String("chunk", id.String()))
@@ -247,36 +269,13 @@ func (proxy *Proxy) gcOnce(cacheStat map[string]*ChunkStat) {
 				case check := <-integrity:
 					switch filepath.Ext(check.path) {
 					case ".nar":
-						// TODO: fix the go-nix NAR parser.
-						/*
-							asm := newAssembler(store, check.index)
-							io.ReadAll(asm)
-							narRd := nar.NewReader(newAssembler(store, check.index))
-							for {
-								e, err := narRd.Next()
-								pp(e.Name, e.Type)
-								if err != nil {
-									if err == io.EOF {
-										break
-									}
-									proxy.log.Error("checking NAR", zap.Error(err), zap.String("path", check.path))
-									pp(check.index)
-									narRd1 := nar.NewReader(newAssembler(store, check.index))
-									fd, err := proxy.tempFile()
-									if err != nil {
-										panic(err)
-									}
-									io.Copy(fd, narRd1)
-									pp(fd.Name())
-
-									deadIndices.Store(check.path, yes)
-									break
-								}
-							}
-						*/
+						if err := checkNarContents(store, check.index); err != nil {
+							proxy.log.Error("checking NAR contents", zap.Error(err), zap.String("path", check.path))
+							deadIndices.Store(check.path, yes)
+							continue
+						}
 					case ".narinfo":
-						info, err := assembleNarinfo(store, check.index)
-						if err != nil {
+						if info, err := assembleNarinfo(store, check.index); err != nil {
 							proxy.log.Error("checking narinfo", zap.Error(err), zap.String("path", check.path))
 							pp(check.index)
 							pp(info)
@@ -307,7 +306,7 @@ func (proxy *Proxy) gcOnce(cacheStat map[string]*ChunkStat) {
 
 		index, err := indices.GetIndex(name)
 		if err != nil {
-			return errors.WithMessage(err, "while getting narinfo index")
+			return errors.WithMessagef(err, "while getting index %s", name)
 		}
 
 		integrity <- integrityCheck{path: path, index: index}
@@ -347,7 +346,7 @@ func (proxy *Proxy) gcOnce(cacheStat map[string]*ChunkStat) {
 	deadIndices.Range(func(key, value interface{}) bool {
 		path := key.(string)
 		proxy.log.Debug("moving index to trash", zap.String("path", path))
-		os.Rename(path, filepath.Join(proxy.Dir, "trash/index", filepath.Base(path)))
+		_ = os.Remove(path)
 		deadIndexCount++
 		return true
 	})

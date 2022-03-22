@@ -8,37 +8,13 @@ import (
 	"github.com/pkg/errors"
 )
 
-func (proxy *Proxy) getCache() desync.Store {
-	var store desync.Store
-	if proxy.s3Store != nil {
-		store = desync.NewCache(proxy.localStore, proxy.s3Store)
-	} else {
-		store = proxy.localStore
-	}
-	return store
-}
-
-func (proxy *Proxy) getIndex(id string) (index desync.Index, err error) {
-	if index, err = proxy.localIndex.GetIndex(id); err == nil {
-		return index, nil
-	}
-
-	if proxy.s3Index == nil {
-		return index, errors.New("not found in any index")
-	}
-
-	if index, err = proxy.s3Index.GetIndex(id); err == nil {
-		return index, nil
-	}
-
-	return index, errors.New("not found in any index")
-}
-
 type assembler struct {
-	store desync.Store
-	index desync.Index
-	idx   int
-	data  *bytes.Buffer
+	store      desync.Store
+	index      desync.Index
+	idx        int
+	data       *bytes.Buffer
+	readBytes  int64
+	wroteBytes int64
 }
 
 func newAssembler(store desync.Store, index desync.Index) *assembler {
@@ -48,33 +24,37 @@ func newAssembler(store desync.Store, index desync.Index) *assembler {
 func (a *assembler) Close() error { return nil }
 
 func (a *assembler) Read(p []byte) (int, error) {
+	if a.data.Len() > 0 {
+		writeBytes, _ := a.data.Read(p)
+		a.wroteBytes += int64(writeBytes)
+		return writeBytes, nil
+	}
+
 	if a.idx >= len(a.index.Chunks) {
+		if a.wroteBytes != a.index.Length() {
+			pp(a.wroteBytes, a.readBytes, a.index.Length(), a.idx, len(a.index.Chunks))
+			return 0, errors.New("written bytes don't match index length")
+		}
+		if a.wroteBytes != a.readBytes {
+			pp(a.wroteBytes, a.readBytes, a.index.Length(), a.idx, len(a.index.Chunks))
+			return 0, errors.New("read and written bytes are different")
+		}
 		return 0, io.EOF
 	}
 
-	if a.data.Len() > 0 {
-		n, _ := a.data.Read(p)
-		return n, nil
-	}
-
-	indexChunk := a.index.Chunks[a.idx]
-	chunk, err := a.store.GetChunk(indexChunk.ID)
-	if err != nil {
+	if chunk, err := a.store.GetChunk(a.index.Chunks[a.idx].ID); err != nil {
 		return 0, err
-	}
-
-	data, err := chunk.Data()
-	if err != nil {
+	} else if data, err := chunk.Data(); err != nil {
 		return 0, err
+	} else {
+		readBytes, _ := a.data.Write(data)
+		a.readBytes += int64(readBytes)
+		writeBytes, _ := a.data.Read(p)
+		a.wroteBytes += int64(writeBytes)
+		a.idx++
+		return writeBytes, nil
 	}
-
-	a.idx++
-	_, _ = a.data.Write(data)
-	n, _ := a.data.Read(p)
-	return n, nil
 }
-
-// func (a *assembler) ReadAt(p []byte, at int64) (int, error) { return 0, nil }
 
 var _ = io.Reader(&assembler{})
 

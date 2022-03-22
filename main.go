@@ -20,9 +20,13 @@ import (
 )
 
 const (
-	defaultThreads      = 2
-	defaultChunkAverage = 65536
+	defaultThreads = 2
 )
+
+var chunkSizeAvg uint64 = 65536
+
+func chunkSizeMin() uint64 { return chunkSizeAvg / 4 }
+func chunkSizeMax() uint64 { return chunkSizeAvg * 4 }
 
 func main() {
 	// cpuprofile := "spongix.pprof"
@@ -34,15 +38,19 @@ func main() {
 	// defer pprof.StopCPUProfile()
 
 	proxy := NewProxy()
-	arg.MustParse(proxy)
-	proxy.SetupLogger()
-	proxy.SetupDesync()
-	proxy.SetupKeys()
-	proxy.SetupS3()
-	proxy.startNarFetchers()
 
+	arg.MustParse(proxy)
+	chunkSizeAvg = proxy.AverageChunkSize
+
+	proxy.setupLogger()
+	proxy.setupDesync()
+	proxy.setupKeys()
+	proxy.setupS3()
+
+	go proxy.startCache()
 	go proxy.gc()
 	go proxy.verify()
+
 	go func() {
 		t := time.Tick(5 * time.Second)
 		for range t {
@@ -117,14 +125,15 @@ type Proxy struct {
 	secretKeys  map[string]ed25519.PrivateKey
 	trustedKeys map[string]ed25519.PublicKey
 
-	s3Store desync.WriteStore
-	s3Index desync.IndexWriteStore
-
+	s3Store    desync.WriteStore
 	localStore desync.WriteStore
+
+	s3Index    desync.IndexWriteStore
 	localIndex desync.IndexWriteStore
 
-	log                    *zap.Logger
-	parallelRequestOrdered bool
+	cacheChan chan string
+
+	log *zap.Logger
 }
 
 func NewProxy() *Proxy {
@@ -140,9 +149,10 @@ func NewProxy() *Proxy {
 		TrustedPublicKeys: []string{},
 		Substituters:      []string{},
 		CacheInfoPriority: 50,
-		AverageChunkSize:  defaultChunkAverage,
+		AverageChunkSize:  chunkSizeAvg,
 		VerifyInterval:    time.Hour,
 		GcInterval:        time.Minute,
+		cacheChan:         make(chan string, 10000),
 		log:               devLog,
 		LogLevel:          "debug",
 		LogMode:           "production",
@@ -158,19 +168,7 @@ func (proxy *Proxy) Version() string {
 	return buildVersion + " (" + buildCommit + ")"
 }
 
-func (proxy Proxy) minChunkSize() uint64 {
-	return proxy.AverageChunkSize / 4
-}
-
-func (proxy Proxy) avgChunkSize() uint64 {
-	return proxy.AverageChunkSize
-}
-
-func (proxy Proxy) maxChunkSize() uint64 {
-	return proxy.AverageChunkSize * 4
-}
-
-func (proxy *Proxy) SetupDir(path string) {
+func (proxy *Proxy) setupDir(path string) {
 	dir := filepath.Join(proxy.Dir, path)
 	if _, err := os.Stat(dir); err != nil {
 		proxy.log.Debug("Creating directory", zap.String("dir", dir))
@@ -180,7 +178,7 @@ func (proxy *Proxy) SetupDir(path string) {
 	}
 }
 
-func (proxy *Proxy) SetupS3() {
+func (proxy *Proxy) setupS3() {
 	if proxy.BucketURL == "" {
 		log.Println("No bucket name given, will not upload files")
 		return
@@ -221,37 +219,39 @@ func (proxy *Proxy) SetupS3() {
 	proxy.s3Store = store
 }
 
-func (proxy *Proxy) SetupKeys() {
-	secretKeys, err := LoadNixPrivateKeys(proxy.SecretKeyFiles)
+func (proxy *Proxy) setupKeys() {
+	secretKeys, err := loadNixPrivateKeys(proxy.SecretKeyFiles)
 	if err != nil {
 		proxy.log.Fatal("failed loading private keys", zap.Error(err), zap.Strings("files", proxy.SecretKeyFiles))
 	}
 	proxy.secretKeys = secretKeys
 
-	publicKeys, err := LoadNixPublicKeys(proxy.TrustedPublicKeys)
+	publicKeys, err := loadNixPublicKeys(proxy.TrustedPublicKeys)
 	if err != nil {
 		proxy.log.Fatal("failed loading public keys", zap.Error(err), zap.Strings("files", proxy.TrustedPublicKeys))
 	}
 	proxy.trustedKeys = publicKeys
 }
 
-func (proxy *Proxy) StateDirs() []string {
+func (proxy *Proxy) stateDirs() []string {
 	return []string{"store", "index", "index/nar", "tmp", "trash/index"}
 }
 
-func (proxy *Proxy) SetupDesync() {
-	for _, name := range proxy.StateDirs() {
-		proxy.SetupDir(name)
+var defaultStoreOptions = desync.StoreOptions{
+	N:            1,
+	Timeout:      1 * time.Second,
+	ErrorRetry:   0,
+	Uncompressed: false,
+	SkipVerify:   false,
+}
+
+func (proxy *Proxy) setupDesync() {
+	for _, name := range proxy.stateDirs() {
+		proxy.setupDir(name)
 	}
 
 	storeDir := filepath.Join(proxy.Dir, "store")
-	narStore, err := desync.NewLocalStore(storeDir, desync.StoreOptions{
-		N:            1,
-		Timeout:      1 * time.Second,
-		ErrorRetry:   0,
-		Uncompressed: false,
-		SkipVerify:   false,
-	})
+	narStore, err := desync.NewLocalStore(storeDir, defaultStoreOptions)
 	if err != nil {
 		proxy.log.Fatal("failed creating local store", zap.Error(err), zap.String("dir", storeDir))
 	}
@@ -267,9 +267,11 @@ func (proxy *Proxy) SetupDesync() {
 	proxy.localIndex = narIndex
 }
 
-func (proxy *Proxy) SetupLogger() {
+func (proxy *Proxy) setupLogger() {
 	lvl := zap.NewAtomicLevel()
-	lvl.UnmarshalText([]byte(proxy.LogLevel))
+	if err := lvl.UnmarshalText([]byte(proxy.LogLevel)); err != nil {
+		panic(err)
+	}
 	development := proxy.LogMode == "development"
 	encoding := "json"
 	encoderConfig := zap.NewProductionEncoderConfig()

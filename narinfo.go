@@ -2,22 +2,17 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"crypto/ed25519"
-	"crypto/sha256"
 	"encoding/base64"
 	"fmt"
 	"io"
-	"io/fs"
-	"log"
-	"os"
 	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
 
-	"github.com/numtide/go-nix/nixbase32"
 	"github.com/pkg/errors"
-	"go.uber.org/zap"
 )
 
 type Narinfo struct {
@@ -35,62 +30,7 @@ type Narinfo struct {
 	CA          string   `json:"ca"`
 }
 
-func (proxy *Proxy) validateStore() {
-	err := filepath.Walk(proxy.Dir, func(path string, fsInfo fs.FileInfo, err error) error {
-		if err != nil {
-			return err
-		}
-
-		if fsInfo.IsDir() {
-			return nil
-		}
-
-		switch filepath.Ext(path) {
-		case ".narinfo":
-			return proxy.validateNarinfo(proxy.Dir, path, true)
-		case ".xz", ".bzip2", ".br", ".zst", ".nar":
-			return validateNar(proxy.Dir, path)
-		}
-		return nil
-	})
-
-	if err != nil {
-		log.Panicln(err)
-	}
-
-	proxy.log.Info("Cache validated")
-}
-
-func validateNar(dir, path string) error {
-	r := regexp.MustCompile(`([^/.]+)\..+`)
-	match := r.FindStringSubmatch(path)
-
-	dec, err := nixbase32.DecodeString(match[1])
-	if err != nil {
-		return err
-	}
-
-	fd, err := os.Open(path)
-	if err != nil {
-		return err
-	}
-	defer fd.Close()
-
-	hash := sha256.New()
-	if _, err := io.Copy(hash, fd); err != nil {
-		return err
-	}
-
-	realSum := fmt.Sprintf("%x", hash.Sum(nil))
-	needSum := fmt.Sprintf("%x", dec)
-
-	if realSum != needSum {
-		fmt.Printf("hash was %s but expected %s\n", realSum, needSum)
-	}
-
-	return nil
-}
-
+/*
 func (proxy *Proxy) validateNarinfo(dir, path string, remove bool) error {
 	info := &Narinfo{}
 	f, err := os.Open(path)
@@ -130,6 +70,27 @@ func (proxy *Proxy) validateNarinfo(dir, path string, remove bool) error {
 	}
 
 	return nil
+}
+*/
+
+func (info *Narinfo) PrepareForStorage(
+	trustedKeys map[string]ed25519.PublicKey,
+	secretKeys map[string]ed25519.PrivateKey,
+) (io.Reader, error) {
+	info.SanitizeNar()
+	info.SanitizeSignatures(trustedKeys)
+	if len(info.Sig) == 0 {
+		for name, key := range secretKeys {
+			info.Sign(name, key)
+		}
+	}
+	return info.ToReader()
+}
+
+func (info *Narinfo) ToReader() (io.Reader, error) {
+	buf := &bytes.Buffer{}
+	err := info.Marshal(buf)
+	return buf, err
 }
 
 func (info *Narinfo) Marshal(output io.Writer) error {
@@ -409,7 +370,7 @@ func (info *Narinfo) signMsg() string {
 		strings.Join(refs, ","))
 }
 
-func (info *Narinfo) Sign(name string, key ed25519.PrivateKey) error {
+func (info *Narinfo) Sign(name string, key ed25519.PrivateKey) {
 	signature := info.Signature(name, key)
 	missing := true
 
@@ -422,8 +383,6 @@ func (info *Narinfo) Sign(name string, key ed25519.PrivateKey) error {
 	if missing {
 		info.Sig = append(info.Sig, signature)
 	}
-
-	return nil
 }
 
 func (info *Narinfo) Signature(name string, key ed25519.PrivateKey) string {

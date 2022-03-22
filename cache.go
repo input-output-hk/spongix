@@ -52,7 +52,7 @@ func storeIndex(index desync.IndexWriteStore, url *url.URL, idx desync.Index) er
 	if name, err := filepath.Rel("/", url.EscapedPath()); err != nil {
 		return err
 	} else {
-		return index.StoreIndex(name, idx)
+		return index.StoreIndex(strings.Replace(name, ".nar.xz", ".nar", 1), idx)
 	}
 }
 
@@ -290,7 +290,13 @@ func (h *remoteHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set(headerCache, headerCacheRemote)
 		w.Header().Set(headerContentType, urlToMime(response.Request.URL.String()))
 		w.Header().Set(headerCacheUpstream, response.Request.URL.String())
-		_, _ = io.Copy(w, response.Body)
+
+		body := response.Body
+		if strings.HasSuffix(response.Request.URL.String(), ".xz") {
+			body = xz.NewReader(response.Body)
+		}
+
+		_, _ = io.Copy(w, body)
 		return
 	}
 

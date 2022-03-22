@@ -305,6 +305,35 @@ func TestRouterNarGet(t *testing.T) {
 			Header(headerCache, headerCacheRemote).
 			Header(headerCacheUpstream, "http://example.com"+fNar+".xz").
 			Header(headerContentType, mimeNar).
+			Body(string(testdata[fNar])).
+			Status(http.StatusOK).
+			End()
+	})
+
+	t.Run("found remote xz and requested xz", func(tt *testing.T) {
+		proxy := testProxy(tt)
+
+		apitest.New().
+			Mocks(
+				apitest.NewMock().
+					Get(fNarXz).
+					RespondWith().
+					Body(string(testdata[fNarXz])).
+					Status(http.StatusOK).
+					End(),
+				apitest.NewMock().
+					Get(fNar).
+					RespondWith().
+					Status(http.StatusNotFound).
+					End(),
+			).
+			Handler(proxy.router()).
+			Method("GET").
+			URL(fNarXz).
+			Expect(tt).
+			Header(headerCache, headerCacheRemote).
+			Header(headerCacheUpstream, "http://example.com"+fNar+".xz").
+			Header(headerContentType, mimeNar).
 			Body(string(testdata[fNarXz])).
 			Status(http.StatusOK).
 			End()

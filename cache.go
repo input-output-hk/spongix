@@ -292,7 +292,7 @@ func (h *remoteHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set(headerCacheUpstream, response.Request.URL.String())
 
 		body := response.Body
-		if strings.HasSuffix(response.Request.URL.String(), ".xz") {
+		if strings.HasSuffix(r.URL.String(), ".nar") && strings.HasSuffix(response.Request.URL.String(), ".xz") {
 			body = xz.NewReader(response.Body)
 		}
 

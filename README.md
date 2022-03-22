@@ -1,5 +1,5 @@
 <div align="center">
-  <img src="https://github.cominput-output-hk/spongix/raw/main/img/spongix.svg" width="250" />
+  <img src="img/spongix.svg" width="250" />
   <h1>Spongix</h1>
   <p>A proxy that acts as binary cache for Nix</span>
 </div>

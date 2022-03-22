@@ -1,30 +1,47 @@
-{ buildGoModule, inclusive, rev }:
-buildGoModule rec {
-  pname = "nix-cache-proxy";
-  version = "2022.02.08.002";
-  vendorSha256 = "sha256-H5Zolka/dLLi4qkmXM16Nnmf8xQAGbKJ3xbEo+h3Imc=";
+{
+  buildGoModule,
+  lzma,
+  pkg-config,
+  inclusive,
+  rev,
+}: let
+  final = package "sha256-Pq/tTYY7kg8RK+XnooCa0CtW05A19HjazzVU+UzgdUg=";
+  package = vendorSha256:
+    buildGoModule rec {
+      pname = "spongix";
+      version = "2022.03.22.001";
+      inherit vendorSha256;
 
-  src = inclusive ./. [
-    ./fixtures
-    ./go.mod
-    ./go.sum
-    ./helpers.go
-    ./main.go
-    ./narinfo.go
-    ./narinfo_test.go
-    ./nix_config.go
-    ./router.go
-    ./routing_test.go
-  ];
+      passthru.invalidHash =
+        package "sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
 
-  CGO_ENABLED = "0";
-  GOOS = "linux";
+      src = inclusive ./. [
+        ./testdata
+        ./go.mod
+        ./go.sum
 
-  ldflags = [
-    "-s"
-    "-w"
-    "-extldflags"
-    "-static"
-    "-X main.buildVersion=${version} -X main.buildCommit=${rev}"
-  ];
-}
+        ./assemble.go
+        ./assemble_test.go
+        ./cache.go
+        ./fake.go
+        ./gc.go
+        ./helpers.go
+        ./log_record.go
+        ./main.go
+        ./narinfo.go
+        ./narinfo_test.go
+        ./router.go
+        ./router_test.go
+      ];
+
+      proxyVendor = true;
+      CGO_ENABLED = "1";
+
+      ldflags = [
+        "-s"
+        "-w"
+        "-X main.buildVersion=${version} -X main.buildCommit=${rev}"
+      ];
+    };
+in
+  final

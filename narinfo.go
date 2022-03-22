@@ -2,107 +2,58 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"crypto/ed25519"
-	"crypto/sha256"
 	"encoding/base64"
 	"fmt"
 	"io"
-	"io/fs"
-	"log"
-	"os"
 	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
 
-	"github.com/numtide/go-nix/nixbase32"
 	"github.com/pkg/errors"
 )
 
-type NarInfo struct {
-	StorePath   string
-	URL         string
-	Compression string
-	FileHash    string
-	FileSize    int64
-	NarHash     string
-	NarSize     int64
-	References  []string
-	Deriver     string
-	Sig         []string
-	CA          string
+type Narinfo struct {
+	Name        string   `json:"name"`
+	StorePath   string   `json:"store_path"`
+	URL         string   `json:"url"`
+	Compression string   `json:"compression"`
+	FileHash    string   `json:"file_hash"`
+	FileSize    int64    `json:"file_size"`
+	NarHash     string   `json:"nar_hash"`
+	NarSize     int64    `json:"nar_size"`
+	References  []string `json:"references"`
+	Deriver     string   `json:"deriver"`
+	Sig         []string `json:"sig"`
+	CA          string   `json:"ca"`
 }
 
-func (proxy *Proxy) validateStore() {
-	err := filepath.Walk(proxy.Dir, func(path string, fsInfo fs.FileInfo, err error) error {
-		if err != nil {
-			return err
-		}
-
-		if fsInfo.IsDir() {
-			return nil
-		}
-
-		switch filepath.Ext(path) {
-		case ".narinfo":
-			return validateNarinfo(proxy.Dir, path)
-		case ".xz", ".bzip2", "br", "zst", ".nar":
-			return validateNar(proxy.Dir, path)
-		}
-		return nil
-	})
-
-	if err != nil {
-		log.Panicln(err)
-	}
-
-	log.Println("Cache validated")
-}
-
-func validateNar(dir, path string) error {
-	r := regexp.MustCompile(`([^/.]+)\..+`)
-	match := r.FindStringSubmatch(path)
-
-	dec, err := nixbase32.DecodeString(match[1])
-	if err != nil {
-		return err
-	}
-
-	fd, err := os.Open(path)
-	if err != nil {
-		return err
-	}
-	defer fd.Close()
-
-	hash := sha256.New()
-	if _, err := io.Copy(hash, fd); err != nil {
-		return err
-	}
-
-	realSum := fmt.Sprintf("%x", hash.Sum(nil))
-	needSum := fmt.Sprintf("%x", dec)
-
-	if realSum != needSum {
-		fmt.Printf("hash was %s but expected %s\n", realSum, needSum)
-	}
-
-	return nil
-}
-
-func validateNarinfo(dir, path string) error {
-	info := &NarInfo{}
+/*
+func (proxy *Proxy) validateNarinfo(dir, path string, remove bool) error {
+	info := &Narinfo{}
 	f, err := os.Open(path)
+	if err != nil {
+		proxy.log.Error("Failed to open narinfo", zap.String("path", path), zap.Error(err))
+		return nil
+	}
+
 	if err := info.Unmarshal(f); err != nil {
-		log.Printf("%q is not a valid narinfo: %s", path, err.Error())
-		os.Remove(path)
+		proxy.log.Error("Failed to unmarshal narinfo", zap.String("path", path), zap.Error(err))
+		if remove {
+			os.Remove(path)
+		}
 		return nil
 	}
 
 	narPath := filepath.Join(dir, info.URL)
 	stat, err := os.Stat(narPath)
 	if err != nil {
-		log.Printf("%q for %q not found, removing narinfo", narPath, path)
-		os.Remove(path)
+		proxy.log.Error("Failed to find NAR", zap.String("nar_path", narPath), zap.String("path", path), zap.Error(err))
+		if remove {
+			os.Remove(path)
+		}
 		return nil
 	}
 
@@ -110,15 +61,39 @@ func validateNarinfo(dir, path string) error {
 
 	if ssize != info.FileSize {
 		log.Printf("%q should be size %d but has %d", narPath, info.FileSize, ssize)
-		os.Remove(path)
-		os.Remove(narPath)
+		proxy.log.Error("NAR has wrong size", zap.String("nar_path", narPath), zap.String("path", path), zap.Int64("expected", info.FileSize), zap.Int64("actual", ssize))
+		if remove {
+			os.Remove(path)
+			os.Remove(narPath)
+		}
 		return nil
 	}
 
 	return nil
 }
+*/
 
-func (info *NarInfo) Marshal(output io.Writer) error {
+func (info *Narinfo) PrepareForStorage(
+	trustedKeys map[string]ed25519.PublicKey,
+	secretKeys map[string]ed25519.PrivateKey,
+) (io.Reader, error) {
+	info.SanitizeNar()
+	info.SanitizeSignatures(trustedKeys)
+	if len(info.Sig) == 0 {
+		for name, key := range secretKeys {
+			info.Sign(name, key)
+		}
+	}
+	return info.ToReader()
+}
+
+func (info *Narinfo) ToReader() (io.Reader, error) {
+	buf := &bytes.Buffer{}
+	err := info.Marshal(buf)
+	return buf, err
+}
+
+func (info *Narinfo) Marshal(output io.Writer) error {
 	out := bufio.NewWriter(output)
 
 	write := func(format string, arg interface{}) error {
@@ -176,10 +151,19 @@ func (info *NarInfo) Marshal(output io.Writer) error {
 }
 
 // TODO: replace with a validating parser
-func (info *NarInfo) Unmarshal(input io.Reader) error {
+func (info *Narinfo) Unmarshal(input io.Reader) error {
+	if input == nil {
+		return errors.New("can't unmarshal nil reader")
+	}
+
 	scanner := bufio.NewScanner(input)
+	capacity := 1024 * 1024
+	buf := make([]byte, 0, capacity)
+	scanner.Buffer(buf, capacity)
+
 	for scanner.Scan() {
 		line := scanner.Text()
+
 		parts := strings.SplitN(line, ": ", 2)
 		if len(parts) != 2 {
 			return errors.Errorf("Failed to parse line: %q", line)
@@ -196,6 +180,8 @@ func (info *NarInfo) Unmarshal(input io.Reader) error {
 				return errors.Errorf("Duplicate StorePath")
 			}
 			info.StorePath = value
+			parts := strings.SplitN(filepath.Base(value), "-", 2)
+			info.Name = parts[0]
 		case "URL":
 			if info.URL != "" {
 				return errors.Errorf("Duplicate URL")
@@ -215,10 +201,10 @@ func (info *NarInfo) Unmarshal(input io.Reader) error {
 			if info.FileSize != 0 {
 				return errors.Errorf("Duplicate FileSize")
 			}
-			if fileSize, err := strconv.ParseInt(value, 10, 64); err != nil {
-				return err
-			} else {
+			if fileSize, err := strconv.ParseInt(value, 10, 64); err == nil {
 				info.FileSize = fileSize
+			} else {
+				return err
 			}
 		case "NarHash":
 			if info.NarHash != "" {
@@ -229,10 +215,10 @@ func (info *NarInfo) Unmarshal(input io.Reader) error {
 			if info.NarSize != 0 {
 				return errors.Errorf("Duplicate NarSize")
 			}
-			if narSize, err := strconv.ParseInt(value, 10, 64); err != nil {
-				return err
-			} else {
+			if narSize, err := strconv.ParseInt(value, 10, 64); err == nil {
 				info.NarSize = narSize
+			} else {
+				return err
 			}
 		case "References":
 			info.References = append(info.References, strings.Split(value, " ")...)
@@ -257,6 +243,10 @@ func (info *NarInfo) Unmarshal(input io.Reader) error {
 		return errors.WithMessage(err, "Parsing narinfo")
 	}
 
+	if info.Compression == "" {
+		info.Compression = "bzip2"
+	}
+
 	if err := info.Validate(); err != nil {
 		return errors.WithMessage(err, "Validating narinfo")
 	}
@@ -274,7 +264,7 @@ var (
 	validDeriver      = regexp.MustCompile(`\A` + nixHash + `{32}-.+\.drv\z`)
 )
 
-func (info *NarInfo) Validate() error {
+func (info *Narinfo) Validate() error {
 	if !validNixStorePath.MatchString(info.StorePath) {
 		return errors.Errorf("Invalid StorePath: %q", info.StorePath)
 	}
@@ -316,10 +306,36 @@ func (info *NarInfo) Validate() error {
 	return nil
 }
 
-func (info *NarInfo) Verify(publicKeys map[string]ed25519.PublicKey) error {
-	signMsg := info.signMsg()
+// modifies the Narinfo to point to an uncompressed NAR file.
+// This doesn't affect validity of the signature.
+func (info *Narinfo) SanitizeNar() {
+	if info.Compression == "none" {
+		return
+	}
 
-	signatures := []string{}
+	info.FileHash = info.NarHash
+	info.FileSize = info.NarSize
+	info.Compression = "none"
+
+	ext := filepath.Ext(info.URL)
+	info.URL = info.URL[0 : len(info.URL)-len(ext)]
+}
+
+// ensures only valid sigantures are kept in the Narinfo
+func (info *Narinfo) SanitizeSignatures(publicKeys map[string]ed25519.PublicKey) {
+	valid, _ := info.ValidInvalidSignatures(publicKeys)
+	info.Sig = valid
+}
+
+// Returns valid and invalid signatures
+func (info *Narinfo) ValidInvalidSignatures(publicKeys map[string]ed25519.PublicKey) ([]string, []string) {
+	if len(info.Sig) == 0 {
+		return nil, nil
+	}
+
+	signMsg := info.signMsg()
+	valid := []string{}
+	invalid := []string{}
 
 	// finally we need at leaat one matching signature
 	for _, sig := range info.Sig {
@@ -328,24 +344,20 @@ func (info *NarInfo) Verify(publicKeys map[string]ed25519.PublicKey) error {
 		sigStr := sig[i+1:]
 		signature, err := base64.StdEncoding.DecodeString(sigStr)
 		if err != nil {
-			return errors.Errorf("Signature decoding failed for %q", sigStr)
-		}
-
-		if key, ok := publicKeys[name]; ok {
+			invalid = append(invalid, sig)
+		} else if key, ok := publicKeys[name]; ok {
 			if ed25519.Verify(key, []byte(signMsg), signature) {
-				return nil
+				valid = append(valid, sig)
 			} else {
-				return errors.Errorf("Signed by %q but signature doesn't match narinfo", name)
+				invalid = append(invalid, sig)
 			}
 		}
-
-		signatures = append(signatures, name)
 	}
 
-	return errors.Errorf("No matching signature found in %q", signatures)
+	return valid, invalid
 }
 
-func (info *NarInfo) signMsg() string {
+func (info *Narinfo) signMsg() string {
 	refs := []string{}
 	for _, ref := range info.References {
 		refs = append(refs, "/nix/store/"+ref)
@@ -358,7 +370,7 @@ func (info *NarInfo) signMsg() string {
 		strings.Join(refs, ","))
 }
 
-func (info *NarInfo) Sign(name string, key ed25519.PrivateKey) error {
+func (info *Narinfo) Sign(name string, key ed25519.PrivateKey) {
 	signature := info.Signature(name, key)
 	missing := true
 
@@ -371,11 +383,25 @@ func (info *NarInfo) Sign(name string, key ed25519.PrivateKey) error {
 	if missing {
 		info.Sig = append(info.Sig, signature)
 	}
-
-	return nil
 }
 
-func (info *NarInfo) Signature(name string, key ed25519.PrivateKey) string {
+func (info *Narinfo) Signature(name string, key ed25519.PrivateKey) string {
 	signature := ed25519.Sign(key, []byte(info.signMsg()))
 	return name + ":" + base64.StdEncoding.EncodeToString(signature)
+}
+
+func (info *Narinfo) NarHashType() string {
+	return strings.SplitN(info.NarHash, ":", 2)[0]
+}
+
+func (info *Narinfo) NarHashValue() string {
+	return strings.SplitN(info.NarHash, ":", 2)[1]
+}
+
+func (info *Narinfo) FileHashType() string {
+	return strings.SplitN(info.FileHash, ":", 2)[0]
+}
+
+func (info *Narinfo) FileHashValue() string {
+	return strings.SplitN(info.FileHash, ":", 2)[1]
 }

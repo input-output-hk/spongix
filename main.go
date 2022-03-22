@@ -5,44 +5,143 @@ import (
 	"crypto/ed25519"
 	"log"
 	"net/http"
+	"net/url"
 	"os"
+	"os/signal"
 	"path/filepath"
+	"syscall"
+	"time"
 
 	"github.com/alexflint/go-arg"
-	"github.com/aws/aws-sdk-go/aws"
-	"github.com/aws/aws-sdk-go/aws/credentials"
-	"github.com/aws/aws-sdk-go/aws/session"
-	"github.com/aws/aws-sdk-go/service/s3"
-	"github.com/aws/aws-sdk-go/service/s3/s3manager"
+	"github.com/folbricht/desync"
+	"github.com/minio/minio-go/v6"
+	"github.com/minio/minio-go/v6/pkg/credentials"
+	"go.uber.org/zap"
 )
 
-var (
-	buildVersion = "dev"
-	buildCommit  = "dirty"
+const (
+	defaultThreads = 2
 )
+
+var chunkSizeAvg uint64 = 65536
+
+func chunkSizeMin() uint64 { return chunkSizeAvg / 4 }
+func chunkSizeMax() uint64 { return chunkSizeAvg * 4 }
+
+func main() {
+	// cpuprofile := "spongix.pprof"
+	// f, err := os.Create(cpuprofile)
+	// if err != nil {
+	// 	log.Fatal(err)
+	// }
+	// pprof.StartCPUProfile(f)
+	// defer pprof.StopCPUProfile()
+
+	proxy := NewProxy()
+
+	arg.MustParse(proxy)
+	chunkSizeAvg = proxy.AverageChunkSize
+
+	proxy.setupLogger()
+	proxy.setupDesync()
+	proxy.setupKeys()
+	proxy.setupS3()
+
+	go proxy.startCache()
+	go proxy.gc()
+	go proxy.verify()
+
+	go func() {
+		t := time.Tick(5 * time.Second)
+		for range t {
+			if err := proxy.log.Sync(); err != nil {
+				if err.Error() != "sync /dev/stderr: invalid argument" {
+					log.Printf("failed to sync zap: %s", err)
+				}
+			}
+		}
+	}()
+
+	// nolint
+	defer proxy.log.Sync()
+
+	const timeout = 15 * time.Minute
+
+	srv := &http.Server{
+		Handler:      proxy.router(),
+		Addr:         proxy.Listen,
+		ReadTimeout:  timeout,
+		WriteTimeout: timeout,
+	}
+
+	sc := make(chan os.Signal, 1)
+	signal.Notify(
+		sc,
+		syscall.SIGHUP,
+		syscall.SIGINT,
+		syscall.SIGQUIT,
+		syscall.SIGTERM,
+	)
+
+	go func() {
+		proxy.log.Info("Server starting", zap.String("listen", proxy.Listen))
+		if err := srv.ListenAndServe(); err != http.ErrServerClosed {
+			// Only log an error if it's not due to shutdown or close
+			proxy.log.Fatal("error bringing up listener", zap.Error(err))
+		}
+	}()
+
+	<-sc
+	signal.Stop(sc)
+
+	// Shutdown timeout should be max request timeout (with 1s buffer).
+	ctxShutDown, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+
+	if err := srv.Shutdown(ctxShutDown); err != nil {
+		proxy.log.Fatal("server shutdown failed", zap.Error(err))
+	}
+
+	proxy.log.Info("server shutdown gracefully")
+}
 
 type Proxy struct {
-	BucketName        string   `arg:"--bucket-name,env:AWS_BUCKET_NAME" help:"Bucket to upload to"`
-	BucketRegion      string   `arg:"--bucket-region,env:AWS_BUCKET_REGION" help:"AWS region the bucket is in"`
-	AWSProfile        string   `arg:"--aws-profile,env:AWS_PROFILE" help:"Profile to use for authentication"`
-	Dir               string   `arg:"--dir,env:CACHE_DIR" help:"directory for the cache"`
-	Listen            string   `arg:"--listen,env:LISTEN_ADDR" help:"Listen on this address"`
-	SecretKeyFiles    []string `arg:"--secret-key-files,required,env:NIX_SECRET_KEY_FILES" help:"Files containing your private nix signing keys"`
-	Substituters      []string `arg:"--substituters,env:NIX_SUBSTITUTERS"`
-	TrustedPublicKeys []string `arg:"--trusted-public-keys,env:NIX_TRUSTED_PUBLIC_KEYS"`
-	CacheInfoPriority uint64   `arg:"--cache-info-priority,env:CACHE_INFO_PRIORITY" help:"Priority in nix-cache-info"`
+	BucketURL         string        `arg:"--bucket-url,env:BUCKET_URL" help:"Bucket URL like s3+http://127.0.0.1:9000/ncp"`
+	BucketRegion      string        `arg:"--bucket-region,env:BUCKET_REGION" help:"Region the bucket is in"`
+	Dir               string        `arg:"--dir,env:CACHE_DIR" help:"directory for the cache"`
+	Listen            string        `arg:"--listen,env:LISTEN_ADDR" help:"Listen on this address"`
+	SecretKeyFiles    []string      `arg:"--secret-key-files,required,env:NIX_SECRET_KEY_FILES" help:"Files containing your private nix signing keys"`
+	Substituters      []string      `arg:"--substituters,env:NIX_SUBSTITUTERS"`
+	TrustedPublicKeys []string      `arg:"--trusted-public-keys,env:NIX_TRUSTED_PUBLIC_KEYS"`
+	CacheInfoPriority uint64        `arg:"--cache-info-priority,env:CACHE_INFO_PRIORITY" help:"Priority in nix-cache-info"`
+	AverageChunkSize  uint64        `arg:"--average-chunk-size,env:AVERAGE_CHUNK_SIZE" help:"Chunk size will be between /4 and *4 of this value"`
+	CacheSize         uint64        `arg:"--cache-size,env:CACHE_SIZE" help:"Number of gigabytes to keep in the disk cache"`
+	VerifyInterval    time.Duration `arg:"--verify-interval,env:VERIFY_INTERVAL" help:"Time between verification runs"`
+	GcInterval        time.Duration `arg:"--gc-interval,env:GC_INTERVAL" help:"Time between store garbage collection runs"`
+	LogLevel          string        `arg:"--log-level,env:LOG_LEVEL" help:"One of debug, info, warn, error, dpanic, panic, fatal"`
+	LogMode           string        `arg:"--log-mode,env:LOG_MODE" help:"development or production"`
 
 	// derived from the above
 	secretKeys  map[string]ed25519.PrivateKey
 	trustedKeys map[string]ed25519.PublicKey
-	downloader  *s3manager.Downloader
-	uploader    *s3manager.Uploader
 
-	// used for testing
-	awsCredentialsFile string
+	s3Store    desync.WriteStore
+	localStore desync.WriteStore
+
+	s3Index    desync.IndexWriteStore
+	localIndex desync.IndexWriteStore
+
+	cacheChan chan string
+
+	log *zap.Logger
 }
 
-func defaultProxy() *Proxy {
+func NewProxy() *Proxy {
+	devLog, err := zap.NewDevelopment()
+	if err != nil {
+		panic(err)
+	}
+
 	return &Proxy{
 		Dir:               "./cache",
 		Listen:            ":7745",
@@ -50,84 +149,152 @@ func defaultProxy() *Proxy {
 		TrustedPublicKeys: []string{},
 		Substituters:      []string{},
 		CacheInfoPriority: 50,
+		AverageChunkSize:  chunkSizeAvg,
+		VerifyInterval:    time.Hour,
+		GcInterval:        time.Minute,
+		cacheChan:         make(chan string, 10000),
+		log:               devLog,
+		LogLevel:          "debug",
+		LogMode:           "production",
 	}
 }
 
-func (c *Proxy) Version() string { return buildVersion + " (" + buildCommit + ")" }
+var (
+	buildVersion = "dev"
+	buildCommit  = "dirty"
+)
 
-func (proxy *Proxy) Clean() {
-	clean := func(path string, d os.DirEntry, err error) error {
-		switch filepath.Ext(path) {
-		case ".narinfo", ".xz", ".nar":
-			return os.Remove(path)
-		}
-		return nil
-	}
-
-	if err := filepath.WalkDir(proxy.Dir, clean); err != nil {
-		panic(err)
-	}
+func (proxy *Proxy) Version() string {
+	return buildVersion + " (" + buildCommit + ")"
 }
 
-func (proxy *Proxy) SetupDir() {
-	dir := filepath.Join(proxy.Dir, "nar")
+func (proxy *Proxy) setupDir(path string) {
+	dir := filepath.Join(proxy.Dir, path)
 	if _, err := os.Stat(dir); err != nil {
-		log.Printf("Creating directory: %q\n", dir)
+		proxy.log.Debug("Creating directory", zap.String("dir", dir))
 		if err := os.MkdirAll(dir, 0o755); err != nil {
-			log.Panic(err)
+			proxy.log.Fatal("couldn't create directory", zap.String("dir", dir))
 		}
 	}
 }
 
-func (proxy *Proxy) SetupAWS() {
-	if proxy.BucketName == "" {
-		log.Println("No bucket name given, will not upload files there")
+func (proxy *Proxy) setupS3() {
+	if proxy.BucketURL == "" {
+		log.Println("No bucket name given, will not upload files")
 		return
 	}
 
-	clientRegion, set := os.LookupEnv("AWS_DEFAULT_REGION")
-	if !set {
-		clientRegion = "eu-central-1"
+	if proxy.BucketRegion == "" {
+		log.Println("No bucket region given, will not upload files")
+		return
 	}
 
-	sess := session.Must(session.NewSession(&aws.Config{
-		Region:      aws.String(clientRegion),
-		Credentials: credentials.NewSharedCredentials(proxy.awsCredentialsFile, proxy.AWSProfile),
-	}))
-
-	res, err := s3manager.GetBucketRegionWithClient(context.Background(), s3.New(sess), proxy.BucketName)
+	s3Url, err := url.Parse(proxy.BucketURL)
 	if err != nil {
-		log.Panic(err)
+		proxy.log.Fatal("couldn't parse bucket url", zap.Error(err), zap.String("url", proxy.BucketURL))
 	}
-	proxy.BucketRegion = res
+	creds := credentials.NewChainCredentials(
+		[]credentials.Provider{
+			&credentials.EnvMinio{},
+			&credentials.EnvAWS{},
+		},
+	)
 
-	proxy.uploader = s3manager.NewUploader(sess)
-	proxy.downloader = s3manager.NewDownloader(sess)
+	store, err := desync.NewS3Store(s3Url, creds, proxy.BucketRegion,
+		desync.StoreOptions{
+			N:            1,
+			Timeout:      1 * time.Second,
+			ErrorRetry:   0,
+			Uncompressed: false,
+			SkipVerify:   false,
+		}, minio.BucketLookupAuto)
+	if err != nil {
+		proxy.log.Fatal("failed creating s3 store",
+			zap.Error(err),
+			zap.String("url", s3Url.String()),
+			zap.String("region", proxy.BucketRegion),
+		)
+	}
+
+	proxy.s3Store = store
 }
 
-func (proxy *Proxy) SetupNix() {
-	secretKeys, err := LoadNixPrivateKeys(proxy.SecretKeyFiles)
+func (proxy *Proxy) setupKeys() {
+	secretKeys, err := loadNixPrivateKeys(proxy.SecretKeyFiles)
 	if err != nil {
-		log.Panic(err)
+		proxy.log.Fatal("failed loading private keys", zap.Error(err), zap.Strings("files", proxy.SecretKeyFiles))
 	}
 	proxy.secretKeys = secretKeys
 
-	publicKeys, err := LoadNixPublicKeys(proxy.TrustedPublicKeys)
+	publicKeys, err := loadNixPublicKeys(proxy.TrustedPublicKeys)
 	if err != nil {
-		log.Panic(err)
+		proxy.log.Fatal("failed loading public keys", zap.Error(err), zap.Strings("files", proxy.TrustedPublicKeys))
 	}
 	proxy.trustedKeys = publicKeys
 }
 
-func main() {
-	proxy := defaultProxy()
-	arg.MustParse(proxy)
-	proxy.SetupAWS()
-	proxy.SetupDir()
-	proxy.SetupNix()
-	go proxy.validateStore()
+func (proxy *Proxy) stateDirs() []string {
+	return []string{"store", "index", "index/nar", "tmp", "trash/index"}
+}
 
-	r := proxy.router()
-	log.Printf("Running on %q", proxy.Listen)
-	log.Panic(http.ListenAndServe(proxy.Listen, r))
+var defaultStoreOptions = desync.StoreOptions{
+	N:            1,
+	Timeout:      1 * time.Second,
+	ErrorRetry:   0,
+	Uncompressed: false,
+	SkipVerify:   false,
+}
+
+func (proxy *Proxy) setupDesync() {
+	for _, name := range proxy.stateDirs() {
+		proxy.setupDir(name)
+	}
+
+	storeDir := filepath.Join(proxy.Dir, "store")
+	narStore, err := desync.NewLocalStore(storeDir, defaultStoreOptions)
+	if err != nil {
+		proxy.log.Fatal("failed creating local store", zap.Error(err), zap.String("dir", storeDir))
+	}
+	narStore.UpdateTimes = true
+
+	indexDir := filepath.Join(proxy.Dir, "index")
+	narIndex, err := desync.NewLocalIndexStore(indexDir)
+	if err != nil {
+		proxy.log.Fatal("failed creating local index", zap.Error(err), zap.String("dir", indexDir))
+	}
+
+	proxy.localStore = narStore
+	proxy.localIndex = narIndex
+}
+
+func (proxy *Proxy) setupLogger() {
+	lvl := zap.NewAtomicLevel()
+	if err := lvl.UnmarshalText([]byte(proxy.LogLevel)); err != nil {
+		panic(err)
+	}
+	development := proxy.LogMode == "development"
+	encoding := "json"
+	encoderConfig := zap.NewProductionEncoderConfig()
+	if development {
+		encoding = "console"
+		encoderConfig = zap.NewDevelopmentEncoderConfig()
+	}
+
+	l := zap.Config{
+		Level:             lvl,
+		Development:       development,
+		DisableCaller:     false,
+		DisableStacktrace: false,
+		Sampling:          &zap.SamplingConfig{Initial: 1, Thereafter: 2},
+		Encoding:          encoding,
+		EncoderConfig:     encoderConfig,
+		OutputPaths:       []string{"stderr"},
+		ErrorOutputPaths:  []string{"stderr"},
+	}
+
+	var err error
+	proxy.log, err = l.Build()
+	if err != nil {
+		panic(err)
+	}
 }

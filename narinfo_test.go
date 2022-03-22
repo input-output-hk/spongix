@@ -6,10 +6,11 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/smartystreets/assertions"
 	"github.com/steinfletcher/apitest"
 )
 
-var validNarinfo = &NarInfo{
+var validNarinfo = &Narinfo{
 	StorePath:   "/nix/store/00000000000000000000000000000000-some",
 	URL:         "nar/0000000000000000000000000000000000000000000000000000.nar.xz",
 	Compression: "xz",
@@ -44,7 +45,7 @@ Deriver: `+validNarinfo.Deriver+`
 func Test_NarinfoValidate(t *testing.T) {
 	v := apitest.DefaultVerifier{}
 
-	info := &NarInfo{
+	info := &Narinfo{
 		Compression: "invalid",
 		References:  []string{"invalid"},
 	}
@@ -77,15 +78,14 @@ func Test_NarinfoValidate(t *testing.T) {
 }
 
 func Test_NarinfoVerify(t *testing.T) {
-	v := apitest.DefaultVerifier{}
-
+	a := assertions.New(t)
 	name := "test"
 	key := ed25519.NewKeyFromSeed(bytes.Repeat([]byte{0}, 32))
 
 	publicKeys := map[string]ed25519.PublicKey{}
 	publicKeys[name] = key.Public().(ed25519.PublicKey)
 
-	info := &NarInfo{
+	info := &Narinfo{
 		StorePath:   "/nix/store/00000000000000000000000000000000-some",
 		URL:         "nar/0000000000000000000000000000000000000000000000000000.nar.xz",
 		Compression: "xz",
@@ -97,15 +97,53 @@ func Test_NarinfoVerify(t *testing.T) {
 		Deriver:     "r92m816zcm8v9zjr55lmgy4pdibjbyjp-foo.drv",
 	}
 
-	v.Equal(t, nil, info.Validate())
-
 	info.Sig = []string{}
-	v.Equal(t, `No matching signature found in []`, info.Verify(publicKeys).Error())
+	valid, invalid := info.ValidInvalidSignatures(publicKeys)
+	a.So(valid, assertions.ShouldHaveLength, 0)
+	a.So(invalid, assertions.ShouldHaveLength, 0)
 
 	info.Sig = []string{"test:test"}
-	v.Equal(t, `Signed by "test" but signature doesn't match narinfo`, info.Verify(publicKeys).Error())
+	valid, invalid = info.ValidInvalidSignatures(publicKeys)
+	a.So(valid, assertions.ShouldHaveLength, 0)
+	a.So(invalid, assertions.ShouldHaveLength, 1)
 
 	info.Sig = []string{}
-	v.NoError(t, info.Sign(name, key))
-	v.Equal(t, nil, info.Verify(publicKeys))
+	info.Sign(name, key)
+	valid, invalid = info.ValidInvalidSignatures(publicKeys)
+	a.So(valid, assertions.ShouldHaveLength, 1)
+	a.So(invalid, assertions.ShouldHaveLength, 0)
+
+	// v.Equal(t, `No matching signature found in []`, info.(publicKeys).Error())
+
+	// info.Sig = []string{}
+	// v.NoError(t, info.Sign(name, key))
+	// v.Equal(t, nil, info.Verify(publicKeys))
+}
+
+func Test_NarinfoSanitizeNar(t *testing.T) {
+	a := assertions.New(t)
+	name := "test"
+	key := ed25519.NewKeyFromSeed(bytes.Repeat([]byte{0}, 32))
+
+	publicKeys := map[string]ed25519.PublicKey{}
+	publicKeys[name] = key.Public().(ed25519.PublicKey)
+
+	info := &Narinfo{
+		StorePath:   "/nix/store/00000000000000000000000000000000-some",
+		URL:         "nar/0000000000000000000000000000000000000000000000000000.nar.xz",
+		Compression: "xz",
+		FileHash:    "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+		FileSize:    1,
+		NarHash:     "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+		NarSize:     2,
+		References:  []string{"00000000000000000000000000000000-some"},
+		Deriver:     "r92m816zcm8v9zjr55lmgy4pdibjbyjp-foo.drv",
+	}
+
+	info.SanitizeNar()
+
+	a.So(info.FileSize, assertions.ShouldEqual, 2)
+	a.So(info.FileHash, assertions.ShouldEqual, "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee")
+	a.So(info.Compression, assertions.ShouldEqual, "none")
+	a.So(info.URL, assertions.ShouldEqual, "nar/0000000000000000000000000000000000000000000000000000.nar")
 }

@@ -657,6 +657,32 @@ func TestRouterNarPut(t *testing.T) {
 			Status(http.StatusOK).
 			End()
 	})
+
+	t.Run("upload xz to /cache success", func(tt *testing.T) {
+		proxy := withS3(testProxy(tt))
+
+		apitest.New().
+			Handler(proxy.router()).
+			Method("PUT").
+			URL("/cache"+fNarXz).
+			Body(string(testdata[fNarXz])).
+			Expect(tt).
+			Header(headerContentType, mimeText).
+			Body("ok\n").
+			Status(http.StatusOK).
+			End()
+
+		apitest.New().
+			Handler(proxy.router()).
+			Method("GET").
+			URL(fNar).
+			Expect(tt).
+			Header(headerContentType, mimeNar).
+			Header(headerCache, headerCacheHit).
+			Body(string(testdata[fNar])).
+			Status(http.StatusOK).
+			End()
+	})
 }
 
 func insertFake(

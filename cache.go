@@ -41,7 +41,7 @@ func urlToMime(u string) string {
 }
 
 func getIndex(index desync.IndexStore, url *url.URL) (i desync.Index, err error) {
-	if name, err := filepath.Rel("/", url.EscapedPath()); err != nil {
+	if name, err := urlToIndexName(url); err != nil {
 		return i, err
 	} else {
 		return index.GetIndex(name)
@@ -49,10 +49,25 @@ func getIndex(index desync.IndexStore, url *url.URL) (i desync.Index, err error)
 }
 
 func storeIndex(index desync.IndexWriteStore, url *url.URL, idx desync.Index) error {
-	if name, err := filepath.Rel("/", url.EscapedPath()); err != nil {
+	if name, err := urlToIndexName(url); err != nil {
 		return err
 	} else {
-		return index.StoreIndex(strings.Replace(name, ".nar.xz", ".nar", 1), idx)
+		return index.StoreIndex(name, idx)
+	}
+}
+
+func urlToIndexName(url *url.URL) (string, error) {
+	name := url.EscapedPath()
+	if strings.HasPrefix(name, "/cache/") {
+		name = strings.Replace(name, "/cache/", "/", 1)
+	}
+	if strings.HasSuffix(name, ".nar.xz") {
+		name = strings.Replace(name, ".nar.xz", ".nar", 1)
+	}
+	if name, err := filepath.Rel("/", name); err != nil {
+		return name, err
+	} else {
+		return name, nil
 	}
 }
 
@@ -164,47 +179,32 @@ func (c cacheHandler) Put(w http.ResponseWriter, r *http.Request) {
 		} else if infoRd, err := info.PrepareForStorage(c.trustedKeys, c.secretKeys); err != nil {
 			c.log.Error("failed serializing narinfo", zap.Error(err))
 			answer(w, http.StatusInternalServerError, mimeText, "failed serializing narinfo")
-		} else if chunker, err := desync.NewChunker(infoRd, chunkSizeMin(), chunkSizeAvg, chunkSizeMax()); err != nil {
-			c.log.Error("making chunker", zap.Error(err))
-			answer(w, http.StatusInternalServerError, mimeText, "making chunker")
-		} else if idx, err := desync.ChunkStream(context.Background(), chunker, c.store, defaultThreads); err != nil {
-			c.log.Error("chunking body", zap.Error(err))
-			answer(w, http.StatusInternalServerError, mimeText, "chunking body")
-		} else if err := storeIndex(c.index, r.URL, idx); err != nil {
-			c.log.Error("storing index", zap.Error(err))
-			answer(w, http.StatusInternalServerError, mimeText, "storing index")
 		} else {
-			answer(w, http.StatusOK, mimeText, "ok\n")
+			c.putCommon(w, r, infoRd)
 		}
 	case ".nar":
-		if chunker, err := desync.NewChunker(r.Body, chunkSizeMin(), chunkSizeAvg, chunkSizeMax()); err != nil {
-			c.log.Error("making chunker", zap.Error(err))
-			answer(w, http.StatusInternalServerError, mimeText, "making chunker")
-		} else if idx, err := desync.ChunkStream(context.Background(), chunker, c.store, defaultThreads); err != nil {
-			c.log.Error("chunking body", zap.Error(err))
-			answer(w, http.StatusInternalServerError, mimeText, "chunking body")
-		} else if err := storeIndex(c.index, r.URL, idx); err != nil {
-			answer(w, http.StatusInternalServerError, mimeText, "storing index")
-		} else {
-			answer(w, http.StatusOK, mimeText, "ok\n")
-		}
+		c.putCommon(w, r, r.Body)
 	case ".xz":
 		xzRd := xz.NewReader(r.Body)
 		defer xzRd.Close()
-		if chunker, err := desync.NewChunker(xzRd, chunkSizeMin(), chunkSizeAvg, chunkSizeMax()); err != nil {
-			c.log.Error("making chunker", zap.Error(err))
-			answer(w, http.StatusInternalServerError, mimeText, "making chunker")
-		} else if idx, err := desync.ChunkStream(context.Background(), chunker, c.store, defaultThreads); err != nil {
-			c.log.Error("chunking body", zap.Error(err))
-			answer(w, http.StatusInternalServerError, mimeText, "chunking body")
-		} else if err := storeIndex(c.index, r.URL, idx); err != nil {
-			c.log.Error("storing index", zap.Error(err))
-			answer(w, http.StatusInternalServerError, mimeText, "storing index")
-		} else {
-			answer(w, http.StatusOK, mimeText, "ok\n")
-		}
+		c.putCommon(w, r, xzRd)
 	default:
 		answer(w, http.StatusBadRequest, mimeText, "compression is not supported\n")
+	}
+}
+
+func (c cacheHandler) putCommon(w http.ResponseWriter, r *http.Request, rd io.Reader) {
+	if chunker, err := desync.NewChunker(rd, chunkSizeMin(), chunkSizeAvg, chunkSizeMax()); err != nil {
+		c.log.Error("making chunker", zap.Error(err))
+		answer(w, http.StatusInternalServerError, mimeText, "making chunker")
+	} else if idx, err := desync.ChunkStream(context.Background(), chunker, c.store, defaultThreads); err != nil {
+		c.log.Error("chunking body", zap.Error(err))
+		answer(w, http.StatusInternalServerError, mimeText, "chunking body")
+	} else if err := storeIndex(c.index, r.URL, idx); err != nil {
+		c.log.Error("storing index", zap.Error(err))
+		answer(w, http.StatusInternalServerError, mimeText, "storing index")
+	} else {
+		answer(w, http.StatusOK, mimeText, "ok\n")
 	}
 }
 

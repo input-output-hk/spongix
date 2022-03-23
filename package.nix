@@ -9,7 +9,7 @@
   package = vendorSha256:
     buildGoModule rec {
       pname = "spongix";
-      version = "2022.03.22.002";
+      version = "2022.03.23.001";
       inherit vendorSha256;
 
       passthru.invalidHash =

@@ -181,6 +181,18 @@ func (c cacheHandler) Put(w http.ResponseWriter, r *http.Request) {
 		} else {
 			answer(w, http.StatusOK, mimeText, "ok\n")
 		}
+	case ".xz":
+		xzRd := xz.NewReader(r.Body)
+		defer xzRd.Close()
+		if chunker, err := desync.NewChunker(xzRd, chunkSizeMin(), chunkSizeAvg, chunkSizeMax()); err != nil {
+			answer(w, http.StatusInternalServerError, mimeText, "making chunker")
+		} else if idx, err := desync.ChunkStream(context.Background(), chunker, c.store, defaultThreads); err != nil {
+			answer(w, http.StatusInternalServerError, mimeText, "chunking body")
+		} else if err := storeIndex(c.index, r.URL, idx); err != nil {
+			answer(w, http.StatusInternalServerError, mimeText, "storing index")
+		} else {
+			answer(w, http.StatusOK, mimeText, "ok\n")
+		}
 	default:
 		answer(w, http.StatusBadRequest, mimeText, "compression is not supported\n")
 	}

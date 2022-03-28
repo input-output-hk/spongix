@@ -3,7 +3,7 @@ package = "golangci-lint"
 
 [[commands]]
 name = "lint"
-command = "golangci-lint run && fd -e nix -X nixfmt -c"
+command = "golangci-lint run && treefmt --fail-on-change"
 help = "Run code linters"
 
 [[commands]]
@@ -27,4 +27,5 @@ packages = [
   "minio-client",
   "alejandra",
   "diffoscope",
+  "treefmt",
 ]

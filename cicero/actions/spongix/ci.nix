@@ -29,22 +29,26 @@ in {
   in
     std.chain args [
       actionLib.simpleJob
-
-      {resources.memory = 1024 * 6;}
-
-      (lib.optionalAttrs (facts ? statuses_url)
-        (std.github.reportStatus facts.statuses_url))
-
       (std.git.clone facts)
 
-      std.nix.develop
+      {
+        resources = {
+          memory = 1000 * 8;
+          cpu = 7000;
+        };
+        config.console = "pipe";
+        config.packages = std.data-merge.append [
+          "github:input-output-hk/spongix#devShell.x86_64-linux"
+        ];
+      }
 
-      (std.wrapScript "bash" (next: ''
+      (lib.optionalAttrs (facts ? statuses_url) (std.github.reportStatus facts.statuses_url))
+
+      (std.base {})
+      std.nix.develop
+      (std.script "bash" ''
         set -ex
         lint
-        ${lib.escapeShellArgs next}
-      ''))
-
-      std.nix.build
+      '')
     ];
 }

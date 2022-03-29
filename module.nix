@@ -118,7 +118,7 @@ in {
 
       gcInterval = lib.mkOption {
         type = lib.types.str;
-        default = "60s";
+        default = "1h";
         description = ''
           Time between garbage collections of local store files (fast)
         '';

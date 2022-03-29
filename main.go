@@ -151,7 +151,7 @@ func NewProxy() *Proxy {
 		CacheInfoPriority: 50,
 		AverageChunkSize:  chunkSizeAvg,
 		VerifyInterval:    time.Hour,
-		GcInterval:        time.Minute,
+		GcInterval:        time.Hour,
 		cacheChan:         make(chan string, 10000),
 		log:               devLog,
 		LogLevel:          "debug",

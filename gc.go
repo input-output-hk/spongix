@@ -275,10 +275,8 @@ func (proxy *Proxy) gcOnce(cacheStat map[string]*chunkStat) {
 							continue
 						}
 					case ".narinfo":
-						if info, err := assembleNarinfo(store, check.index); err != nil {
+						if _, err := assembleNarinfo(store, check.index); err != nil {
 							proxy.log.Error("checking narinfo", zap.Error(err), zap.String("path", check.path))
-							pp(check.index)
-							pp(info)
 							deadIndices.Store(check.path, yes)
 						}
 					}

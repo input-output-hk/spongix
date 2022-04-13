@@ -33,7 +33,7 @@ in {
 
       {
         resources = {
-          memory = 1000 * 8;
+          memory = 1000 * 2;
           cpu = 7000;
         };
         config.console = "pipe";

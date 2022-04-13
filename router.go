@@ -19,12 +19,15 @@ const (
 func (proxy *Proxy) router() *mux.Router {
 	r := mux.NewRouter()
 	r.NotFoundHandler = notFound{}
+	r.MethodNotAllowedHandler = notAllowed{}
 	r.Use(
 		withHTTPLogging(proxy.log),
-		handlers.RecoveryHandler(),
+		handlers.RecoveryHandler(handlers.PrintRecoveryStack(true)),
 	)
 
 	r.HandleFunc("/metrics", metrics.ServeHTTP)
+
+	newDockerHandler(proxy.log, proxy.localStore, proxy.localIndex, r)
 
 	// backwards compat
 	for _, prefix := range []string{"/cache", ""} {
@@ -70,6 +73,12 @@ func (proxy *Proxy) withS3CacheHandler() mux.MiddlewareFunc {
 	)
 }
 
+type notAllowed struct{}
+
+func (n notAllowed) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	pp("*** 405", r.Method, r.URL.Path, mux.Vars(r))
+}
+
 type notFound struct{}
 
 func (n notFound) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -77,6 +86,7 @@ func (n notFound) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 func serveNotFound(w http.ResponseWriter, r *http.Request) {
+	pp("*** 404", r.Method, r.URL.Path, mux.Vars(r))
 	w.Header().Set(headerContentType, mimeText)
 	w.Header().Set(headerCache, headerCacheMiss)
 	w.WriteHeader(http.StatusNotFound)

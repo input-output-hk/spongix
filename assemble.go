@@ -32,11 +32,9 @@ func (a *assembler) Read(p []byte) (int, error) {
 
 	if a.idx >= len(a.index.Chunks) {
 		if a.wroteBytes != a.index.Length() {
-			pp(a.wroteBytes, a.readBytes, a.index.Length(), a.idx, len(a.index.Chunks))
 			return 0, errors.New("written bytes don't match index length")
 		}
 		if a.wroteBytes != a.readBytes {
-			pp(a.wroteBytes, a.readBytes, a.index.Length(), a.idx, len(a.index.Chunks))
 			return 0, errors.New("read and written bytes are different")
 		}
 		return 0, io.EOF

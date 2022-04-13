@@ -2,6 +2,12 @@
 package = "golangci-lint"
 
 [[commands]]
+package = "treefmt"
+
+[[commands]]
+package = "alejandra"
+
+[[commands]]
 name = "lint"
 command = "golangci-lint run && treefmt --fail-on-change"
 help = "Run code linters"
@@ -15,17 +21,13 @@ help = "Run code coverage"
 name = "spongix"
 packages = [
   "diffutils",
-  "go_1_17",
-  "goimports",
+  "go_1_18",
+  "gotools",
   "gopls",
   "gocode",
   "gcc",
   "fd",
   "gnumake",
-  "golangci-lint",
   "minio",
   "minio-client",
-  "alejandra",
-  "diffoscope",
-  "treefmt",
 ]

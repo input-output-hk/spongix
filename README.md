@@ -7,6 +7,7 @@
 * Signs Narinfo in flight with own private key
 * Authenticates with S3 to forward NARs for long-term storage
 * Keeps a local cache on disk for faster responses.
+* Provides a minimal Docker registry
 
 ## Usage
 
@@ -18,17 +19,17 @@ Start `spongix`:
       --substituters "https://cache.nixos.org" "https://hydra.iohk.io" \
       --secret-key-files ./skey \
       --trusted-public-keys "cache.nixos.org-1:6NCHdD59X431o0gWypbMrAURkbJ16ZPMQFGspcDShjY=" "hydra.iohk.io:f/Ea+s+dFdN+3Y/G+FDgSq+a5NEWhJGzdjvKNGv0/EQ=" \
-      --listen :7777 \
+      --listen :7745 \
       --dir /tmp/spongix
 
 To add store paths to the cache, you can use `nix copy`:
 
-    nix copy --to 'http://127.0.0.1:7777?compression=none' github:nixos/nix
+    nix copy --to 'http://127.0.0.1:7745?compression=none' github:nixos/nix
 
 To use this as your binary cache, specify it as a substituter:
 
     nix build github:nixos/nix \
-      --option substituters http://127.0.0.1:7777 \
+      --option substituters http://127.0.0.1:7745 \
       --option trusted-public-keys "$(< pkey)"
 
 Signatures are checked against the the `trusted-public-keys` of your
@@ -41,8 +42,10 @@ Set a `post-build-hook` in your nix configuration to a script like this:
     #!/bin/sh
     set -euf
     export IFS=' '
-    echo "Uploading to cache: $OUT_PATHS"
-    exec nix copy --to 'http://127.0.0.1:7777?compression=none' $OUT_PATHS
+    if [[ -n "$OUT_PATHS" ]]; then
+      echo "Uploading to cache: $OUT_PATHS"
+      exec nix copy --to 'http://127.0.0.1:7745?compression=none' $OUT_PATHS
+    fi
 
 ## TODO
 

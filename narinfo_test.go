@@ -22,7 +22,7 @@ var validNarinfo = &Narinfo{
 	Deriver:     "r92m816zcm8v9zjr55lmgy4pdibjbyjp-foo.drv",
 }
 
-func Test_NarinfoMarshal(t *testing.T) {
+func TestNarinfoMarshal(t *testing.T) {
 	v := apitest.DefaultVerifier{}
 
 	info := validNarinfo
@@ -42,7 +42,7 @@ Deriver: `+validNarinfo.Deriver+`
 `)
 }
 
-func Test_NarinfoValidate(t *testing.T) {
+func TestNarinfoValidate(t *testing.T) {
 	v := apitest.DefaultVerifier{}
 
 	info := &Narinfo{
@@ -77,7 +77,7 @@ func Test_NarinfoValidate(t *testing.T) {
 	v.Equal(t, nil, info.Validate())
 }
 
-func Test_NarinfoVerify(t *testing.T) {
+func TestNarinfoVerify(t *testing.T) {
 	a := assertions.New(t)
 	name := "test"
 	key := ed25519.NewKeyFromSeed(bytes.Repeat([]byte{0}, 32))
@@ -120,7 +120,7 @@ func Test_NarinfoVerify(t *testing.T) {
 	// v.Equal(t, nil, info.Verify(publicKeys))
 }
 
-func Test_NarinfoSanitizeNar(t *testing.T) {
+func TestNarinfoSanitizeNar(t *testing.T) {
 	a := assertions.New(t)
 	name := "test"
 	key := ed25519.NewKeyFromSeed(bytes.Repeat([]byte{0}, 32))

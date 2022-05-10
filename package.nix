@@ -1,15 +1,15 @@
 {
-  buildGoModule,
+  buildGo118Module,
   lzma,
   pkg-config,
   inclusive,
   rev,
 }: let
-  final = package "sha256-Pq/tTYY7kg8RK+XnooCa0CtW05A19HjazzVU+UzgdUg=";
+  final = package "sha256-NGQZqIawCOb1UPjFCSkSfPV02jMOD+MUx6b5LZyzy94=";
   package = vendorSha256:
-    buildGoModule rec {
+    buildGo118Module rec {
       pname = "spongix";
-      version = "2022.03.23.002";
+      version = "2022.05.10.001";
       inherit vendorSha256;
 
       passthru.invalidHash =
@@ -22,16 +22,20 @@
 
         ./assemble.go
         ./assemble_test.go
+        ./blob_manager.go
         ./cache.go
+        ./docker.go
         ./fake.go
         ./gc.go
         ./helpers.go
         ./log_record.go
         ./main.go
+        ./manifest_manager.go
         ./narinfo.go
         ./narinfo_test.go
         ./router.go
         ./router_test.go
+        ./upload_manager.go
       ];
 
       proxyVendor = true;

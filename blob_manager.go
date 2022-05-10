@@ -17,7 +17,7 @@ type blobManager struct {
 func newBlobManager(store desync.WriteStore, index desync.IndexWriteStore) blobManager {
 	c := make(chan blobMsg, 10)
 	manager := blobManager{c: c, store: store, index: index}
-	manager.loop()
+	go manager.loop()
 	return manager
 }
 

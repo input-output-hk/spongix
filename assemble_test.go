@@ -12,7 +12,7 @@ import (
 	"github.com/smartystreets/assertions"
 )
 
-func Test_Assemble(t *testing.T) {
+func TestAssemble(t *testing.T) {
 	a := assertions.New(t)
 
 	var index desync.IndexWriteStore

@@ -29,7 +29,6 @@ func (m blobManager) get(name, digest string) ([]byte, error) {
 }
 
 func (m blobManager) set(name, digest string, blob []byte) error {
-	m.c <- blobMsg{t: blobMsgSet, name: name, digest: digest, blob: blob}
 	c := make(chan blobResponse)
 	m.c <- blobMsg{t: blobMsgSet, name: name, digest: digest, blob: blob, c: c}
 	msg := <-c

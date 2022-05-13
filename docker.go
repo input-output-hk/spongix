@@ -124,7 +124,13 @@ func (d dockerHandler) blobGet(w http.ResponseWriter, r *http.Request) {
 	vars := mux.Vars(r)
 
 	blob, err := d.blobs.get(vars["name"], vars["digest"])
-	if blob == nil || err != nil {
+	if blob == nil {
+		w.WriteHeader(404)
+		return
+	}
+
+	if err != nil {
+		d.log.Error("getting blob", zap.Error(err))
 		w.WriteHeader(404)
 		return
 	}
@@ -132,10 +138,7 @@ func (d dockerHandler) blobGet(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(200)
 	if r.Method == "GET" {
 		w.Write(blob)
-		return
 	}
-
-	w.WriteHeader(404)
 }
 
 func (d dockerHandler) manifestPut(w http.ResponseWriter, r *http.Request) {

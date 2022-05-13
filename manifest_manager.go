@@ -16,7 +16,7 @@ func (m manifestManager) set(name, reference string, manifest *DockerManifest) {
 
 func (m manifestManager) get(name, reference string) (manifest *DockerManifest) {
 	c := make(chan *DockerManifest)
-	m.c <- manifestMsg{t: manifestMsgSet, name: name, reference: reference, manifest: manifest, c: c}
+	m.c <- manifestMsg{t: manifestMsgGet, name: name, reference: reference, manifest: manifest, c: c}
 	return <-c
 }
 

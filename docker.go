@@ -98,7 +98,7 @@ func (d dockerHandler) blobUploadPost(w http.ResponseWriter, r *http.Request) {
 
 	h := w.Header()
 	h.Set("Content-Length", "0")
-	h.Set("Location", "http://127.0.0.1:7777"+r.URL.Path+u)
+	h.Set("Location", r.URL.Host+r.URL.Path+u)
 	h.Set("Range", "0-0")
 	h.Set("Docker-Upload-UUID", u)
 	w.WriteHeader(202)
@@ -186,7 +186,7 @@ func (d dockerHandler) blobUploadPatch(w http.ResponseWriter, r *http.Request) {
 		_, _ = io.Copy(upload.content, r.Body)
 
 		h.Set("Content-Length", "0")
-		h.Set("Location", "http://127.0.0.1:7777"+r.URL.Path)
+		h.Set("Location", r.URL.Host+r.URL.Path)
 		h.Set("Range", fmt.Sprintf("0-%d", upload.content.Len()))
 		h.Set("Docker-Upload-UUID", vars["uuid"])
 		w.WriteHeader(204)

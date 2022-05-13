@@ -58,6 +58,16 @@ func uploadLoop(store desync.WriteStore, index desync.IndexWriteStore) chan uplo
 					content:      &bytes.Buffer{},
 					lastModified: time.Now(),
 				}
+			case uploadMsgGet:
+				upload, ok := uploads[msg.uuid]
+				if ok {
+					msg.c <- upload
+				} else {
+					msg.c <- nil
+				}
+			case uploadMsgDel:
+				delete(uploads, msg.uuid)
+				msg.c <- nil
 			default:
 				panic(msg)
 			}

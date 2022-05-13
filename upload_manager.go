@@ -53,19 +53,21 @@ func uploadLoop(store desync.WriteStore, index desync.IndexWriteStore) chan uplo
 		for msg := range ch {
 			switch msg.t {
 			case uploadMsgNew:
+				// pretty.Println("upload new", msg.uuid)
 				uploads[msg.uuid] = &dockerUpload{
 					uuid:         msg.uuid,
 					content:      &bytes.Buffer{},
 					lastModified: time.Now(),
 				}
 			case uploadMsgGet:
-				upload, ok := uploads[msg.uuid]
-				if ok {
+				// pretty.Println("upload get", msg.uuid)
+				if upload, ok := uploads[msg.uuid]; ok {
 					msg.c <- upload
 				} else {
 					msg.c <- nil
 				}
 			case uploadMsgDel:
+				// pretty.Println("upload del", msg.uuid)
 				delete(uploads, msg.uuid)
 				msg.c <- nil
 			default:

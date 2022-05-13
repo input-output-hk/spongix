@@ -28,6 +28,13 @@ func (m blobManager) get(name, digest string) ([]byte, error) {
 	return msg.blob, msg.err
 }
 
+func (m blobManager) head(name, digest string) error {
+	c := make(chan blobResponse)
+	m.c <- blobMsg{t: blobMsgGet, name: name, digest: digest, c: c}
+	msg := <-c
+	return msg.err
+}
+
 func (m blobManager) set(name, digest string, blob []byte) error {
 	c := make(chan blobResponse)
 	m.c <- blobMsg{t: blobMsgSet, name: name, digest: digest, blob: blob, c: c}
@@ -45,7 +52,7 @@ type blobMsg struct {
 }
 
 func (m blobMsg) Key() string {
-	return m.name + "'" + m.digest
+	return m.name + "_" + m.digest
 }
 
 type blobResponse struct {
@@ -56,8 +63,9 @@ type blobResponse struct {
 type blobMsgType int
 
 const (
-	blobMsgSet blobMsgType = iota
-	blobMsgGet blobMsgType = iota
+	blobMsgSet  blobMsgType = iota
+	blobMsgGet  blobMsgType = iota
+	blobMsgHead blobMsgType = iota
 )
 
 func (m blobManager) loop() {
@@ -93,19 +101,39 @@ func (m blobManager) loop() {
 		}
 	}
 
+	blobHead := func(msg blobMsg) error {
+		if _, err := m.index.GetIndex(msg.Key()); err != nil {
+			return errors.WithMessage(err, "getting index")
+		} else {
+			return nil
+		}
+	}
+
 	for msg := range m.c {
 		switch msg.t {
 		case blobMsgSet:
+			// pretty.Println("blob set", msg)
 			if err := blobSet(msg); err != nil {
+				// pretty.Println("blob set", err)
 				msg.c <- blobResponse{err: err}
 			} else {
 				msg.c <- blobResponse{}
 			}
 		case blobMsgGet:
+			// pretty.Println("blob get", msg)
 			if blob, err := blobGet(msg); err != nil {
+				// pretty.Println("blob get", err)
 				msg.c <- blobResponse{err: err}
 			} else {
 				msg.c <- blobResponse{blob: blob}
+			}
+		case blobMsgHead:
+			// pretty.Println("blob head", msg)
+			if err := blobHead(msg); err != nil {
+				// pretty.Println("blob head", err)
+				msg.c <- blobResponse{err: err}
+			} else {
+				msg.c <- blobResponse{}
 			}
 		default:
 			panic(msg)

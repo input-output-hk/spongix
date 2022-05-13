@@ -15,9 +15,12 @@ import (
 	"go.uber.org/zap"
 )
 
+const (
+	mimeJson = "application/json; charset=utf-8"
+)
+
 type dockerUpload struct {
 	uuid         string
-	rangeStart   int64
 	content      *bytes.Buffer
 	lastModified time.Time
 }
@@ -68,22 +71,27 @@ func newDockerHandler(logger *zap.Logger, store desync.WriteStore, index desync.
 	}
 
 	r.HandleFunc("/v2/", handler.ping)
-	registry := r.PathPrefix("/v2/{name:(?:[a-z0-9]+(?:[._-][a-z0-9]+)*/?){2}}/").Subrouter()
-	registry.Methods("GET", "HEAD").Path("/manifests/{reference}").HandlerFunc(handler.manifestGet)
-	registry.Methods("PUT").Path("/manifests/{reference}").HandlerFunc(handler.manifestPut)
-	registry.Methods("HEAD", "GET").Path("/blobs/{digest:sha256:[a-z0-9]{64}}").HandlerFunc(handler.blobGet)
-	registry.Methods("POST").Path("/blobs/uploads/").HandlerFunc(handler.blobUploadPost)
-	blobUpload := registry.PathPrefix("/blobs/uploads/{uuid:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}}").Subrouter()
-	blobUpload.Methods("GET").HandlerFunc(handler.blobUploadGet)
-	blobUpload.Methods("PUT").HandlerFunc(handler.blobUploadPut)
-	blobUpload.Methods("PATCH").HandlerFunc(handler.blobUploadPatch)
+
+	prefix := "/v2/{name:(?:[a-z0-9]+(?:[._-][a-z0-9]+)*/?){2}}/"
+	r.Methods("GET", "HEAD").Path(prefix + "manifests/{reference}").HandlerFunc(handler.manifestGet)
+	r.Methods("PUT").Path(prefix + "manifests/{reference}").HandlerFunc(handler.manifestPut)
+	r.Methods("GET").Path(prefix + "blobs/{digest:sha256:[a-z0-9]{64}}").HandlerFunc(handler.blobGet)
+	r.Methods("HEAD").Path(prefix + "blobs/{digest:sha256:[a-z0-9]{64}}").HandlerFunc(handler.blobHead)
+	r.Methods("POST").Path(prefix + "blobs/uploads/").HandlerFunc(handler.blobUploadPost)
+
+	// seems like a bug in mux, we cannot simply use `registry` as our subrouter here
+	uploadPrefix := prefix + "blobs/uploads/{uuid:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}}"
+	r.PathPrefix(uploadPrefix).Methods("GET").HandlerFunc(handler.blobUploadGet)
+	r.PathPrefix(uploadPrefix).Methods("PUT").HandlerFunc(handler.blobUploadPut)
+	r.PathPrefix(uploadPrefix).Methods("PATCH").HandlerFunc(handler.blobUploadPatch)
 
 	return handler
 }
 
 func (d dockerHandler) ping(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set(headerContentType, mimeJson)
 	w.WriteHeader(200)
-	w.Write([]byte(`{}`))
+	_, _ = w.Write([]byte(`{}`))
 }
 
 func (d dockerHandler) blobUploadPost(w http.ResponseWriter, r *http.Request) {
@@ -120,25 +128,34 @@ func (d dockerHandler) blobUploadGet(w http.ResponseWriter, r *http.Request) {
 	h.Set("Docker-Upload-UUID", vars["uuid"])
 }
 
+func (d dockerHandler) blobHead(w http.ResponseWriter, r *http.Request) {
+	vars := mux.Vars(r)
+
+	if err := d.blobs.head(vars["name"], vars["digest"]); err != nil {
+		d.log.Error("getting blob", zap.Error(err))
+		w.WriteHeader(404)
+	} else {
+		w.WriteHeader(200)
+	}
+}
+
 func (d dockerHandler) blobGet(w http.ResponseWriter, r *http.Request) {
 	vars := mux.Vars(r)
 
 	blob, err := d.blobs.get(vars["name"], vars["digest"])
-	if blob == nil {
-		w.WriteHeader(404)
-		return
-	}
-
 	if err != nil {
 		d.log.Error("getting blob", zap.Error(err))
 		w.WriteHeader(404)
 		return
 	}
 
-	w.WriteHeader(200)
-	if r.Method == "GET" {
-		w.Write(blob)
+	if blob == nil {
+		w.WriteHeader(404)
+		return
 	}
+
+	w.WriteHeader(200)
+	_, _ = w.Write(blob)
 }
 
 func (d dockerHandler) manifestPut(w http.ResponseWriter, r *http.Request) {
@@ -146,9 +163,9 @@ func (d dockerHandler) manifestPut(w http.ResponseWriter, r *http.Request) {
 
 	manifest := &DockerManifest{}
 	if err := json.NewDecoder(r.Body).Decode(manifest); err != nil {
-		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		w.Header().Set(headerContentType, mimeJson)
 		w.WriteHeader(400)
-		w.Write([]byte(`{"errors": [{"code": "MANIFEST_INVALID"}]}`))
+		_, _ = w.Write([]byte(`{"errors": [{"code": "MANIFEST_INVALID"}]}`))
 		return
 	}
 
@@ -166,7 +183,11 @@ func (d dockerHandler) blobUploadPut(w http.ResponseWriter, r *http.Request) {
 	if upload := d.uploads.get(vars["uuid"]); upload != nil {
 		_, _ = io.Copy(upload.content, r.Body)
 
-		d.blobs.set(vars["name"], digest, upload.content.Bytes())
+		if err := d.blobs.set(vars["name"], digest, upload.content.Bytes()); err != nil {
+			w.WriteHeader(500)
+			d.log.Error("Failed to store blob", zap.Error(err))
+			_, _ = w.Write([]byte(`{"errors": [{"code": "BLOB_UPLOAD_UNKNOWN"}]}`))
+		}
 		d.uploads.del(vars["uuid"])
 
 		h.Set("Content-Length", "0")
@@ -174,9 +195,9 @@ func (d dockerHandler) blobUploadPut(w http.ResponseWriter, r *http.Request) {
 		h.Set("Docker-Upload-UUID", vars["uuid"])
 		w.WriteHeader(201)
 	} else {
-		h.Set("Content-Type", "application/json; charset=utf-8")
+		h.Set(headerContentType, mimeJson)
 		w.WriteHeader(404)
-		w.Write([]byte(`{"errors": [{"code": "BLOB_UPLOAD_UNKNOWN"}]}`))
+		_, _ = w.Write([]byte(`{"errors": [{"code": "BLOB_UPLOAD_UNKNOWN"}]}`))
 	}
 }
 
@@ -194,9 +215,9 @@ func (d dockerHandler) blobUploadPatch(w http.ResponseWriter, r *http.Request) {
 		h.Set("Docker-Upload-UUID", vars["uuid"])
 		w.WriteHeader(204)
 	} else {
-		h.Set("Content-Type", "application/json; charset=utf-8")
+		h.Set(headerContentType, mimeJson)
 		w.WriteHeader(404)
-		w.Write([]byte(`{"errors": [{"code": "BLOB_UPLOAD_UNKNOWN"}]}`))
+		_, _ = w.Write([]byte(`{"errors": [{"code": "BLOB_UPLOAD_UNKNOWN"}]}`))
 	}
 }
 
@@ -210,7 +231,7 @@ func (d dockerHandler) manifestGet(w http.ResponseWriter, r *http.Request) {
 	}
 
 	h := w.Header()
-	h.Set("Content-Type", manifest.Config.MediaType)
+	h.Set(headerContentType, manifest.Config.MediaType)
 	h.Set("Docker-Content-Digest", manifest.Config.Digest)
 	h.Set("Docker-Distribution-Api-Version", "registry/2.0")
 	h.Set("Etag", `"`+manifest.Config.Digest+`"`)
@@ -227,7 +248,12 @@ func (d dockerHandler) manifestGet(w http.ResponseWriter, r *http.Request) {
 	}
 
 	cfg := map[string]interface{}{}
-	json.Unmarshal(blob, &cfg)
+	if err := json.Unmarshal(blob, &cfg); err != nil {
+		d.log.Error("unmarshal manifest", zap.Error(err))
+		w.WriteHeader(400)
+		_, _ = w.Write([]byte(`{"errors": [{"code": "MANIFEST_INVALID"}]}`))
+		return
+	}
 
 	fsLayers := []DockerManifestResponseFSLayer{}
 	for _, layer := range manifest.Layers {
@@ -238,17 +264,17 @@ func (d dockerHandler) manifestGet(w http.ResponseWriter, r *http.Request) {
 	for i := range manifest.Layers {
 		rootfs, ok := cfg["rootfs"].(map[string]interface{})
 		if !ok {
-			w.Header().Set("Content-Type", "application/json; charset=utf-8")
+			w.Header().Set(headerContentType, mimeJson)
 			w.WriteHeader(500)
-			w.Write([]byte(`{"errors": [{"code": "MANIFEST_INVALID"}]}`))
+			_, _ = w.Write([]byte(`{"errors": [{"code": "MANIFEST_INVALID"}]}`))
 			return
 		}
 
 		diffIds, ok := rootfs["diff_ids"].([]interface{})
 		if !ok {
-			w.Header().Set("Content-Type", "application/json; charset=utf-8")
+			w.Header().Set(headerContentType, mimeJson)
 			w.WriteHeader(500)
-			w.Write([]byte(`{"errors": [{"code": "MANIFEST_INVALID"}]}`))
+			_, _ = w.Write([]byte(`{"errors": [{"code": "MANIFEST_INVALID"}]}`))
 			return
 		}
 
@@ -271,9 +297,9 @@ func (d dockerHandler) manifestGet(w http.ResponseWriter, r *http.Request) {
 		}
 
 		if c, err := json.Marshal(entry); err != nil {
-			w.Header().Set("Content-Type", "application/json; charset=utf-8")
+			w.Header().Set(headerContentType, mimeJson)
 			w.WriteHeader(400)
-			w.Write([]byte(`{"errors": [{"code": "MANIFEST_INVALID"}]}`))
+			_, _ = w.Write([]byte(`{"errors": [{"code": "MANIFEST_INVALID"}]}`))
 			return
 		} else {
 			history = append(history, DockerManifestResponseHistory{

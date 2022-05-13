@@ -25,6 +25,7 @@
         ./blob_manager.go
         ./cache.go
         ./docker.go
+        ./docker_test.go
         ./fake.go
         ./gc.go
         ./helpers.go

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"net/http"
 	"net/url"
 	"os"
@@ -31,11 +32,17 @@ func testDocker(t *testing.T) dockerHandler {
 		t.Fatal(err)
 	}
 
+	ociDir := filepath.Join(t.TempDir(), "oci")
+	if err := os.MkdirAll(ociDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+
 	log, err := zap.NewDevelopment()
 	if err != nil {
 		t.Fatal(err)
 	}
-	return newDockerHandler(log, store, index, mux.NewRouter())
+
+	return newDockerHandler(log, store, index, ociDir, mux.NewRouter())
 }
 
 func TestDocker(t *testing.T) {
@@ -91,7 +98,36 @@ func TestDockerBlob(t *testing.T) {
 		Method("HEAD").
 		URL("/v2/spongix/blobs/" + digest).
 		Expect(t).
+		Body(``).
 		Status(http.StatusOK).
+		Headers(map[string]string{}).
+		End()
+}
+
+func TestDockerManifest(t *testing.T) {
+	proxy := testProxy(t)
+	router := proxy.router()
+
+	body, err := json.Marshal(&DockerManifest{})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	apitest.New().
+		Handler(router).
+		Put("/v2/spongix/manifests/hello").
+		Body(string(body)).
+		Expect(t).
+		Body(``).
+		Status(http.StatusOK).
+		End()
+
+	apitest.New().
+		Handler(router).
+		Get("/v2/spongix/manifests/hello").
+		Expect(t).
+		Status(http.StatusOK).
+		Body(``).
 		Headers(map[string]string{}).
 		End()
 }

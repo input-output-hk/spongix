@@ -234,7 +234,7 @@ func (proxy *Proxy) setupKeys() {
 }
 
 func (proxy *Proxy) stateDirs() []string {
-	return []string{"store", "index", "index/nar", "tmp", "trash/index"}
+	return []string{"store", "index", "index/nar", "tmp", "trash/index", "oci"}
 }
 
 var defaultStoreOptions = desync.StoreOptions{

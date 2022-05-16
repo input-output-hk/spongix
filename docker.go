@@ -62,11 +62,17 @@ type dockerHandler struct {
 	uploads   uploadManager
 }
 
-func newDockerHandler(logger *zap.Logger, store desync.WriteStore, index desync.IndexWriteStore, r *mux.Router) dockerHandler {
+func newDockerHandler(
+	logger *zap.Logger,
+	store desync.WriteStore,
+	index desync.IndexWriteStore,
+	manifestDir string,
+	r *mux.Router,
+) dockerHandler {
 	handler := dockerHandler{
 		log:       logger,
 		blobs:     newBlobManager(store, index),
-		manifests: newManifestManager(store, index),
+		manifests: newManifestManager(manifestDir),
 		uploads:   newUploadManager(store, index),
 	}
 
@@ -90,7 +96,7 @@ func newDockerHandler(logger *zap.Logger, store desync.WriteStore, index desync.
 
 func (d dockerHandler) ping(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set(headerContentType, mimeJson)
-	w.WriteHeader(200)
+	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write([]byte(`{}`))
 }
 
@@ -98,7 +104,7 @@ func (d dockerHandler) blobUploadPost(w http.ResponseWriter, r *http.Request) {
 	u, err := uuid.GenerateUUID()
 	if err != nil {
 		d.log.Error("Failed to generate UUID", zap.Error(err))
-		w.WriteHeader(500)
+		w.WriteHeader(http.StatusInternalServerError)
 		return
 	}
 
@@ -109,7 +115,7 @@ func (d dockerHandler) blobUploadPost(w http.ResponseWriter, r *http.Request) {
 	h.Set("Location", r.URL.Host+r.URL.Path+u)
 	h.Set("Range", "0-0")
 	h.Set("Docker-Upload-UUID", u)
-	w.WriteHeader(202)
+	w.WriteHeader(http.StatusAccepted)
 }
 
 func (d dockerHandler) blobUploadGet(w http.ResponseWriter, r *http.Request) {
@@ -117,11 +123,11 @@ func (d dockerHandler) blobUploadGet(w http.ResponseWriter, r *http.Request) {
 
 	upload := d.uploads.get(vars["uuid"])
 	if upload == nil {
-		w.WriteHeader(404)
+		w.WriteHeader(http.StatusNotFound)
 		return
 	}
 
-	w.WriteHeader(204)
+	w.WriteHeader(http.StatusNoContent)
 	h := w.Header()
 	h.Set("Content-Length", "0")
 	h.Set("Range", fmt.Sprintf("%d-%d", 0, upload.content.Len()))
@@ -133,9 +139,9 @@ func (d dockerHandler) blobHead(w http.ResponseWriter, r *http.Request) {
 
 	if err := d.blobs.head(vars["name"], vars["digest"]); err != nil {
 		d.log.Error("getting blob", zap.Error(err))
-		w.WriteHeader(404)
+		w.WriteHeader(http.StatusNotFound)
 	} else {
-		w.WriteHeader(200)
+		w.WriteHeader(http.StatusOK)
 	}
 }
 
@@ -145,16 +151,16 @@ func (d dockerHandler) blobGet(w http.ResponseWriter, r *http.Request) {
 	blob, err := d.blobs.get(vars["name"], vars["digest"])
 	if err != nil {
 		d.log.Error("getting blob", zap.Error(err))
-		w.WriteHeader(404)
+		w.WriteHeader(http.StatusNotFound)
 		return
 	}
 
 	if blob == nil {
-		w.WriteHeader(404)
+		w.WriteHeader(http.StatusNotFound)
 		return
 	}
 
-	w.WriteHeader(200)
+	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write(blob)
 }
 
@@ -163,14 +169,27 @@ func (d dockerHandler) manifestPut(w http.ResponseWriter, r *http.Request) {
 
 	manifest := &DockerManifest{}
 	if err := json.NewDecoder(r.Body).Decode(manifest); err != nil {
+		fmt.Println(err)
 		w.Header().Set(headerContentType, mimeJson)
-		w.WriteHeader(400)
+		w.WriteHeader(http.StatusBadRequest)
 		_, _ = w.Write([]byte(`{"errors": [{"code": "MANIFEST_INVALID"}]}`))
 		return
 	}
 
-	d.manifests.set(vars["name"], vars["reference"], manifest)
-	w.WriteHeader(200)
+	if manifest.Config.Digest == "" {
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte(`{"errors": [{"code": "MANIFEST_INVALID"}]}`))
+		return
+	}
+
+	if err := d.manifests.set(vars["name"], vars["reference"], manifest); err != nil {
+		fmt.Println(err)
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte(`{"errors": [{"code": "MANIFEST_INVALID"}]}`))
+		return
+	}
+
+	w.WriteHeader(http.StatusOK)
 }
 
 func (d dockerHandler) blobUploadPut(w http.ResponseWriter, r *http.Request) {
@@ -184,7 +203,7 @@ func (d dockerHandler) blobUploadPut(w http.ResponseWriter, r *http.Request) {
 		_, _ = io.Copy(upload.content, r.Body)
 
 		if err := d.blobs.set(vars["name"], digest, upload.content.Bytes()); err != nil {
-			w.WriteHeader(500)
+			w.WriteHeader(http.StatusInternalServerError)
 			d.log.Error("Failed to store blob", zap.Error(err))
 			_, _ = w.Write([]byte(`{"errors": [{"code": "BLOB_UPLOAD_UNKNOWN"}]}`))
 		}
@@ -193,10 +212,10 @@ func (d dockerHandler) blobUploadPut(w http.ResponseWriter, r *http.Request) {
 		h.Set("Content-Length", "0")
 		h.Set("Range", fmt.Sprintf("0-%d", upload.content.Len()))
 		h.Set("Docker-Upload-UUID", vars["uuid"])
-		w.WriteHeader(201)
+		w.WriteHeader(http.StatusCreated)
 	} else {
 		h.Set(headerContentType, mimeJson)
-		w.WriteHeader(404)
+		w.WriteHeader(http.StatusNotFound)
 		_, _ = w.Write([]byte(`{"errors": [{"code": "BLOB_UPLOAD_UNKNOWN"}]}`))
 	}
 }
@@ -213,10 +232,10 @@ func (d dockerHandler) blobUploadPatch(w http.ResponseWriter, r *http.Request) {
 		h.Set("Location", r.URL.Host+r.URL.Path)
 		h.Set("Range", fmt.Sprintf("0-%d", upload.content.Len()))
 		h.Set("Docker-Upload-UUID", vars["uuid"])
-		w.WriteHeader(204)
+		w.WriteHeader(http.StatusNoContent)
 	} else {
 		h.Set(headerContentType, mimeJson)
-		w.WriteHeader(404)
+		w.WriteHeader(http.StatusNotFound)
 		_, _ = w.Write([]byte(`{"errors": [{"code": "BLOB_UPLOAD_UNKNOWN"}]}`))
 	}
 }
@@ -224,9 +243,18 @@ func (d dockerHandler) blobUploadPatch(w http.ResponseWriter, r *http.Request) {
 func (d dockerHandler) manifestGet(w http.ResponseWriter, r *http.Request) {
 	vars := mux.Vars(r)
 
-	manifest := d.manifests.get(vars["name"], vars["reference"])
+	manifest, err := d.manifests.get(vars["name"], vars["reference"])
+	if err != nil {
+		fmt.Println(err)
+		d.log.Error("getting manifest", zap.Error(err))
+		w.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+
 	if manifest == nil {
-		w.WriteHeader(404)
+		fmt.Println("404")
+		d.log.Warn("manifest not found")
+		w.WriteHeader(http.StatusNotFound)
 		return
 	}
 
@@ -237,20 +265,26 @@ func (d dockerHandler) manifestGet(w http.ResponseWriter, r *http.Request) {
 	h.Set("Etag", `"`+manifest.Config.Digest+`"`)
 
 	if r.Method == "HEAD" {
-		w.WriteHeader(200)
+		w.WriteHeader(http.StatusOK)
 		return
 	}
 
 	blob, err := d.blobs.get(vars["name"], manifest.Config.Digest)
-	if blob == nil || err != nil {
-		w.WriteHeader(404)
+	if err != nil {
+		fmt.Println(err)
+		w.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+
+	if blob == nil {
+		w.WriteHeader(http.StatusNotFound)
 		return
 	}
 
 	cfg := map[string]interface{}{}
 	if err := json.Unmarshal(blob, &cfg); err != nil {
 		d.log.Error("unmarshal manifest", zap.Error(err))
-		w.WriteHeader(400)
+		w.WriteHeader(http.StatusBadRequest)
 		_, _ = w.Write([]byte(`{"errors": [{"code": "MANIFEST_INVALID"}]}`))
 		return
 	}
@@ -265,7 +299,8 @@ func (d dockerHandler) manifestGet(w http.ResponseWriter, r *http.Request) {
 		rootfs, ok := cfg["rootfs"].(map[string]interface{})
 		if !ok {
 			w.Header().Set(headerContentType, mimeJson)
-			w.WriteHeader(500)
+			d.log.Error("manifest invalid", zap.Error(err))
+			w.WriteHeader(http.StatusInternalServerError)
 			_, _ = w.Write([]byte(`{"errors": [{"code": "MANIFEST_INVALID"}]}`))
 			return
 		}
@@ -273,7 +308,8 @@ func (d dockerHandler) manifestGet(w http.ResponseWriter, r *http.Request) {
 		diffIds, ok := rootfs["diff_ids"].([]interface{})
 		if !ok {
 			w.Header().Set(headerContentType, mimeJson)
-			w.WriteHeader(500)
+			d.log.Error("manifest invalid", zap.Error(err))
+			w.WriteHeader(http.StatusInternalServerError)
 			_, _ = w.Write([]byte(`{"errors": [{"code": "MANIFEST_INVALID"}]}`))
 			return
 		}
@@ -298,7 +334,7 @@ func (d dockerHandler) manifestGet(w http.ResponseWriter, r *http.Request) {
 
 		if c, err := json.Marshal(entry); err != nil {
 			w.Header().Set(headerContentType, mimeJson)
-			w.WriteHeader(400)
+			w.WriteHeader(http.StatusBadRequest)
 			_, _ = w.Write([]byte(`{"errors": [{"code": "MANIFEST_INVALID"}]}`))
 			return
 		} else {
@@ -318,7 +354,7 @@ func (d dockerHandler) manifestGet(w http.ResponseWriter, r *http.Request) {
 		Signatures:    []string{},
 	}
 
-	w.WriteHeader(200)
+	w.WriteHeader(http.StatusOK)
 	if err := json.NewEncoder(w).Encode(res); err != nil {
 		d.log.Error("Failed to encode JSON", zap.Error(err))
 	}

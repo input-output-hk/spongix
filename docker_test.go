@@ -1,7 +1,6 @@
 package main
 
 import (
-	"encoding/json"
 	"net/http"
 	"net/url"
 	"os"
@@ -100,34 +99,6 @@ func TestDockerBlob(t *testing.T) {
 		Expect(t).
 		Body(``).
 		Status(http.StatusOK).
-		Headers(map[string]string{}).
-		End()
-}
-
-func TestDockerManifest(t *testing.T) {
-	proxy := testProxy(t)
-	router := proxy.router()
-
-	body, err := json.Marshal(&DockerManifest{})
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	apitest.New().
-		Handler(router).
-		Put("/v2/spongix/manifests/hello").
-		Body(string(body)).
-		Expect(t).
-		Body(``).
-		Status(http.StatusOK).
-		End()
-
-	apitest.New().
-		Handler(router).
-		Get("/v2/spongix/manifests/hello").
-		Expect(t).
-		Status(http.StatusOK).
-		Body(``).
 		Headers(map[string]string{}).
 		End()
 }

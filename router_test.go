@@ -71,6 +71,17 @@ func withS3(proxy *Proxy) *Proxy {
 	return proxy
 }
 
+func withNamespaces(proxy *Proxy) *Proxy {
+	proxy.Namespaces = []string{"sunlight"}
+
+	privateIndexDir := filepath.Join(t.TempDir(), "privateIndex")
+	if err := os.MkdirAll(filepath.Join(privateIndexDir, "privateNar"), 0700); err != nil {
+		panic(err)
+	} else if proxy.localIndex, err = desync.NewLocalPrivateIndexStore(privateIndexDir); err != nil {
+		panic(err)
+	}
+}
+
 func TestRouterNixCacheInfo(t *testing.T) {
 	proxy := testProxy(t)
 
@@ -699,4 +710,12 @@ func insertFake(
 	} else if err := index.StoreIndex(rel, idx); err != nil {
 		t.Fatal(err)
 	}
+}
+
+func TestRouterNamespaces(t *testing.T) {
+
+	t.Run("upload to private namespace", func(tt *testing.T) {
+		proxy := withNamespaces(testProxy(tt))
+		// TODO Write test
+	})
 }

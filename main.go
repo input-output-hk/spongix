@@ -113,6 +113,7 @@ type Proxy struct {
 	SecretKeyFiles    []string      `arg:"--secret-key-files,required,env:NIX_SECRET_KEY_FILES" help:"Files containing your private nix signing keys"`
 	Substituters      []string      `arg:"--substituters,env:NIX_SUBSTITUTERS"`
 	TrustedPublicKeys []string      `arg:"--trusted-public-keys,env:NIX_TRUSTED_PUBLIC_KEYS"`
+	Namespaces        []string      `arg:"--namespaces,env:NAMESPACES" help: "Namespaces takes one or many strings to setup private caching"`
 	CacheInfoPriority uint64        `arg:"--cache-info-priority,env:CACHE_INFO_PRIORITY" help:"Priority in nix-cache-info"`
 	AverageChunkSize  uint64        `arg:"--average-chunk-size,env:AVERAGE_CHUNK_SIZE" help:"Chunk size will be between /4 and *4 of this value"`
 	CacheSize         uint64        `arg:"--cache-size,env:CACHE_SIZE" help:"Number of gigabytes to keep in the disk cache"`
@@ -148,6 +149,7 @@ func NewProxy() *Proxy {
 		SecretKeyFiles:    []string{},
 		TrustedPublicKeys: []string{},
 		Substituters:      []string{},
+		Namespaces:        []string{},
 		CacheInfoPriority: 50,
 		AverageChunkSize:  chunkSizeAvg,
 		VerifyInterval:    time.Hour,

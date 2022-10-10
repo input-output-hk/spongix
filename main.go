@@ -123,18 +123,19 @@ type Proxy struct {
 	LogMode           string        `arg:"--log-mode,env:LOG_MODE" help:"development or production"`
 
 	// derived from the above
-	secretKeys  map[string]ed25519.PrivateKey
-	trustedKeys map[string]ed25519.PublicKey
+	secretKeys        map[string]ed25519.PrivateKey
+	trustedKeys       map[string]ed25519.PublicKey
 
-	s3Store    desync.WriteStore
-	localStore desync.WriteStore
+	s3Store           desync.WriteStore
+	localStore        desync.WriteStore
 
-	s3Index    desync.IndexWriteStore
-	localIndex desync.IndexWriteStore
+	s3Index           desync.IndexWriteStore
+	localIndex        desync.IndexWriteStore
+	privateLocalIndex desync.IndexWriteStore
 
-	cacheChan chan string
+	cacheChan         chan string
 
-	log *zap.Logger
+	log               *zap.Logger
 }
 
 func NewProxy() *Proxy {
@@ -265,8 +266,15 @@ func (proxy *Proxy) setupDesync() {
 		proxy.log.Fatal("failed creating local index", zap.Error(err), zap.String("dir", indexDir))
 	}
 
+	privateIndexDir := filepath.Join(proxy.Dir, "privateIndex")
+	privateNarIndex, err := desync.NewLocalIndexStore(privateIndexDir)
+	if err != nil {
+		proxy.log.Fatal("failed creating local private index", zap.Error(err), zap.String("dir", privateIndexDir))
+	}
+
 	proxy.localStore = narStore
 	proxy.localIndex = narIndex
+	proxy.privateLocalIndex = privateNarIndex
 }
 
 func (proxy *Proxy) setupLogger() {

@@ -130,8 +130,7 @@ type Proxy struct {
 	localStore        desync.WriteStore
 
 	s3Index           desync.IndexWriteStore
-	localIndex        desync.IndexWriteStore
-	privateLocalIndex desync.IndexWriteStore
+	localIndexies     map[string]desync.IndexWriteStore
 
 	cacheChan         chan string
 
@@ -266,6 +265,7 @@ func (proxy *Proxy) setupDesync() {
 		proxy.log.Fatal("failed creating local index", zap.Error(err), zap.String("dir", indexDir))
 	}
 
+	// TODO Iterate through all the passed namespaces
 	privateIndexDir := filepath.Join(proxy.Dir, "privateIndex")
 	privateNarIndex, err := desync.NewLocalIndexStore(privateIndexDir)
 	if err != nil {
@@ -273,8 +273,9 @@ func (proxy *Proxy) setupDesync() {
 	}
 
 	proxy.localStore = narStore
-	proxy.localIndex = narIndex
-	proxy.privateLocalIndex = privateNarIndex
+	proxy.localIndexies[""] = narIndex
+	// TODO Create for all passed namespaces
+	proxy.localIndexies["private"] = privateNarIndex
 }
 
 func (proxy *Proxy) setupLogger() {

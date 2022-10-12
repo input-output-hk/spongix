@@ -58,7 +58,7 @@ func (proxy *Proxy) withLocalCacheHandler() mux.MiddlewareFunc {
 	return withCacheHandler(
 		proxy.log,
 		proxy.localStore,
-		proxy.localIndex,
+		proxy.localIndexies[""], // default
 		proxy.trustedKeys,
 		proxy.secretKeys,
 	)

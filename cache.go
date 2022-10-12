@@ -40,42 +40,60 @@ func urlToMime(u string) string {
 	}
 }
 
-func getIndex(index desync.IndexStore, url *url.URL) (i desync.Index, err error) {
-	if name, err := urlToIndexName(url); err != nil {
+func getIndex(indexies map[string]desync.IndexWriteStore, url *url.URL) (i desync.Index, err error) {
+	if name, index, err := urlToIndexName(url, indexies); err != nil {
 		return i, err
 	} else {
 		return index.GetIndex(name)
 	}
 }
 
-func storeIndex(index desync.IndexWriteStore, url *url.URL, idx desync.Index) error {
-	if name, err := urlToIndexName(url); err != nil {
+func storeIndex(url *url.URL, indexies map[string]desync.IndexWriteStore, idx desync.Index) error {
+	if name, index, err := urlToIndexName(url, indexies); err != nil {
 		return err
 	} else {
 		return index.StoreIndex(name, idx)
 	}
 }
 
-func urlToIndexName(url *url.URL) (string, error) {
-	name := url.EscapedPath()
-	if strings.HasPrefix(name, "/cache/") {
-		name = strings.Replace(name, "/cache/", "/", 1)
-	}
+func urlToIndexName(
+	url *url.URL,
+	indexies map[string]desync.IndexWriteStore) (string, desync.IndexWriteStore, error) {
+
+	name  := url.EscapedPath()
+	name, index := findIndexByURL(name, indexies)
+
 	if strings.HasSuffix(name, ".nar.xz") {
 		name = strings.Replace(name, ".nar.xz", ".nar", 1)
 	}
 	if name, err := filepath.Rel("/", name); err != nil {
-		return name, err
+		return name, index, err
 	} else {
-		return name, nil
+		return name, index, nil
 	}
+}
+
+func findIndexByURL(name string, indexies map[string]desync.IndexWriteStore) (string, desync.IndexWriteStore) {
+
+	if strings.HasPrefix(name, "/cache/") {
+		name = strings.Replace(name, "/cache/", "/", 1)
+	} else {
+		for namespace, index := range indexies {
+			if strings.HasPrefix(name, namespace + "/") {
+				name = strings.Replace(name, namespace, "/", 1)
+				return name, index
+			}
+		}
+	}
+	// default
+	return name, indexies[""]
 }
 
 type cacheHandler struct {
 	log         *zap.Logger
 	handler     http.Handler
 	store       desync.WriteStore
-	index       desync.IndexWriteStore
+	indexies    map[string]desync.IndexWriteStore
 	trustedKeys map[string]ed25519.PublicKey
 	secretKeys  map[string]ed25519.PrivateKey
 }
@@ -83,11 +101,11 @@ type cacheHandler struct {
 func withCacheHandler(
 	log *zap.Logger,
 	store desync.WriteStore,
-	index desync.IndexWriteStore,
+	indexies map[string]desync.IndexWriteStore,
 	trustedKeys map[string]ed25519.PublicKey,
 	secretKeys map[string]ed25519.PrivateKey,
 ) func(http.Handler) http.Handler {
-	if store == nil || index == nil {
+	if store == nil || len(indexies) == 0 {
 		return func(h http.Handler) http.Handler {
 			return h
 		}
@@ -97,7 +115,7 @@ func withCacheHandler(
 		return &cacheHandler{handler: h,
 			log:         log,
 			store:       store,
-			index:       index,
+			indexies:    indexies,
 			trustedKeys: trustedKeys,
 			secretKeys:  secretKeys,
 		}
@@ -118,7 +136,7 @@ func (c cacheHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 func (c cacheHandler) Head(w http.ResponseWriter, r *http.Request) {
-	idx, err := getIndex(c.index, r.URL)
+	idx, err := getIndex(c.indexies, r.URL)
 	if err != nil {
 		c.handler.ServeHTTP(w, r)
 		return
@@ -131,7 +149,7 @@ func (c cacheHandler) Head(w http.ResponseWriter, r *http.Request) {
 }
 
 func (c cacheHandler) Get(w http.ResponseWriter, r *http.Request) {
-	idx, err := getIndex(c.index, r.URL)
+	idx, err := getIndex(c.indexies, r.URL)
 	if err != nil {
 		c.handler.ServeHTTP(w, r)
 		return
@@ -200,7 +218,7 @@ func (c cacheHandler) putCommon(w http.ResponseWriter, r *http.Request, rd io.Re
 	} else if idx, err := desync.ChunkStream(context.Background(), chunker, c.store, defaultThreads); err != nil {
 		c.log.Error("chunking body", zap.Error(err))
 		answer(w, http.StatusInternalServerError, mimeText, "chunking body")
-	} else if err := storeIndex(c.index, r.URL, idx); err != nil {
+	} else if err := storeIndex(r.URL, c.indexies, idx); err != nil {
 		c.log.Error("storing index", zap.Error(err))
 		answer(w, http.StatusInternalServerError, mimeText, "storing index")
 	} else {
@@ -347,7 +365,7 @@ func (proxy *Proxy) cacheUrl(urlStr string) error {
 			return errors.WithMessage(err, "making chunker")
 		} else if idx, err := desync.ChunkStream(context.Background(), chunker, proxy.localStore, defaultThreads); err != nil {
 			return errors.WithMessage(err, "chunking body")
-		} else if err := storeIndex(proxy.localIndex, u, idx); err != nil {
+		} else if err := storeIndex(u, proxy.localIndexies, idx); err != nil {
 			return errors.WithMessage(err, "storing index")
 		}
 	} else if strings.HasSuffix(urlStr, ".nar.xz") {
@@ -356,7 +374,7 @@ func (proxy *Proxy) cacheUrl(urlStr string) error {
 			return errors.WithMessage(err, "making chunker")
 		} else if idx, err := desync.ChunkStream(context.Background(), chunker, proxy.localStore, defaultThreads); err != nil {
 			return errors.WithMessage(err, "chunking body")
-		} else if err := storeIndex(proxy.localIndex, u, idx); err != nil {
+		} else if err := storeIndex(u, proxy.localIndexies, idx); err != nil {
 			return errors.WithMessage(err, "storing index")
 		}
 	} else {

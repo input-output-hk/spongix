@@ -42,6 +42,7 @@ func TestMain(m *testing.M) {
 func testProxy(t *testing.T) *Proxy {
 	proxy := NewProxy()
 	proxy.Substituters = []string{"http://example.com"}
+	proxy.localIndexies = make(map[string]desync.IndexWriteStore)
 
 	indexDir := filepath.Join(t.TempDir(), "index")
 	if err := os.MkdirAll(filepath.Join(indexDir, "nar"), 0700); err != nil {
@@ -68,6 +69,7 @@ func testProxy(t *testing.T) *Proxy {
 }
 
 func withS3(proxy *Proxy) *Proxy {
+	proxy.s3Indexies = make(map[string]desync.IndexWriteStore)
 	proxy.s3Indexies[""] = newFakeIndex()
 	proxy.s3Store = newFakeStore()
 	return proxy

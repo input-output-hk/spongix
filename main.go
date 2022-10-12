@@ -129,7 +129,7 @@ type Proxy struct {
 	s3Store           desync.WriteStore
 	localStore        desync.WriteStore
 
-	s3Index           desync.IndexWriteStore
+	s3Indexies        map[string]desync.IndexWriteStore
 	localIndexies     map[string]desync.IndexWriteStore
 
 	cacheChan         chan string

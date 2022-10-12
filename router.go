@@ -4,6 +4,7 @@ import (
 	"net/http"
 	"path/filepath"
 	"strconv"
+	"strings"
 
 	"github.com/gorilla/handlers"
 	"github.com/gorilla/mux"
@@ -18,6 +19,7 @@ const (
 )
 
 func (proxy *Proxy) router() *mux.Router {
+	escapeNamespaces(proxy)
 	r := mux.NewRouter()
 	r.NotFoundHandler = notFound{}
 	r.MethodNotAllowedHandler = notAllowed{}
@@ -28,10 +30,12 @@ func (proxy *Proxy) router() *mux.Router {
 
 	r.HandleFunc("/metrics", metrics.ServeHTTP)
 
-	newDockerHandler(proxy.log, proxy.localStore, proxy.localIndex, filepath.Join(proxy.Dir, "oci"), r)
+	// TODO create newDockerhandler for all namespaces
+	newDockerHandler(proxy.log, proxy.localStore,
+		proxy.localIndexies[""], filepath.Join(proxy.Dir, "oci"), r)
 
 	// backwards compat
-	for _, prefix := range []string{"/cache", ""} {
+	for _, prefix := range append([]string{"/cache", ""}, proxy.Namespaces...) {
 		r.HandleFunc(prefix+"/nix-cache-info", proxy.nixCacheInfo).Methods("GET")
 
 		narinfo := r.Name("narinfo").Path(prefix + "/{hash:[0-9a-df-np-sv-z]{32}}.narinfo").Subrouter()
@@ -54,11 +58,19 @@ func (proxy *Proxy) router() *mux.Router {
 	return r
 }
 
+func escapeNamespaces(proxy *Proxy)  {
+	for index, namespace := range proxy.Namespaces {
+		if (strings.HasPrefix(namespace, "/") == false) {
+			proxy.Namespaces[index] = "/"+namespace
+		}
+	}
+}
+
 func (proxy *Proxy) withLocalCacheHandler() mux.MiddlewareFunc {
 	return withCacheHandler(
 		proxy.log,
 		proxy.localStore,
-		proxy.localIndexies[""], // default
+		proxy.localIndexies,
 		proxy.trustedKeys,
 		proxy.secretKeys,
 	)
@@ -68,7 +80,7 @@ func (proxy *Proxy) withS3CacheHandler() mux.MiddlewareFunc {
 	return withCacheHandler(
 		proxy.log,
 		proxy.s3Store,
-		proxy.s3Index,
+		proxy.s3Indexies,
 		proxy.trustedKeys,
 		proxy.secretKeys,
 	)

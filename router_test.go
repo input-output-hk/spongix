@@ -17,9 +17,10 @@ import (
 
 var (
 	testdata = map[string][]byte{}
-	fNar     = "/nar/0m8sd5qbmvfhyamwfv3af1ff18ykywf3zx5qwawhhp3jv1h777xz.nar"
-	fNarXz   = "/nar/0m8sd5qbmvfhyamwfv3af1ff18ykywf3zx5qwawhhp3jv1h777xz.nar.xz"
-	fNarinfo = "/8ckxc8biqqfdwyhr0w70jgrcb4h7a4y5.narinfo"
+	fNar          = "/nar/0m8sd5qbmvfhyamwfv3af1ff18ykywf3zx5qwawhhp3jv1h777xz.nar"
+	fNarXz        = "/nar/0m8sd5qbmvfhyamwfv3af1ff18ykywf3zx5qwawhhp3jv1h777xz.nar.xz"
+	fNarinfo      = "/8ckxc8biqqfdwyhr0w70jgrcb4h7a4y5.narinfo"
+	testnamespace = "sunlight"
 )
 
 func TestMain(m *testing.M) {
@@ -72,7 +73,7 @@ func withS3(proxy *Proxy) *Proxy {
 }
 
 func withNamespaces(t *testing.T, proxy *Proxy) *Proxy {
-	proxy.Namespaces = []string{"sunlight"}
+	proxy.Namespaces = []string{testnamespace}
 
 	privateIndexDir := filepath.Join(t.TempDir(), "privateIndex")
 	if err := os.MkdirAll(filepath.Join(privateIndexDir, "privateNar"), 0700); err != nil {
@@ -717,6 +718,54 @@ func TestRouterNamespaces(t *testing.T) {
 
 	t.Run("upload to private namespace", func(tt *testing.T) {
 		proxy := withNamespaces(tt, testProxy(tt))
-		// TODO Write test
+
+		apitest.New().
+			Handler(proxy.router()).
+			Method("PUT").
+			URL("/"+testnamespace+fNarXz).
+			Body(string(testdata[fNarXz])).
+			Expect(tt).
+			Header(headerContentType, mimeText).
+			Body("ok\n").
+			Status(http.StatusOK).
+			End()
+
+		apitest.New().
+			Handler(proxy.router()).
+			Method("GET").
+			URL("/"+testnamespace+fNar).
+			Expect(tt).
+			Header(headerContentType, mimeNar).
+			Header(headerCache, headerCacheHit).
+			Body(string(testdata[fNar])).
+			Status(http.StatusOK).
+			End()
+
+		apitest.New().
+			Handler(proxy.router()).
+			Method("GET").
+			URL(fNar).
+			Expect(tt).
+			Header(headerCache, headerCacheMiss).
+			Header(headerContentType, mimeText).
+			Body(`not found`).
+			Status(http.StatusNotFound).
+			End()
+
+	})
+
+	t.Run("try upload to not existing namespace", func(tt *testing.T) {
+		proxy := testProxy(tt)
+
+		apitest.New().
+			Handler(proxy.router()).
+			Method("PUT").
+			URL("/"+testnamespace+fNarXz).
+			Body(string(testdata[fNarXz])).
+			Expect(tt).
+			Header(headerContentType, mimeText).
+			Body(`not found`).
+			Status(http.StatusNotFound).
+			End()
 	})
 }

@@ -158,6 +158,8 @@ func NewProxy() *Proxy {
 		log:               devLog,
 		LogLevel:          "debug",
 		LogMode:           "production",
+		s3Indexies:        map[string]desync.IndexWriteStore{},
+		localIndexies:     map[string]desync.IndexWriteStore{},
 	}
 }
 

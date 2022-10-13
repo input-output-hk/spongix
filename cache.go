@@ -40,7 +40,7 @@ func urlToMime(u string) string {
 	}
 }
 
-func getIndex(indexies map[string]desync.IndexWriteStore, url *url.URL) (i desync.Index, err error) {
+func getIndex(url *url.URL, indexies map[string]desync.IndexWriteStore) (i desync.Index, err error) {
 	if name, index, err := urlToIndexName(url, indexies); err != nil {
 		return i, err
 	} else {
@@ -60,7 +60,7 @@ func urlToIndexName(
 	url *url.URL,
 	indexies map[string]desync.IndexWriteStore) (string, desync.IndexWriteStore, error) {
 
-	name  := url.EscapedPath()
+	name := url.EscapedPath()
 	name, index := findIndexByURL(name, indexies)
 
 	if strings.HasSuffix(name, ".nar.xz") {
@@ -74,15 +74,11 @@ func urlToIndexName(
 }
 
 func findIndexByURL(name string, indexies map[string]desync.IndexWriteStore) (string, desync.IndexWriteStore) {
-
-	if strings.HasPrefix(name, "/cache/") {
-		name = strings.Replace(name, "/cache/", "/", 1)
-	} else {
-		for namespace, index := range indexies {
-			if strings.HasPrefix(name, namespace + "/") {
-				name = strings.Replace(name, namespace, "/", 1)
-				return name, index
-			}
+	for namespace, index := range indexies {
+		escapedNamespace := "/" + namespace + "/"
+		if strings.HasPrefix(name, escapedNamespace) {
+			name = strings.Replace(name, escapedNamespace, "/", 1)
+			return name, index
 		}
 	}
 	// default
@@ -136,7 +132,7 @@ func (c cacheHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 func (c cacheHandler) Head(w http.ResponseWriter, r *http.Request) {
-	idx, err := getIndex(c.indexies, r.URL)
+	idx, err := getIndex(r.URL, c.indexies)
 	if err != nil {
 		c.handler.ServeHTTP(w, r)
 		return
@@ -149,7 +145,7 @@ func (c cacheHandler) Head(w http.ResponseWriter, r *http.Request) {
 }
 
 func (c cacheHandler) Get(w http.ResponseWriter, r *http.Request) {
-	idx, err := getIndex(c.indexies, r.URL)
+	idx, err := getIndex(r.URL, c.indexies)
 	if err != nil {
 		c.handler.ServeHTTP(w, r)
 		return

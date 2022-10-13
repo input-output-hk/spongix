@@ -123,18 +123,18 @@ type Proxy struct {
 	LogMode           string        `arg:"--log-mode,env:LOG_MODE" help:"development or production"`
 
 	// derived from the above
-	secretKeys        map[string]ed25519.PrivateKey
-	trustedKeys       map[string]ed25519.PublicKey
+	secretKeys  map[string]ed25519.PrivateKey
+	trustedKeys map[string]ed25519.PublicKey
 
-	s3Store           desync.WriteStore
-	localStore        desync.WriteStore
+	s3Store    desync.WriteStore
+	localStore desync.WriteStore
 
-	s3Indexies        map[string]desync.IndexWriteStore
-	localIndexies     map[string]desync.IndexWriteStore
+	s3Indexies    map[string]desync.IndexWriteStore
+	localIndexies map[string]desync.IndexWriteStore
 
-	cacheChan         chan string
+	cacheChan chan string
 
-	log               *zap.Logger
+	log *zap.Logger
 }
 
 func NewProxy() *Proxy {

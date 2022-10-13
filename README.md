@@ -7,7 +7,6 @@
 * Signs Narinfo in flight with own private key
 * Authenticates with S3 to forward NARs for long-term storage
 * Keeps a local cache on disk for faster responses.
-* Provides a minimal Docker registry
 
 ## Usage
 

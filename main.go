@@ -236,7 +236,7 @@ func (proxy *Proxy) setupKeys() {
 }
 
 func (proxy *Proxy) stateDirs() []string {
-	return []string{"store", "index", "index/nar", "tmp", "trash/index", "oci"}
+	return []string{"store", "index", "privateIndex", "index/nar", "privateIndex/nar", "tmp", "trash/index", "oci"}
 }
 
 var defaultStoreOptions = desync.StoreOptions{
@@ -252,6 +252,11 @@ func (proxy *Proxy) setupDesync() {
 		proxy.setupDir(name)
 	}
 
+	setupLocalStoreAndIndices(proxy)
+	setupNamespaceIndices(proxy)
+}
+
+func setupLocalStoreAndIndices(proxy *Proxy) {
 	storeDir := filepath.Join(proxy.Dir, "store")
 	narStore, err := desync.NewLocalStore(storeDir, defaultStoreOptions)
 	if err != nil {
@@ -265,17 +270,21 @@ func (proxy *Proxy) setupDesync() {
 		proxy.log.Fatal("failed creating local index", zap.Error(err), zap.String("dir", indexDir))
 	}
 
-	// TODO Iterate through all the passed namespaces
-	privateIndexDir := filepath.Join(proxy.Dir, "privateIndex")
-	privateNarIndex, err := desync.NewLocalIndexStore(privateIndexDir)
-	if err != nil {
-		proxy.log.Fatal("failed creating local private index", zap.Error(err), zap.String("dir", privateIndexDir))
-	}
-
 	proxy.localStore = narStore
 	proxy.localIndexies[""] = narIndex
-	// TODO Create for all passed namespaces
-	proxy.localIndexies["private"] = privateNarIndex
+}
+
+func setupNamespaceIndices(proxy *Proxy) {
+	privateIndexDir := filepath.Join(proxy.Dir, "privateIndex")
+
+	for _, namespace := range proxy.Namespaces {
+		privateNarIndex, err := desync.NewLocalIndexStore(privateIndexDir)
+		if err != nil {
+			proxy.log.Fatal("failed creating local private index", zap.Error(err), zap.String("dir", privateIndexDir))
+		} else {
+			proxy.localIndexies[namespace] = privateNarIndex
+		}
+	}
 }
 
 func (proxy *Proxy) setupLogger() {

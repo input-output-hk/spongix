@@ -66,7 +66,7 @@ func testProxy(t *testing.T) *Proxy {
 
 	for _, namespace := range proxy.Namespaces {
 		privateIndexDir := filepath.Join(t.TempDir(), "privateIndex/"+namespace)
-		if err := os.MkdirAll(filepath.Join(privateIndexDir, "privateNar"), 0700); err != nil {
+		if err := os.MkdirAll(filepath.Join(privateIndexDir, "nar"), 0700); err != nil {
 			panic(err)
 		} else if proxy.localIndexies[namespace], err = desync.NewLocalIndexStore(privateIndexDir); err != nil {
 			panic(err)
@@ -266,7 +266,7 @@ func TestRouterNarinfoHead(t *testing.T) {
 }
 
 func TestRouterNarHead(t *testing.T) {
-	t.Run("not found", func(tt *testing.T) {
+	t.Run("not found without namespaces", func(tt *testing.T) {
 		proxy := testProxy(tt)
 
 		apitest.New().
@@ -292,7 +292,7 @@ func TestRouterNarHead(t *testing.T) {
 			End()
 	})
 
-	t.Run("found remote", func(tt *testing.T) {
+	t.Run("found remote without namespaces", func(tt *testing.T) {
 		proxy := testProxy(tt)
 
 		apitest.New().
@@ -320,7 +320,7 @@ func TestRouterNarHead(t *testing.T) {
 			End()
 	})
 
-	t.Run("found local", func(tt *testing.T) {
+	t.Run("found local without namespaces", func(tt *testing.T) {
 		proxy := testProxy(tt)
 		insertFake(tt, proxy.localStore, proxy.localIndexies, fNar)
 
@@ -336,7 +336,7 @@ func TestRouterNarHead(t *testing.T) {
 			End()
 	})
 
-	t.Run("found s3", func(tt *testing.T) {
+	t.Run("found s3 without namespaces", func(tt *testing.T) {
 		proxy := withS3(testProxy(tt))
 		insertFake(tt, proxy.s3Store, proxy.s3Indexies, fNar)
 
@@ -358,10 +358,111 @@ func TestRouterNarHead(t *testing.T) {
 			Status(http.StatusOK).
 			End()
 	})
+
+	t.Run("not found with namespaces", func(tt *testing.T) {
+		proxy := testProxy(tt)
+
+		for _, namespace := range testnamespaces {
+			apitest.New().
+				Mocks(
+					apitest.NewMock().
+						Head("/"+namespace+fNar+".xz").
+						RespondWith().
+						Status(http.StatusNotFound).
+						End(),
+					apitest.NewMock().
+						Head("/"+namespace+fNar).
+						RespondWith().
+						Status(http.StatusNotFound).
+						End()).
+				Handler(proxy.router()).
+				Method("HEAD").
+				URL("/"+namespace+fNar).
+				Expect(tt).
+				Header(headerCache, headerCacheMiss).
+				Header(headerContentType, mimeText).
+				Body(``).
+				Status(http.StatusNotFound).
+				End()
+		}
+	})
+
+	t.Run("found remote with namespaces", func(tt *testing.T) {
+		proxy := testProxy(tt)
+
+		for _, namespace := range testnamespaces {
+			apitest.New().
+				Mocks(
+					apitest.NewMock().
+						Head("/"+namespace+fNar+".xz").
+						RespondWith().
+						Status(http.StatusOK).
+						End(),
+					apitest.NewMock().
+						Head("/"+namespace+fNar).
+						RespondWith().
+						Status(http.StatusNotFound).
+						End(),
+				).
+				Handler(proxy.router()).
+				Method("HEAD").
+				URL("/"+namespace+fNar).
+				Expect(tt).
+				Header(headerCache, headerCacheRemote).
+				Header(headerCacheUpstream, "http://example.com/"+namespace+fNar+".xz").
+				Header(headerContentType, mimeNar).
+				Body(``).
+				Status(http.StatusOK).
+				End()
+		}
+	})
+
+	t.Run("found local with namespaces", func(tt *testing.T) {
+		proxy := testProxy(tt)
+
+		for _, namespace := range testnamespaces {
+			insertFake(tt, proxy.localStore, proxy.localIndexies, "/"+namespace+fNar)
+			apitest.New().
+				Handler(proxy.router()).
+				Method("HEAD").
+				URL("/"+namespace+fNar).
+				Expect(tt).
+				Header(headerCache, headerCacheHit).
+				Header(headerContentType, mimeNar).
+				Body(``).
+				Status(http.StatusOK).
+				End()
+		}
+	})
+
+	t.Run("found s3 with namespaces", func(tt *testing.T) {
+		proxy := withS3(testProxy(tt))
+
+		for _, namespace := range testnamespaces {
+			insertFake(tt, proxy.s3Store, proxy.s3Indexies, "/"+namespace+fNar)
+			apitest.New().
+				Mocks(
+					apitest.NewMock().
+						Head("/"+namespace+fNar).
+						RespondWith().
+						Status(http.StatusNotFound).
+						End(),
+				).
+				Handler(proxy.router()).
+				Method("HEAD").
+				URL("/"+namespace+fNar).
+				Expect(tt).
+				Header(headerCache, headerCacheHit).
+				Header(headerContentType, mimeNar).
+				Body(``).
+				Status(http.StatusOK).
+				End()
+		}
+	})
 }
 
 func TestRouterNarGet(t *testing.T) {
-	t.Run("not found", func(tt *testing.T) {
+	t.Run("not found without namespaces", func(tt *testing.T) {
 		proxy := testProxy(tt)
 
 		apitest.New().
@@ -388,7 +489,7 @@ func TestRouterNarGet(t *testing.T) {
 			End()
 	})
 
-	t.Run("found remote xz", func(tt *testing.T) {
+	t.Run("found remote xz without namespaces", func(tt *testing.T) {
 		proxy := testProxy(tt)
 
 		apitest.New().
@@ -417,7 +518,7 @@ func TestRouterNarGet(t *testing.T) {
 			End()
 	})
 
-	t.Run("found remote xz and requested xz", func(tt *testing.T) {
+	t.Run("found remote xz and requested xz without namespaces", func(tt *testing.T) {
 		proxy := testProxy(tt)
 
 		apitest.New().
@@ -446,7 +547,7 @@ func TestRouterNarGet(t *testing.T) {
 			End()
 	})
 
-	t.Run("found local", func(tt *testing.T) {
+	t.Run("found local without namespaces", func(tt *testing.T) {
 		proxy := testProxy(tt)
 		insertFake(tt, proxy.localStore, proxy.localIndexies, fNar)
 
@@ -462,7 +563,7 @@ func TestRouterNarGet(t *testing.T) {
 			End()
 	})
 
-	t.Run("found s3", func(tt *testing.T) {
+	t.Run("found s3 without namespaces", func(tt *testing.T) {
 		proxy := withS3(testProxy(tt))
 		insertFake(tt, proxy.s3Store, proxy.s3Indexies, fNar)
 
@@ -477,10 +578,137 @@ func TestRouterNarGet(t *testing.T) {
 			Status(http.StatusOK).
 			End()
 	})
+
+	t.Run("not found with namespaces", func(tt *testing.T) {
+		proxy := testProxy(tt)
+
+		for _, namespace := range testnamespaces {
+			apitest.New().
+				Mocks(
+					apitest.NewMock().
+						Get("/"+namespace+fNar+".xz").
+						RespondWith().
+						Status(http.StatusNotFound).
+						End(),
+					apitest.NewMock().
+						Get("/"+namespace+fNar).
+						RespondWith().
+						Status(http.StatusNotFound).
+						End(),
+				).
+				Handler(proxy.router()).
+				Method("GET").
+				URL("/"+namespace+fNar).
+				Expect(tt).
+				Header(headerCache, headerCacheMiss).
+				Header(headerContentType, mimeText).
+				Body(`not found`).
+				Status(http.StatusNotFound).
+				End()
+		}
+	})
+
+	t.Run("found remote xz with namespaces", func(tt *testing.T) {
+		proxy := testProxy(tt)
+
+		for _, namespace := range testnamespaces {
+			apitest.New().
+				Mocks(
+					apitest.NewMock().
+						Get("/"+namespace+fNar+".xz").
+						RespondWith().
+						Body(string(testdata[fNarXz])).
+						Status(http.StatusOK).
+						End(),
+					apitest.NewMock().
+						Get("/"+namespace+fNar).
+						RespondWith().
+						Status(http.StatusNotFound).
+						End(),
+				).
+				Handler(proxy.router()).
+				Method("GET").
+				URL("/"+namespace+fNar).
+				Expect(tt).
+				Header(headerCache, headerCacheRemote).
+				Header(headerCacheUpstream, "http://example.com/"+namespace+fNar+".xz").
+				Header(headerContentType, mimeNar).
+				Body(string(testdata[fNar])).
+				Status(http.StatusOK).
+				End()
+		}
+	})
+
+	t.Run("found remote xz and requested xz with namespaces", func(tt *testing.T) {
+		proxy := testProxy(tt)
+
+		for _, namespace := range testnamespaces {
+			apitest.New().
+				Mocks(
+					apitest.NewMock().
+						Get("/"+namespace+fNarXz).
+						RespondWith().
+						Body(string(testdata[fNarXz])).
+						Status(http.StatusOK).
+						End(),
+					apitest.NewMock().
+						Get("/"+namespace+fNar).
+						RespondWith().
+						Status(http.StatusNotFound).
+						End(),
+				).
+				Handler(proxy.router()).
+				Method("GET").
+				URL("/"+namespace+fNarXz).
+				Expect(tt).
+				Header(headerCache, headerCacheRemote).
+				Header(headerCacheUpstream, "http://example.com/"+namespace+fNar+".xz").
+				Header(headerContentType, mimeNar).
+				Body(string(testdata[fNarXz])).
+				Status(http.StatusOK).
+				End()
+		}
+	})
+
+	t.Run("found local with namespaces", func(tt *testing.T) {
+		proxy := testProxy(tt)
+
+		for _, namespace := range testnamespaces {
+			insertFake(tt, proxy.localStore, proxy.localIndexies, "/"+namespace+fNar)
+			apitest.New().
+				Handler(proxy.router()).
+				Method("GET").
+				URL("/"+namespace+fNar).
+				Expect(tt).
+				Header(headerCache, headerCacheHit).
+				Header(headerContentType, mimeNar).
+				Body(``).
+				Status(http.StatusOK).
+				End()
+		}
+	})
+
+	t.Run("found s3 with namespaces", func(tt *testing.T) {
+		proxy := withS3(testProxy(tt))
+
+		for _, namespace := range testnamespaces {
+			insertFake(tt, proxy.s3Store, proxy.s3Indexies, "/"+namespace+fNar)
+			apitest.New().
+				Handler(proxy.router()).
+				Method("GET").
+				URL("/"+namespace+fNar).
+				Expect(tt).
+				Header(headerCache, headerCacheHit).
+				Header(headerContentType, mimeNar).
+				Body(``).
+				Status(http.StatusOK).
+				End()
+		}
+	})
 }
 
 func TestRouterNarinfoGet(t *testing.T) {
-	t.Run("not found without namespace", func(tt *testing.T) {
+	t.Run("not found without namespaces", func(tt *testing.T) {
 		proxy := testProxy(tt)
 
 		apitest.New().
@@ -495,24 +723,7 @@ func TestRouterNarinfoGet(t *testing.T) {
 			End()
 	})
 
-	t.Run("not found with namespace", func(tt *testing.T) {
-		proxy := testProxy(tt)
-
-		for _, namespace := range testnamespaces {
-			apitest.New().
-				Handler(proxy.router()).
-				Method("GET").
-				URL("/"+namespace+fNarinfo).
-				Expect(tt).
-				Header(headerCache, headerCacheMiss).
-				Header(headerContentType, mimeText).
-				Body(`not found`).
-				Status(http.StatusNotFound).
-				End()
-		}
-	})
-
-	t.Run("found local", func(tt *testing.T) {
+	t.Run("found local without namespaces", func(tt *testing.T) {
 		proxy := testProxy(tt)
 		insertFake(tt, proxy.localStore, proxy.localIndexies, fNarinfo)
 
@@ -528,7 +739,7 @@ func TestRouterNarinfoGet(t *testing.T) {
 			End()
 	})
 
-	t.Run("found s3", func(tt *testing.T) {
+	t.Run("found s3 without namespaces", func(tt *testing.T) {
 		proxy := withS3(testProxy(tt))
 		insertFake(tt, proxy.s3Store, proxy.s3Indexies, fNarinfo)
 
@@ -544,7 +755,7 @@ func TestRouterNarinfoGet(t *testing.T) {
 			End()
 	})
 
-	t.Run("found remote", func(tt *testing.T) {
+	t.Run("found remote without namespaces", func(tt *testing.T) {
 		proxy := testProxy(tt)
 
 		apitest.New().
@@ -570,7 +781,7 @@ func TestRouterNarinfoGet(t *testing.T) {
 			End()
 	})
 
-	t.Run("copies remote to local", func(tt *testing.T) {
+	t.Run("copies remote to local without namespaces", func(tt *testing.T) {
 		proxy := testProxy(tt)
 		go proxy.startCache()
 		defer close(proxy.cacheChan)
@@ -620,10 +831,144 @@ func TestRouterNarinfoGet(t *testing.T) {
 			Status(http.StatusOK).
 			End()
 	})
+
+	t.Run("not found with namespaces", func(tt *testing.T) {
+		proxy := testProxy(tt)
+
+		for _, namespace := range testnamespaces {
+			apitest.New().
+				Handler(proxy.router()).
+				Method("GET").
+				URL("/"+namespace+fNarinfo).
+				Expect(tt).
+				Header(headerCache, headerCacheMiss).
+				Header(headerContentType, mimeText).
+				Body(`not found`).
+				Status(http.StatusNotFound).
+				End()
+		}
+	})
+
+	t.Run("found local with namespaces", func(tt *testing.T) {
+		proxy := testProxy(tt)
+
+		for _, namespace := range testnamespaces {
+
+			insertFake(tt, proxy.localStore, proxy.localIndexies, "/"+namespace+fNarinfo)
+			apitest.New().
+				Handler(proxy.router()).
+				Method("GET").
+				URL("/"+namespace+fNarinfo).
+				Expect(tt).
+				Header(headerCache, headerCacheHit).
+				Header(headerContentType, mimeNarinfo).
+				Body(string(testdata[fNarinfo])).
+				Status(http.StatusOK).
+				End()
+		}
+	})
+
+	t.Run("found s3 with namespaces", func(tt *testing.T) {
+		proxy := withS3(testProxy(tt))
+
+		for _, namespace := range testnamespaces {
+			insertFake(tt, proxy.s3Store, proxy.s3Indexies, "/"+namespace+fNarinfo)
+			apitest.New().
+				Handler(proxy.router()).
+				Method("GET").
+				URL("/"+namespace+fNarinfo).
+				Expect(tt).
+				Header(headerCache, headerCacheHit).
+				Header(headerContentType, mimeNarinfo).
+				Body(string(testdata[fNarinfo])).
+				Status(http.StatusOK).
+				End()
+		}
+	})
+
+	t.Run("found remote with namespaces", func(tt *testing.T) {
+		proxy := testProxy(tt)
+
+		for _, namespace := range testnamespaces {
+			apitest.New().
+				EnableMockResponseDelay().
+				Mocks(
+					apitest.NewMock().
+						Get("/"+namespace+fNarinfo).
+						RespondWith().
+						FixedDelay((1*time.Second).Milliseconds()).
+						Body(string(testdata[fNarinfo])).
+						Status(http.StatusOK).
+						End(),
+				).
+				Handler(proxy.router()).
+				Method("GET").
+				URL("/"+namespace+fNarinfo).
+				Expect(tt).
+				Header(headerCache, headerCacheRemote).
+				Header(headerCacheUpstream, "http://example.com/"+namespace+fNarinfo).
+				Header(headerContentType, mimeNarinfo).
+				Body(string(testdata[fNarinfo])).
+				Status(http.StatusOK).
+				End()
+		}
+	})
+
+	t.Run("copies remote to local with namespaces", func(tt *testing.T) {
+		proxy := testProxy(tt)
+		go proxy.startCache()
+		defer close(proxy.cacheChan)
+
+		for _, namespace := range testnamespaces {
+			mockReset := apitest.NewStandaloneMocks(
+				apitest.NewMock().
+					Get("http://example.com/" + namespace + fNarinfo).
+					RespondWith().
+					Body(string(testdata[fNarinfo])).
+					Status(http.StatusOK).
+					End(),
+			).End()
+			defer mockReset()
+			apitest.New().
+				Mocks(
+					apitest.NewMock().
+						Get("/"+namespace+fNarinfo).
+						RespondWith().
+						Body(string(testdata[fNarinfo])).
+						Status(http.StatusOK).
+						End(),
+				).
+				Handler(proxy.router()).
+				Method("GET").
+				URL("/"+namespace+fNarinfo).
+				Expect(tt).
+				Header(headerCache, headerCacheRemote).
+				Header(headerCacheUpstream, "http://example.com/"+namespace+fNarinfo).
+				Header(headerContentType, mimeNarinfo).
+				Body(string(testdata[fNarinfo])).
+				Status(http.StatusOK).
+				End()
+
+			for metricRemoteCachedOk.Get()+metricRemoteCachedFail.Get() == 0 {
+				time.Sleep(1 * time.Millisecond)
+			}
+
+			apitest.New().
+				Handler(proxy.router()).
+				Method("GET").
+				URL("/"+namespace+fNarinfo).
+				Expect(tt).
+				Header(headerCache, headerCacheHit).
+				Header(headerContentType, mimeNarinfo).
+				Body(string(testdata[fNarinfo])).
+				Status(http.StatusOK).
+				End()
+		}
+	})
 }
 
 func TestRouterNarinfoPut(t *testing.T) {
-	t.Run("upload success", func(tt *testing.T) {
+	t.Run("upload success without namespace", func(tt *testing.T) {
 		proxy := withS3(testProxy(tt))
 
 		apitest.New().
@@ -649,7 +994,7 @@ func TestRouterNarinfoPut(t *testing.T) {
 			End()
 	})
 
-	t.Run("upload invalid", func(tt *testing.T) {
+	t.Run("upload invalid without namespace", func(tt *testing.T) {
 		proxy := testProxy(tt)
 
 		apitest.New().
@@ -664,7 +1009,7 @@ func TestRouterNarinfoPut(t *testing.T) {
 			End()
 	})
 
-	t.Run("upload unsigned", func(tt *testing.T) {
+	t.Run("upload unsigned without namespace", func(tt *testing.T) {
 		proxy := testProxy(tt)
 
 		apitest.New().
@@ -679,7 +1024,7 @@ func TestRouterNarinfoPut(t *testing.T) {
 			End()
 	})
 
-	t.Run("signs unsigned narinfos", func(tt *testing.T) {
+	t.Run("signs unsigned narinfos without namespace", func(tt *testing.T) {
 		proxy := testProxy(tt)
 
 		seed := make([]byte, ed25519.SeedSize)
@@ -726,6 +1071,119 @@ func TestRouterNarinfoPut(t *testing.T) {
 			Body(expect.String()).
 			Status(http.StatusOK).
 			End()
+	})
+
+	t.Run("upload success with namespace", func(tt *testing.T) {
+		proxy := withS3(testProxy(tt))
+
+		for _, namespace := range testnamespaces {
+			apitest.New().
+				Handler(proxy.router()).
+				Method("PUT").
+				URL("/"+namespace+fNarinfo).
+				Body(string(testdata[fNarinfo])).
+				Expect(tt).
+				Header(headerContentType, mimeText).
+				Body("ok\n").
+				Status(http.StatusOK).
+				End()
+
+			apitest.New().
+				Handler(proxy.router()).
+				Method("GET").
+				URL("/"+namespace+fNarinfo).
+				Expect(tt).
+				Header(headerContentType, mimeNarinfo).
+				Header(headerCache, headerCacheHit).
+				Body(string(testdata[fNarinfo])).
+				Status(http.StatusOK).
+				End()
+		}
+	})
+
+	t.Run("upload invalid with namespace", func(tt *testing.T) {
+		proxy := testProxy(tt)
+
+		for _, namespace := range testnamespaces {
+			apitest.New().
+				Handler(proxy.router()).
+				Method("PUT").
+				URL("/"+namespace+fNarinfo).
+				Body("blah").
+				Expect(tt).
+				Header(headerContentType, mimeText).
+				Body(`Failed to parse line: "blah"`).
+				Status(http.StatusBadRequest).
+				End()
+		}
+	})
+
+	t.Run("upload unsigned with namespace", func(tt *testing.T) {
+		proxy := testProxy(tt)
+
+		for _, namespace := range testnamespaces {
+			apitest.New().
+				Handler(proxy.router()).
+				Method("PUT").
+				URL("/"+namespace+fNarinfo).
+				Body("blah").
+				Expect(tt).
+				Header(headerContentType, mimeText).
+				Body(`Failed to parse line: "blah"`).
+				Status(http.StatusBadRequest).
+				End()
+		}
+	})
+
+	t.Run("signs unsigned narinfos with namespace", func(tt *testing.T) {
+		proxy := testProxy(tt)
+
+		for _, namespace := range testnamespaces {
+			seed := make([]byte, ed25519.SeedSize)
+			proxy.secretKeys["foo"] = ed25519.NewKeyFromSeed(seed)
+
+			emptyInfo := &Narinfo{}
+			if err := emptyInfo.Unmarshal(bytes.NewReader(testdata[fNarinfo])); err != nil {
+				tt.Fatal(err)
+			}
+			emptyInfo.Sig = []string{}
+			empty := &bytes.Buffer{}
+			if err := emptyInfo.Marshal(empty); err != nil {
+				tt.Fatal(err)
+			}
+
+			apitest.New().
+				Handler(proxy.router()).
+				Method("PUT").
+				URL("/"+namespace+fNarinfo).
+				Body(empty.String()).
+				Expect(tt).
+				Header(headerContentType, mimeText).
+				Body("ok\n").
+				Status(http.StatusOK).
+				End()
+
+			expectInfo := &Narinfo{}
+			if err := expectInfo.Unmarshal(bytes.NewReader(testdata[fNarinfo])); err != nil {
+				tt.Fatal(err)
+			}
+			expectInfo.Sig = []string{"foo:MGrENumWZ1kbm23vCTyYrw6hRBJtLGIIpfHjpZszs2D1G1AALMKvl49T66WIhx2X02s8n/zsfUPpga2bL6PmBQ=="}
+			expect := &bytes.Buffer{}
+			if err := expectInfo.Marshal(expect); err != nil {
+				tt.Fatal(err)
+			}
+
+			apitest.New().
+				Handler(proxy.router()).
+				Method("GET").
+				URL("/"+namespace+fNarinfo).
+				Expect(tt).
+				Header(headerCache, headerCacheHit).
+				Header(headerContentType, mimeNarinfo).
+				Body(expect.String()).
+				Status(http.StatusOK).
+				End()
+		}
 	})
 }
 

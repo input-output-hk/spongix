@@ -20,7 +20,7 @@ var (
 	fNar           = "/nar/0m8sd5qbmvfhyamwfv3af1ff18ykywf3zx5qwawhhp3jv1h777xz.nar"
 	fNarXz         = "/nar/0m8sd5qbmvfhyamwfv3af1ff18ykywf3zx5qwawhhp3jv1h777xz.nar.xz"
 	fNarinfo       = "/8ckxc8biqqfdwyhr0w70jgrcb4h7a4y5.narinfo"
-	testnamespaces = []string{"sunlight"}
+	testnamespaces = []string{"sunlight", "daylight"}
 )
 
 func TestMain(m *testing.M) {
@@ -936,10 +936,10 @@ func TestRouterNarinfoGet(t *testing.T) {
 
 	t.Run("copies remote to local with namespaces", func(tt *testing.T) {
 		proxy := testProxy(tt)
+		go proxy.startCache()
+		defer close(proxy.cacheChan)
 
 		for _, namespace := range testnamespaces {
-			go proxy.startCache()
-			defer close(proxy.cacheChan)
 			mockReset := apitest.NewStandaloneMocks(
 				apitest.NewMock().
 					Get("http://example.com/" + namespace + fNarinfo).

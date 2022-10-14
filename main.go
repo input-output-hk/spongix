@@ -238,7 +238,12 @@ func (proxy *Proxy) setupKeys() {
 }
 
 func (proxy *Proxy) stateDirs() []string {
-	return []string{"store", "index", "privateIndex", "index/nar", "privateIndex/nar", "tmp", "trash/index", "oci"}
+	stateDirs := []string{"store", "index", "privateIndex", "index/nar", "tmp", "trash/index", "oci"}
+	for _, namespace := range proxy.Namespaces {
+		stateDirs = append(stateDirs, "privateIndex/"+namespace+"/nar")
+	}
+
+	return stateDirs
 }
 
 var defaultStoreOptions = desync.StoreOptions{

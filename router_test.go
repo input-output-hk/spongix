@@ -854,7 +854,17 @@ func TestRouterNarinfoGet(t *testing.T) {
 
 		for _, namespace := range testnamespaces {
 
-			insertFake(tt, proxy.localStore, proxy.localIndexies, "/"+namespace+fNarinfo)
+			apitest.New().
+				Handler(proxy.router()).
+				Method("PUT").
+				URL("/"+namespace+fNarinfo).
+				Body(string(testdata[fNarinfo])).
+				Expect(tt).
+				Header(headerContentType, mimeText).
+				Body("ok\n").
+				Status(http.StatusOK).
+				End()
+
 			apitest.New().
 				Handler(proxy.router()).
 				Method("GET").
@@ -872,7 +882,17 @@ func TestRouterNarinfoGet(t *testing.T) {
 		proxy := withS3(testProxy(tt))
 
 		for _, namespace := range testnamespaces {
-			insertFake(tt, proxy.s3Store, proxy.s3Indexies, "/"+namespace+fNarinfo)
+			apitest.New().
+				Handler(proxy.router()).
+				Method("PUT").
+				URL("/"+namespace+fNarinfo).
+				Body(string(testdata[fNarinfo])).
+				Expect(tt).
+				Header(headerContentType, mimeText).
+				Body("ok\n").
+				Status(http.StatusOK).
+				End()
+
 			apitest.New().
 				Handler(proxy.router()).
 				Method("GET").

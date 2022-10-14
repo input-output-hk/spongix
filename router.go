@@ -2,7 +2,6 @@ package main
 
 import (
 	"net/http"
-	"path/filepath"
 	"strconv"
 
 	"github.com/gorilla/handlers"
@@ -28,10 +27,12 @@ func (proxy *Proxy) router() *mux.Router {
 
 	r.HandleFunc("/metrics", metrics.ServeHTTP)
 
-	newDockerHandler(proxy.log, proxy.localStore, proxy.localIndex, filepath.Join(proxy.Dir, "oci"), r)
-
 	// backwards compat
-	for _, prefix := range []string{"/cache", ""} {
+	for _, namespace := range append([]string{""}, proxy.Namespaces...) {
+		prefix := ""
+		if namespace != "" {
+			prefix = "/{namespace:" + namespace + "}"
+		}
 		r.HandleFunc(prefix+"/nix-cache-info", proxy.nixCacheInfo).Methods("GET")
 
 		narinfo := r.Name("narinfo").Path(prefix + "/{hash:[0-9a-df-np-sv-z]{32}}.narinfo").Subrouter()
@@ -58,7 +59,7 @@ func (proxy *Proxy) withLocalCacheHandler() mux.MiddlewareFunc {
 	return withCacheHandler(
 		proxy.log,
 		proxy.localStore,
-		proxy.localIndex,
+		proxy.localIndices,
 		proxy.trustedKeys,
 		proxy.secretKeys,
 	)
@@ -68,7 +69,7 @@ func (proxy *Proxy) withS3CacheHandler() mux.MiddlewareFunc {
 	return withCacheHandler(
 		proxy.log,
 		proxy.s3Store,
-		proxy.s3Index,
+		proxy.s3Indices,
 		proxy.trustedKeys,
 		proxy.secretKeys,
 	)

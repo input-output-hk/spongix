@@ -183,7 +183,7 @@ Local GC strategies:
 func (proxy *Proxy) gcOnce(cacheStat map[string]*chunkStat) {
 	maxCacheSize := (uint64(math.Pow(2, 30)) * proxy.CacheSize) - maxCacheDirPortion
 	store := proxy.localStore.(desync.LocalStore)
-	indices := proxy.localIndex.(desync.LocalIndexStore)
+	indices := proxy.localIndices
 	lru := NewLRU(maxCacheSize)
 	walkStoreStart := time.Now()
 	chunkDirs := int64(0)
@@ -285,60 +285,67 @@ func (proxy *Proxy) gcOnce(cacheStat map[string]*chunkStat) {
 		}(i)
 	}
 
-	walkIndicesErr := filepath.Walk(indices.Path, func(path string, info fs.FileInfo, err error) error {
-		if err != nil || info.IsDir() {
-			return err
-		}
+	for _, index := range indices {
 
-		isOld := info.ModTime().Before(ignoreBeforeTime)
+		index := index.(desync.LocalIndexStore)
 
-		ext := filepath.Ext(path)
-		isNar := ext == ".nar"
-		isNarinfo := ext == ".narinfo"
+		walkIndicesErr := filepath.Walk(index.Path, func(path string, info fs.FileInfo, err error) error {
+			if err != nil || info.IsDir() {
+				return err
+			}
 
-		if !(isNar || isNarinfo || isOld) {
-			return nil
-		}
+			isOld := info.ModTime().Before(ignoreBeforeTime)
 
-		name := path[len(indices.Path):]
+			ext := filepath.Ext(path)
+			isNar := ext == ".nar"
+			isNarinfo := ext == ".narinfo"
 
-		index, err := indices.GetIndex(name)
-		if err != nil {
-			return errors.WithMessagef(err, "while getting index %s", name)
-		}
+			if !(isNar || isNarinfo || isOld) {
+				return nil
+			}
 
-		integrity <- integrityCheck{path: path, index: index}
+			name := path[len(index.Path):]
 
-		inflatedSize += index.Length()
-		indicesCount++
+			index, err := index.GetIndex(name)
+			if err != nil {
+				return errors.WithMessagef(err, "while getting index %s", name)
+			}
 
-		if len(index.Chunks) == 0 {
-			proxy.log.Debug("index chunks are empty", zap.String("path", path))
-			deadIndices.Store(path, yes)
-		} else {
-			for _, indexChunk := range index.Chunks {
-				if lru.IsDead(indexChunk.ID) {
-					proxy.log.Debug("some chunks are dead", zap.String("path", path))
-					deadIndices.Store(path, yes)
-					break
+			integrity <- integrityCheck{path: path, index: index}
+
+			inflatedSize += index.Length()
+			indicesCount++
+
+			if len(index.Chunks) == 0 {
+				proxy.log.Debug("index chunks are empty", zap.String("path", path))
+				deadIndices.Store(path, yes)
+			} else {
+				for _, indexChunk := range index.Chunks {
+					if lru.IsDead(indexChunk.ID) {
+						proxy.log.Debug("some chunks are dead", zap.String("path", path))
+						deadIndices.Store(path, yes)
+						break
+					}
 				}
 			}
+
+			return nil
+		})
+
+		wg.Wait()
+		close(integrity)
+
+		metricIndexCount.Set(indicesCount)
+		metricIndexWalk.Add(uint64(time.Since(walkIndicesStart).Milliseconds()))
+		metricInflated.Set(inflatedSize)
+
+		if walkIndicesErr != nil {
+			proxy.log.Error("While walking index", zap.Error(walkIndicesErr))
+			return
 		}
 
-		return nil
-	})
-
-	wg.Wait()
-	close(integrity)
-
-	metricIndexCount.Set(indicesCount)
-	metricIndexWalk.Add(uint64(time.Since(walkIndicesStart).Milliseconds()))
-	metricInflated.Set(inflatedSize)
-
-	if walkIndicesErr != nil {
-		proxy.log.Error("While walking index", zap.Error(walkIndicesErr))
-		return
 	}
+
 	deadIndexCount := uint64(0)
 	// time.Sleep(10 * time.Minute)
 	deadIndices.Range(func(key, value interface{}) bool {

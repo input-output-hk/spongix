@@ -113,6 +113,7 @@ type Proxy struct {
 	SecretKeyFiles    []string      `arg:"--secret-key-files,required,env:NIX_SECRET_KEY_FILES" help:"Files containing your private nix signing keys"`
 	Substituters      []string      `arg:"--substituters,env:NIX_SUBSTITUTERS"`
 	TrustedPublicKeys []string      `arg:"--trusted-public-keys,env:NIX_TRUSTED_PUBLIC_KEYS"`
+	Namespaces        []string      `arg:"--namespaces,env:NAMESPACES" help: "Namespaces takes one or many strings to setup private caching"`
 	CacheInfoPriority uint64        `arg:"--cache-info-priority,env:CACHE_INFO_PRIORITY" help:"Priority in nix-cache-info"`
 	AverageChunkSize  uint64        `arg:"--average-chunk-size,env:AVERAGE_CHUNK_SIZE" help:"Chunk size will be between /4 and *4 of this value"`
 	CacheSize         uint64        `arg:"--cache-size,env:CACHE_SIZE" help:"Number of gigabytes to keep in the disk cache"`
@@ -128,8 +129,8 @@ type Proxy struct {
 	s3Store    desync.WriteStore
 	localStore desync.WriteStore
 
-	s3Index    desync.IndexWriteStore
-	localIndex desync.IndexWriteStore
+	s3Indices    map[string]desync.IndexWriteStore
+	localIndices map[string]desync.IndexWriteStore
 
 	cacheChan chan string
 
@@ -145,9 +146,10 @@ func NewProxy() *Proxy {
 	return &Proxy{
 		Dir:               "./cache",
 		Listen:            ":7745",
-		SecretKeyFiles:    []string{},
-		TrustedPublicKeys: []string{},
-		Substituters:      []string{},
+		SecretKeyFiles:    nil,
+		TrustedPublicKeys: nil,
+		Substituters:      nil,
+		Namespaces:        nil,
 		CacheInfoPriority: 50,
 		AverageChunkSize:  chunkSizeAvg,
 		VerifyInterval:    time.Hour,
@@ -156,6 +158,8 @@ func NewProxy() *Proxy {
 		log:               devLog,
 		LogLevel:          "debug",
 		LogMode:           "production",
+		s3Indices:        map[string]desync.IndexWriteStore{},
+		localIndices:     map[string]desync.IndexWriteStore{},
 	}
 }
 
@@ -234,7 +238,12 @@ func (proxy *Proxy) setupKeys() {
 }
 
 func (proxy *Proxy) stateDirs() []string {
-	return []string{"store", "index", "index/nar", "tmp", "trash/index", "oci"}
+	stateDirs := []string{"store", "index", "privateIndex", "index/nar", "tmp", "trash/index", "oci"}
+	for _, namespace := range proxy.Namespaces {
+		stateDirs = append(stateDirs, "privateIndex/"+namespace+"/nar")
+	}
+
+	return stateDirs
 }
 
 var defaultStoreOptions = desync.StoreOptions{
@@ -250,6 +259,11 @@ func (proxy *Proxy) setupDesync() {
 		proxy.setupDir(name)
 	}
 
+	setupLocalStoreAndIndices(proxy)
+	setupNamespaceIndices(proxy)
+}
+
+func setupLocalStoreAndIndices(proxy *Proxy) {
 	storeDir := filepath.Join(proxy.Dir, "store")
 	narStore, err := desync.NewLocalStore(storeDir, defaultStoreOptions)
 	if err != nil {
@@ -264,7 +278,20 @@ func (proxy *Proxy) setupDesync() {
 	}
 
 	proxy.localStore = narStore
-	proxy.localIndex = narIndex
+	proxy.localIndices[""] = narIndex
+}
+
+func setupNamespaceIndices(proxy *Proxy) {
+	privateIndexDir := filepath.Join(proxy.Dir, "privateIndex")
+
+	for _, namespace := range proxy.Namespaces {
+		privateNarIndex, err := desync.NewLocalIndexStore(privateIndexDir)
+		if err != nil {
+			proxy.log.Fatal("failed creating local private index", zap.Error(err), zap.String("dir", privateIndexDir))
+		} else {
+			proxy.localIndices[namespace] = privateNarIndex
+		}
+	}
 }
 
 func (proxy *Proxy) setupLogger() {

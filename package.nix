@@ -22,21 +22,16 @@
 
         ./assemble.go
         ./assemble_test.go
-        ./blob_manager.go
         ./cache.go
-        ./docker.go
-        ./docker_test.go
         ./fake.go
         ./gc.go
         ./helpers.go
         ./log_record.go
         ./main.go
-        ./manifest_manager.go
         ./narinfo.go
         ./narinfo_test.go
         ./router.go
         ./router_test.go
-        ./upload_manager.go
       ];
 
       proxyVendor = true;

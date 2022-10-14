@@ -936,10 +936,10 @@ func TestRouterNarinfoGet(t *testing.T) {
 
 	t.Run("copies remote to local with namespaces", func(tt *testing.T) {
 		proxy := testProxy(tt)
-		go proxy.startCache()
-		defer close(proxy.cacheChan)
 
 		for _, namespace := range testnamespaces {
+			go proxy.startCache()
+			defer close(proxy.cacheChan)
 			mockReset := apitest.NewStandaloneMocks(
 				apitest.NewMock().
 					Get("http://example.com/" + namespace + fNarinfo).
@@ -949,6 +949,7 @@ func TestRouterNarinfoGet(t *testing.T) {
 					End(),
 			).End()
 			defer mockReset()
+
 			apitest.New().
 				Mocks(
 					apitest.NewMock().
@@ -969,6 +970,7 @@ func TestRouterNarinfoGet(t *testing.T) {
 				Status(http.StatusOK).
 				End()
 
+			time.Sleep(2 * time.Millisecond)
 			for metricRemoteCachedOk.Get()+metricRemoteCachedFail.Get() == 0 {
 				time.Sleep(1 * time.Millisecond)
 			}

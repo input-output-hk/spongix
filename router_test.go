@@ -45,7 +45,7 @@ func testProxy(t *testing.T) *Proxy {
 	indexDir := filepath.Join(t.TempDir(), "index")
 	if err := os.MkdirAll(filepath.Join(indexDir, "nar"), 0700); err != nil {
 		panic(err)
-	} else if proxy.localIndexies[""], err = desync.NewLocalIndexStore(indexDir); err != nil {
+	} else if proxy.localIndices[""], err = desync.NewLocalIndexStore(indexDir); err != nil {
 		panic(err)
 	}
 
@@ -68,7 +68,7 @@ func testProxy(t *testing.T) *Proxy {
 		privateIndexDir := filepath.Join(t.TempDir(), "privateIndex/"+namespace)
 		if err := os.MkdirAll(filepath.Join(privateIndexDir, "nar"), 0700); err != nil {
 			panic(err)
-		} else if proxy.localIndexies[namespace], err = desync.NewLocalIndexStore(privateIndexDir); err != nil {
+		} else if proxy.localIndices[namespace], err = desync.NewLocalIndexStore(privateIndexDir); err != nil {
 			panic(err)
 		}
 	}
@@ -77,9 +77,9 @@ func testProxy(t *testing.T) *Proxy {
 
 func withS3(proxy *Proxy) *Proxy {
 	proxy.s3Store = newFakeStore()
-	proxy.s3Indexies[""] = newFakeIndex()
+	proxy.s3Indices[""] = newFakeIndex()
 	for _, namespace := range proxy.Namespaces {
-		proxy.s3Indexies[namespace] = newFakeIndex()
+		proxy.s3Indices[namespace] = newFakeIndex()
 	}
 	return proxy
 }
@@ -157,7 +157,7 @@ func TestRouterNarinfoHead(t *testing.T) {
 
 	t.Run("found local without namespaces", func(tt *testing.T) {
 		proxy := testProxy(tt)
-		insertFake(tt, proxy.localStore, proxy.localIndexies, fNarinfo)
+		insertFake(tt, proxy.localStore, proxy.localIndices, fNarinfo)
 
 		apitest.New().
 			Handler(proxy.router()).
@@ -173,7 +173,7 @@ func TestRouterNarinfoHead(t *testing.T) {
 
 	t.Run("found s3 without namespaces", func(tt *testing.T) {
 		proxy := withS3(testProxy(tt))
-		insertFake(tt, proxy.s3Store, proxy.s3Indexies, fNarinfo)
+		insertFake(tt, proxy.s3Store, proxy.s3Indices, fNarinfo)
 
 		apitest.New().
 			Handler(proxy.router()).
@@ -233,7 +233,7 @@ func TestRouterNarinfoHead(t *testing.T) {
 	t.Run("found local with namespaces", func(tt *testing.T) {
 		proxy := testProxy(tt)
 		for _, namespace := range testnamespaces {
-			insertFake(tt, proxy.localStore, proxy.localIndexies, "/"+namespace+fNarinfo)
+			insertFake(tt, proxy.localStore, proxy.localIndices, "/"+namespace+fNarinfo)
 			apitest.New().
 				Handler(proxy.router()).
 				Method("HEAD").
@@ -250,7 +250,7 @@ func TestRouterNarinfoHead(t *testing.T) {
 	t.Run("found s3 with namespaces", func(tt *testing.T) {
 		proxy := withS3(testProxy(tt))
 		for _, namespace := range testnamespaces {
-			insertFake(tt, proxy.s3Store, proxy.s3Indexies, "/"+namespace+fNarinfo)
+			insertFake(tt, proxy.s3Store, proxy.s3Indices, "/"+namespace+fNarinfo)
 			apitest.New().
 				Handler(proxy.router()).
 				Method("HEAD").
@@ -322,7 +322,7 @@ func TestRouterNarHead(t *testing.T) {
 
 	t.Run("found local without namespaces", func(tt *testing.T) {
 		proxy := testProxy(tt)
-		insertFake(tt, proxy.localStore, proxy.localIndexies, fNar)
+		insertFake(tt, proxy.localStore, proxy.localIndices, fNar)
 
 		apitest.New().
 			Handler(proxy.router()).
@@ -338,7 +338,7 @@ func TestRouterNarHead(t *testing.T) {
 
 	t.Run("found s3 without namespaces", func(tt *testing.T) {
 		proxy := withS3(testProxy(tt))
-		insertFake(tt, proxy.s3Store, proxy.s3Indexies, fNar)
+		insertFake(tt, proxy.s3Store, proxy.s3Indices, fNar)
 
 		apitest.New().
 			Mocks(
@@ -421,7 +421,7 @@ func TestRouterNarHead(t *testing.T) {
 		proxy := testProxy(tt)
 
 		for _, namespace := range testnamespaces {
-			insertFake(tt, proxy.localStore, proxy.localIndexies, "/"+namespace+fNar)
+			insertFake(tt, proxy.localStore, proxy.localIndices, "/"+namespace+fNar)
 			apitest.New().
 				Handler(proxy.router()).
 				Method("HEAD").
@@ -439,7 +439,7 @@ func TestRouterNarHead(t *testing.T) {
 		proxy := withS3(testProxy(tt))
 
 		for _, namespace := range testnamespaces {
-			insertFake(tt, proxy.s3Store, proxy.s3Indexies, "/"+namespace+fNar)
+			insertFake(tt, proxy.s3Store, proxy.s3Indices, "/"+namespace+fNar)
 			apitest.New().
 				Mocks(
 					apitest.NewMock().
@@ -549,7 +549,7 @@ func TestRouterNarGet(t *testing.T) {
 
 	t.Run("found local without namespaces", func(tt *testing.T) {
 		proxy := testProxy(tt)
-		insertFake(tt, proxy.localStore, proxy.localIndexies, fNar)
+		insertFake(tt, proxy.localStore, proxy.localIndices, fNar)
 
 		apitest.New().
 			Handler(proxy.router()).
@@ -565,7 +565,7 @@ func TestRouterNarGet(t *testing.T) {
 
 	t.Run("found s3 without namespaces", func(tt *testing.T) {
 		proxy := withS3(testProxy(tt))
-		insertFake(tt, proxy.s3Store, proxy.s3Indexies, fNar)
+		insertFake(tt, proxy.s3Store, proxy.s3Indices, fNar)
 
 		apitest.New().
 			Handler(proxy.router()).
@@ -674,7 +674,7 @@ func TestRouterNarGet(t *testing.T) {
 		proxy := testProxy(tt)
 
 		for _, namespace := range testnamespaces {
-			insertFake(tt, proxy.localStore, proxy.localIndexies, "/"+namespace+fNar)
+			insertFake(tt, proxy.localStore, proxy.localIndices, "/"+namespace+fNar)
 			apitest.New().
 				Handler(proxy.router()).
 				Method("GET").
@@ -692,7 +692,7 @@ func TestRouterNarGet(t *testing.T) {
 		proxy := withS3(testProxy(tt))
 
 		for _, namespace := range testnamespaces {
-			insertFake(tt, proxy.s3Store, proxy.s3Indexies, "/"+namespace+fNar)
+			insertFake(tt, proxy.s3Store, proxy.s3Indices, "/"+namespace+fNar)
 			apitest.New().
 				Handler(proxy.router()).
 				Method("GET").
@@ -725,7 +725,7 @@ func TestRouterNarinfoGet(t *testing.T) {
 
 	t.Run("found local without namespaces", func(tt *testing.T) {
 		proxy := testProxy(tt)
-		insertFake(tt, proxy.localStore, proxy.localIndexies, fNarinfo)
+		insertFake(tt, proxy.localStore, proxy.localIndices, fNarinfo)
 
 		apitest.New().
 			Handler(proxy.router()).
@@ -741,7 +741,7 @@ func TestRouterNarinfoGet(t *testing.T) {
 
 	t.Run("found s3 without namespaces", func(tt *testing.T) {
 		proxy := withS3(testProxy(tt))
-		insertFake(tt, proxy.s3Store, proxy.s3Indexies, fNarinfo)
+		insertFake(tt, proxy.s3Store, proxy.s3Indices, fNarinfo)
 
 		apitest.New().
 			Handler(proxy.router()).
@@ -1368,10 +1368,10 @@ func TestRouterNamespaces(t *testing.T) {
 func insertFake(
 	t *testing.T,
 	store desync.WriteStore,
-	indexies map[string]desync.IndexWriteStore,
+	indices map[string]desync.IndexWriteStore,
 	path string) {
 
-	name, index := findIndexByURL(path, indexies)
+	name, index := findIndexByURL(path, indices)
 
 	if chunker, err := desync.NewChunker(bytes.NewBuffer(testdata[path]), chunkSizeMin(), chunkSizeAvg, chunkSizeMax()); err != nil {
 		t.Fatal(err)

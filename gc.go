@@ -183,7 +183,7 @@ Local GC strategies:
 func (proxy *Proxy) gcOnce(cacheStat map[string]*chunkStat) {
 	maxCacheSize := (uint64(math.Pow(2, 30)) * proxy.CacheSize) - maxCacheDirPortion
 	store := proxy.localStore.(desync.LocalStore)
-	indices := proxy.localIndexies
+	indices := proxy.localIndices
 	lru := NewLRU(maxCacheSize)
 	walkStoreStart := time.Now()
 	chunkDirs := int64(0)

@@ -129,8 +129,8 @@ type Proxy struct {
 	s3Store    desync.WriteStore
 	localStore desync.WriteStore
 
-	s3Indexies    map[string]desync.IndexWriteStore
-	localIndexies map[string]desync.IndexWriteStore
+	s3Indices    map[string]desync.IndexWriteStore
+	localIndices map[string]desync.IndexWriteStore
 
 	cacheChan chan string
 
@@ -158,8 +158,8 @@ func NewProxy() *Proxy {
 		log:               devLog,
 		LogLevel:          "debug",
 		LogMode:           "production",
-		s3Indexies:        map[string]desync.IndexWriteStore{},
-		localIndexies:     map[string]desync.IndexWriteStore{},
+		s3Indices:        map[string]desync.IndexWriteStore{},
+		localIndices:     map[string]desync.IndexWriteStore{},
 	}
 }
 
@@ -278,7 +278,7 @@ func setupLocalStoreAndIndices(proxy *Proxy) {
 	}
 
 	proxy.localStore = narStore
-	proxy.localIndexies[""] = narIndex
+	proxy.localIndices[""] = narIndex
 }
 
 func setupNamespaceIndices(proxy *Proxy) {
@@ -289,7 +289,7 @@ func setupNamespaceIndices(proxy *Proxy) {
 		if err != nil {
 			proxy.log.Fatal("failed creating local private index", zap.Error(err), zap.String("dir", privateIndexDir))
 		} else {
-			proxy.localIndexies[namespace] = privateNarIndex
+			proxy.localIndices[namespace] = privateNarIndex
 		}
 	}
 }

@@ -59,7 +59,7 @@ func (proxy *Proxy) withLocalCacheHandler() mux.MiddlewareFunc {
 	return withCacheHandler(
 		proxy.log,
 		proxy.localStore,
-		proxy.localIndexies,
+		proxy.localIndices,
 		proxy.trustedKeys,
 		proxy.secretKeys,
 	)
@@ -69,7 +69,7 @@ func (proxy *Proxy) withS3CacheHandler() mux.MiddlewareFunc {
 	return withCacheHandler(
 		proxy.log,
 		proxy.s3Store,
-		proxy.s3Indexies,
+		proxy.s3Indices,
 		proxy.trustedKeys,
 		proxy.secretKeys,
 	)

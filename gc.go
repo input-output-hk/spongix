@@ -4,7 +4,6 @@ import (
 	"context"
 	"io"
 	"io/fs"
-	"math"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -52,8 +51,7 @@ func (proxy *Proxy) gc() {
 	measure(metricGcTime, func() { proxy.gcOnce(cacheStat) })
 
 	ticker := time.NewTicker(proxy.GcInterval)
-	for {
-		<-ticker.C
+	for range ticker.C {
 		measure(metricGcTime, func() { proxy.gcOnce(cacheStat) })
 	}
 }
@@ -63,21 +61,21 @@ func (proxy *Proxy) verify() {
 	measure(metricVerifyTime, func() { proxy.verifyOnce() })
 
 	ticker := time.NewTicker(proxy.VerifyInterval)
-	for {
-		<-ticker.C
+	for range ticker.C {
 		measure(metricVerifyTime, func() { proxy.verifyOnce() })
 	}
 }
 
 func (proxy *Proxy) verifyOnce() {
-	proxy.log.Info("store verify started")
+	log := proxy.log.Named("verify").Sugar()
+	log.Info("store verify started")
 	store := proxy.localStore.(desync.LocalStore)
 	err := store.Verify(context.Background(), runtime.GOMAXPROCS(0), true, os.Stderr)
 
 	if err != nil {
-		proxy.log.Error("store verify failed", zap.Error(err))
+		log.Error("store verify failed", zap.Error(err))
 	} else {
-		proxy.log.Info("store verify completed")
+		log.Info("store verify completed")
 	}
 }
 
@@ -142,8 +140,9 @@ func (l *chunkLRU) Dead() map[desync.ChunkID]struct{} {
 
 // we assume every directory requires 4KB of size (one block) desync stores
 // files in directories with a 4 hex prefix, so we need to keep at least this
-// amount of space reserved.
+// amount of space reserved (~256MiB).
 const maxCacheDirPortion = 0xffff * 4096
+const GiB = 1024 * 1024 * 1024
 
 type integrityCheck struct {
 	path  string
@@ -181,9 +180,110 @@ Local GC strategies:
   	If last access is too old, delete it.
 */
 func (proxy *Proxy) gcOnce(cacheStat map[string]*chunkStat) {
-	maxCacheSize := (uint64(math.Pow(2, 30)) * proxy.CacheSize) - maxCacheDirPortion
+	log := proxy.log.Named("gc")
+	log.Info("store gc started")
+	maxCacheSize := proxy.CacheSize*GiB - maxCacheDirPortion
+
+	var narSizeTotal uint64
+	if err := proxy.db.Get(&narSizeTotal, `SELECT SUM(nar_size) FROM narinfos;`); err != nil {
+		log.Error("Calculating sum of nar_size", zap.Error(err))
+		return
+	}
+	log.Info("Sum of nar_size", zap.Float64("GiB", float64(narSizeTotal)/GiB), zap.Uint64("bytes", narSizeTotal))
+
+	// This only calculates the lower bound, the actual size occupied by the NARs
+	// is usually much smaller than what we have stored in the narinfos.
+	// Thus it's impossible to efficiently obtain the list of narinfos and NARs
+	// that should be garbage collected.
+	// Also, if we actually delete a chunk, this means that all other indices
+	// that reference the chunk become invalid.
+	// Another issue is that the same narinfo may exist in multiple namespaces,
+	// thus deleting it in one namespace must never delete chunks.
+	//
+	// The naïve approach to garbage collection is:
+	// * Obtain index of the NAR (A.NAR) pointed to by the narinfo (A) with the oldest atime
+	// * If there exists another narinfo (B) with the same name, simply delete A and try the next one.
+	// * Iterate all NAR indices, get the NAR chunk IDs that intersect with the A.NAR chunk IDs.
+	// * Delete A (race condition?)
+	// * Delete the chunks that are not in the intersection
+	// * Increment the GC counter by the sizes of the deleted chunks
+	// * Iterate these steps until we are below the desired maximum cache size.
+	//
+	// How can we improve on this?
+	// * Use the naïve approach, but do it over the oldest N narinfos at a time
+	//	 This would improve the time requirements and memory usage somewhat.
+	//
+	// * Actually store the desync.Index in the database, so we could run queries
+	//   over the chunk IDs. This is not supported by desync itself, and may
+	//   require a lot of work.
+	//
+	// * Store atime and size for chunks in the database, thus we could query the
+	//   minimum amount of chunks to GC, then iterate once over the indices and
+	//   eliminate the ones referencing GC'd chunks.
+	//   In theory this will only affect narinfos that have an atime before the
+	//   deleted chunks.
+	//   The drawback is that we have the overhead of updating the atime of every
+	//   chunk that is requested, which could be done more efficiently on the
+	//   filesystem level. But we cannot guarantee that atime is actually being
+	//   recorded in the FS.
+	//
+	// * Store chunks and indices in the DB. This would reduce the directory size
+	//   overhead, maybe it's even possible to concat chunks within the database
+	//   query. Not sure how this would behave with multi-gigabyte NARs though.
+	rows, err := proxy.db.Queryx(`
+		SELECT id, url, namespace, nar_size, acc FROM (
+			SELECT id, url, namespace, nar_size, SUM(nar_size)
+			OVER (ORDER BY atime DESC) AS acc
+			FROM narinfos
+		) n
+		WHERE acc > ?;
+  `, proxy.CacheSize*GiB)
+	if err != nil {
+		log.Error("Querying narinfos", zap.Error(err))
+		return
+	}
+	defer rows.Close()
+
 	store := proxy.localStore.(desync.LocalStore)
 	indices := proxy.localIndices
+
+	var total int64
+	chunks := map[desync.ChunkID]uint64{}
+	for rows.Next() {
+		var id, url, namespace string
+		var narSize, narSizeSum int64
+		if err := rows.Scan(&id, &url, &namespace, &narSize, &narSizeSum); err != nil {
+			log.Error("Scanning narinfo row", zap.Error(err))
+			return
+		}
+
+		total += narSize
+
+		if index, ok := indices[namespace]; ok {
+			if idx, err := index.GetIndex(url); err != nil {
+				log.Error("Looking up index", zap.Error(err))
+				continue
+			} else {
+				for _, chunk := range idx.Chunks {
+					chunks[chunk.ID] = chunk.Size
+				}
+			}
+		}
+	}
+
+	var chunkTotal uint64
+	for _, chunkSize := range chunks {
+		chunkTotal += chunkSize
+	}
+
+	pp(float64(chunkTotal) / GiB)
+	pp(float64(maxCacheSize)/GiB, float64(narSizeTotal)/GiB, float64(total)/GiB)
+	pp(float64(narSizeTotal)/GiB - float64(total)/GiB)
+
+	return
+
+	// store := proxy.localStore.(desync.LocalStore)
+	// indices := proxy.localIndices
 	lru := NewLRU(maxCacheSize)
 	walkStoreStart := time.Now()
 	chunkDirs := int64(0)
@@ -264,7 +364,7 @@ func (proxy *Proxy) gcOnce(cacheStat map[string]*chunkStat) {
 
 			for {
 				select {
-				case <-time.After(1 * time.Second):
+				case <-time.After(1 * time.Hour):
 					return
 				case check := <-integrity:
 					switch filepath.Ext(check.path) {
@@ -286,7 +386,6 @@ func (proxy *Proxy) gcOnce(cacheStat map[string]*chunkStat) {
 	}
 
 	for _, index := range indices {
-
 		index := index.(desync.LocalIndexStore)
 
 		walkIndicesErr := filepath.Walk(index.Path, func(path string, info fs.FileInfo, err error) error {
@@ -343,11 +442,9 @@ func (proxy *Proxy) gcOnce(cacheStat map[string]*chunkStat) {
 			proxy.log.Error("While walking index", zap.Error(walkIndicesErr))
 			return
 		}
-
 	}
 
 	deadIndexCount := uint64(0)
-	// time.Sleep(10 * time.Minute)
 	deadIndices.Range(func(key, value interface{}) bool {
 		path := key.(string)
 		proxy.log.Debug("moving index to trash", zap.String("path", path))

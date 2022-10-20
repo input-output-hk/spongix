@@ -3,7 +3,6 @@ package main
 import (
 	"bytes"
 	"crypto/ed25519"
-	"strings"
 	"testing"
 
 	"github.com/smartystreets/assertions"
@@ -18,7 +17,7 @@ var validNarinfo = &Narinfo{
 	FileSize:    1,
 	NarHash:     "sha256:0f54iihf02azn24vm6gky7xxpadq5693qrjzkaavbnd68shvgbd7",
 	NarSize:     1,
-	References:  []string{"00000000000000000000000000000000-some"},
+	References:  []Reference{"00000000000000000000000000000000-some"},
 	Deriver:     "r92m816zcm8v9zjr55lmgy4pdibjbyjp-foo.drv",
 }
 
@@ -37,7 +36,7 @@ FileHash: `+validNarinfo.FileHash+`
 FileSize: 1
 NarHash: `+validNarinfo.NarHash+`
 NarSize: 1
-References: `+strings.Join(validNarinfo.References, " ")+`
+References: `+validNarinfo.References.String()+`
 Deriver: `+validNarinfo.Deriver+`
 `)
 }
@@ -46,8 +45,9 @@ func TestNarinfoValidate(t *testing.T) {
 	v := apitest.DefaultVerifier{}
 
 	info := &Narinfo{
+		Namespace:   "test",
 		Compression: "invalid",
-		References:  []string{"invalid"},
+		References:  References{"invalid"},
 	}
 
 	v.Equal(t, `Invalid StorePath: ""`, info.Validate().Error())
@@ -73,7 +73,7 @@ func TestNarinfoValidate(t *testing.T) {
 	info.NarSize = 1
 	v.Equal(t, `Invalid Reference: "invalid"`, info.Validate().Error())
 
-	info.References = []string{"00000000000000000000000000000000-some"}
+	info.References = References{"00000000000000000000000000000000-some"}
 	v.Equal(t, nil, info.Validate())
 }
 
@@ -93,21 +93,21 @@ func TestNarinfoVerify(t *testing.T) {
 		FileSize:    1,
 		NarHash:     "sha256:0f54iihf02azn24vm6gky7xxpadq5693qrjzkaavbnd68shvgbd7",
 		NarSize:     1,
-		References:  []string{"00000000000000000000000000000000-some"},
+		References:  References{"00000000000000000000000000000000-some"},
 		Deriver:     "r92m816zcm8v9zjr55lmgy4pdibjbyjp-foo.drv",
 	}
 
-	info.Sig = []string{}
+	info.Sig = Signatures{}
 	valid, invalid := info.ValidInvalidSignatures(publicKeys)
 	a.So(valid, assertions.ShouldHaveLength, 0)
 	a.So(invalid, assertions.ShouldHaveLength, 0)
 
-	info.Sig = []string{"test:test"}
+	info.Sig = Signatures{"test:test"}
 	valid, invalid = info.ValidInvalidSignatures(publicKeys)
 	a.So(valid, assertions.ShouldHaveLength, 0)
 	a.So(invalid, assertions.ShouldHaveLength, 1)
 
-	info.Sig = []string{}
+	info.Sig = Signatures{}
 	info.Sign(name, key)
 	valid, invalid = info.ValidInvalidSignatures(publicKeys)
 	a.So(valid, assertions.ShouldHaveLength, 1)
@@ -136,7 +136,7 @@ func TestNarinfoSanitizeNar(t *testing.T) {
 		FileSize:    1,
 		NarHash:     "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
 		NarSize:     2,
-		References:  []string{"00000000000000000000000000000000-some"},
+		References:  References{"00000000000000000000000000000000-some"},
 		Deriver:     "r92m816zcm8v9zjr55lmgy4pdibjbyjp-foo.drv",
 	}
 

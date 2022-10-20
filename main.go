@@ -3,20 +3,25 @@ package main
 import (
 	"context"
 	"crypto/ed25519"
+	"database/sql"
 	"log"
 	"net/http"
 	"net/url"
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
 	"github.com/alexflint/go-arg"
 	"github.com/folbricht/desync"
+	"github.com/jmoiron/sqlx"
+	_ "github.com/mattn/go-sqlite3"
 	"github.com/minio/minio-go/v6"
 	"github.com/minio/minio-go/v6/pkg/credentials"
 	"go.uber.org/zap"
+	"petersanchez.com/migrate"
 )
 
 const (
@@ -29,6 +34,7 @@ func chunkSizeMin() uint64 { return chunkSizeAvg / 4 }
 func chunkSizeMax() uint64 { return chunkSizeAvg * 4 }
 
 func main() {
+	experiment()
 	// cpuprofile := "spongix.pprof"
 	// f, err := os.Create(cpuprofile)
 	// if err != nil {
@@ -43,6 +49,7 @@ func main() {
 	chunkSizeAvg = proxy.AverageChunkSize
 
 	proxy.setupLogger()
+	proxy.setupDatabase()
 	proxy.setupDesync()
 	proxy.setupKeys()
 	proxy.setupS3()
@@ -113,7 +120,7 @@ type Proxy struct {
 	SecretKeyFiles    []string      `arg:"--secret-key-files,required,env:NIX_SECRET_KEY_FILES" help:"Files containing your private nix signing keys"`
 	Substituters      []string      `arg:"--substituters,env:NIX_SUBSTITUTERS"`
 	TrustedPublicKeys []string      `arg:"--trusted-public-keys,env:NIX_TRUSTED_PUBLIC_KEYS"`
-	Namespaces        []string      `arg:"--namespaces,env:NAMESPACES" help: "Namespaces takes one or many strings to setup private caching"`
+	Namespaces        []string      `arg:"--namespaces,env:NAMESPACES" help:"Namespaces takes one or many strings to setup private caching"`
 	CacheInfoPriority uint64        `arg:"--cache-info-priority,env:CACHE_INFO_PRIORITY" help:"Priority in nix-cache-info"`
 	AverageChunkSize  uint64        `arg:"--average-chunk-size,env:AVERAGE_CHUNK_SIZE" help:"Chunk size will be between /4 and *4 of this value"`
 	CacheSize         uint64        `arg:"--cache-size,env:CACHE_SIZE" help:"Number of gigabytes to keep in the disk cache"`
@@ -121,6 +128,7 @@ type Proxy struct {
 	GcInterval        time.Duration `arg:"--gc-interval,env:GC_INTERVAL" help:"Time between store garbage collection runs"`
 	LogLevel          string        `arg:"--log-level,env:LOG_LEVEL" help:"One of debug, info, warn, error, dpanic, panic, fatal"`
 	LogMode           string        `arg:"--log-mode,env:LOG_MODE" help:"development or production"`
+	DSN               string        `arg:"--dsn,env:DSN" help:"SQlite DNS"`
 
 	// derived from the above
 	secretKeys  map[string]ed25519.PrivateKey
@@ -132,7 +140,9 @@ type Proxy struct {
 	s3Indices    map[string]desync.IndexWriteStore
 	localIndices map[string]desync.IndexWriteStore
 
-	cacheChan chan string
+	cacheChan chan cacheRequest
+
+	db *sqlx.DB
 
 	log *zap.Logger
 }
@@ -154,12 +164,12 @@ func NewProxy() *Proxy {
 		AverageChunkSize:  chunkSizeAvg,
 		VerifyInterval:    time.Hour,
 		GcInterval:        time.Hour,
-		cacheChan:         make(chan string, 10000),
+		cacheChan:         make(chan cacheRequest, 10000),
 		log:               devLog,
 		LogLevel:          "debug",
 		LogMode:           "production",
-		s3Indices:        map[string]desync.IndexWriteStore{},
-		localIndices:     map[string]desync.IndexWriteStore{},
+		s3Indices:         map[string]desync.IndexWriteStore{},
+		localIndices:      map[string]desync.IndexWriteStore{},
 	}
 }
 
@@ -238,9 +248,9 @@ func (proxy *Proxy) setupKeys() {
 }
 
 func (proxy *Proxy) stateDirs() []string {
-	stateDirs := []string{"store", "index", "privateIndex", "index/nar", "tmp", "trash/index", "oci"}
+	stateDirs := []string{"store", "index/nar", "privateIndex/nar"}
 	for _, namespace := range proxy.Namespaces {
-		stateDirs = append(stateDirs, "privateIndex/"+namespace+"/nar")
+		stateDirs = append(stateDirs, "namespace/"+namespace+"/nar")
 	}
 
 	return stateDirs
@@ -323,5 +333,89 @@ func (proxy *Proxy) setupLogger() {
 	proxy.log, err = l.Build()
 	if err != nil {
 		panic(err)
+	}
+}
+
+func (proxy *Proxy) setupDatabase() {
+	migrations := []migrate.Migration{
+		{
+			ID: "0001_initialize",
+			Migrate: func(ctx context.Context, tx *sql.Tx) error {
+				// Using strict schemas would be nice, but there's no support for doing
+				// time handling with it yet.
+				_, err := tx.ExecContext(ctx, `
+					CREATE TABLE narinfos
+					( id INTEGER PRIMARY KEY ASC
+					, name TEXT NOT NULL
+					, store_path TEXT NOT NULL
+					, url TEXT NOT NULL
+					, compression TEXT
+					, file_hash TEXT NOT NULL
+					, file_size INTEGER NOT NULL
+					, nar_hash TEXT NOT NULL
+					, nar_size INTEGER NOT NULL
+					, deriver TEXT NOT NULL
+					, ca TEXT
+					, namespace TEXT NOT NULL
+					, ctime DATETIME NOT NULL
+					, atime DATETIME NOT NULL
+					);
+
+					CREATE INDEX narinfos_name ON narinfos(name);
+					CREATE UNIQUE INDEX narinfos_name_namespace ON narinfos(name, namespace);
+
+					CREATE TABLE narinfo_refs
+					( narinfo_id INTEGER NOT NULL
+					, ref TEXT NOT NULL
+					, FOREIGN KEY(narinfo_id) REFERENCES narinfo(id)
+					);
+					CREATE INDEX narinfos_refs_narinfo_id ON narinfo_refs(narinfo_id);
+
+					CREATE TABLE narinfo_sigs
+					( narinfo_id TEXT NOT NULL
+					, sig TEXT NOT NULL
+					, FOREIGN KEY(narinfo_id) REFERENCES narinfo(id)
+					);
+					CREATE INDEX narinfos_sigs_narinfo_id ON narinfo_sigs(narinfo_id);
+
+					CREATE TABLE realisations
+					( id TEXT NOT NULL PRIMARY KEY
+					, out_path TEXT NOT NULL
+					, signatures TEXT
+					, dependent_realisations TEXT
+					, namespace TEXT NOT NULL
+					);
+					`)
+				return err
+			},
+			Rollback: func(ctx context.Context, tx *sql.Tx) error {
+				_, err := tx.Exec(`
+					DROP TABLE narinfos;
+					DROP TABLE narinfo_refs;
+					DROP TABLE narinfo_sigs;
+					DROP TABLE realisations;
+				`)
+				return err
+			},
+			Timeout: 5,
+		},
+	}
+
+	if db, err := sqlx.Open("sqlite3", proxy.DSN); err != nil {
+		proxy.log.Fatal("failed creating database", zap.Error(err), zap.String("DSN", proxy.DSN))
+	} else if err := db.Ping(); err != nil {
+		proxy.log.Fatal("failed connecting to database", zap.Error(err), zap.String("DSN", proxy.DSN))
+	} else {
+		engine := migrate.NewEngine(db.DB, migrations, migrate.DOLLAR, true)
+		sugar := proxy.log.Sugar()
+		engine.Printf = func(format string, a ...interface{}) (int, error) {
+			sugar.Debugf(strings.TrimSuffix(format, "\n"), a...)
+			return 0, nil
+		}
+		if err := engine.Migrate(context.Background(), "", false); err != nil {
+			proxy.log.Fatal("failed migrating", zap.Error(err), zap.String("DSN", proxy.DSN))
+		} else {
+			proxy.db = db
+		}
 	}
 }

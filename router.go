@@ -1,12 +1,15 @@
 package main
 
 import (
+	"database/sql"
+	"encoding/json"
 	"net/http"
 	"strconv"
 
 	"github.com/gorilla/handlers"
 	"github.com/gorilla/mux"
 	"github.com/pascaldekloe/metrics"
+	"github.com/pkg/errors"
 )
 
 const (
@@ -27,12 +30,8 @@ func (proxy *Proxy) router() *mux.Router {
 
 	r.HandleFunc("/metrics", metrics.ServeHTTP)
 
-	// backwards compat
-	for _, namespace := range append([]string{""}, proxy.Namespaces...) {
-		prefix := ""
-		if namespace != "" {
-			prefix = "/{namespace:" + namespace + "}"
-		}
+	for _, namespace := range proxy.Namespaces {
+		prefix := "/{namespace:" + namespace + "}"
 		r.HandleFunc(prefix+"/nix-cache-info", proxy.nixCacheInfo).Methods("GET")
 
 		narinfo := r.Name("narinfo").Path(prefix + "/{hash:[0-9a-df-np-sv-z]{32}}.narinfo").Subrouter()
@@ -50,6 +49,69 @@ func (proxy *Proxy) router() *mux.Router {
 			withRemoteHandler(proxy.log, proxy.Substituters, []string{"", ".xz"}, proxy.cacheChan),
 		)
 		nar.Methods("HEAD", "GET", "PUT").HandlerFunc(serveNotFound)
+
+		realisations := r.Name("realisations").Path(prefix + "/realisations/{hash:[^/]+}.doi").Subrouter()
+		realisations.Methods("HEAD").HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			pp(r.Method, r.URL.String(), r.Header)
+			panic("unexpected HEAD")
+		})
+
+		realisations.Methods("PUT").HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.Header.Get("Expect") == "100-continue" {
+				vars := mux.Vars(r)
+				hash := vars["hash"]
+				namespace := vars["namespace"]
+				realisation := Realisation{ID: hash, Namespace: namespace}
+				if err := json.NewDecoder(r.Body).Decode(&realisation); err != nil {
+					panic(err)
+				} else if _, err := proxy.db.NamedExec(`
+					INSERT OR REPLACE INTO realisations
+					( id
+					, out_path
+					, signatures
+					, dependent_realisations
+					, namespace
+					)
+					VALUES
+					( :id
+					, :out_path
+					, :signatures
+					, :dependent_realisations
+					, :namespace
+					);
+					`, realisation); err != nil {
+					panic(err)
+				}
+			} else {
+				w.WriteHeader(200)
+			}
+			// {
+			//   "dependentRealisations": {},
+			//   "id": "sha256:3a131766aea6f9d31731a47fca66da875c224c88c79b28b7aa32621e2aacc365!out",
+			//   "outPath": "qxs7l1miypr09s8gf2id9bdkzsnnskpp-lolcat-100.0.1",
+			//   "signatures": []
+			// }
+		})
+		realisations.Methods("GET").HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			pp(r.Method, r.URL.String())
+			vars := mux.Vars(r)
+			hash := vars["hash"]
+			namespace := vars["namespace"]
+			res := proxy.db.QueryRowx(`SELECT * FROM realisations WHERE id IS ? AND namespace IS ?`, hash, namespace)
+			realisation := Realisation{ID: hash, Namespace: namespace}
+			if err := res.StructScan(&realisation); err != nil {
+				if errors.Is(err, sql.ErrNoRows) {
+					w.WriteHeader(404)
+					return
+				}
+				panic(err)
+			}
+			pp(realisation)
+			if err := json.NewEncoder(w).Encode(realisation); err != nil {
+				panic(err)
+			}
+			w.WriteHeader(200)
+		})
 	}
 
 	return r
@@ -62,6 +124,7 @@ func (proxy *Proxy) withLocalCacheHandler() mux.MiddlewareFunc {
 		proxy.localIndices,
 		proxy.trustedKeys,
 		proxy.secretKeys,
+		proxy.db,
 	)
 }
 
@@ -72,13 +135,14 @@ func (proxy *Proxy) withS3CacheHandler() mux.MiddlewareFunc {
 		proxy.s3Indices,
 		proxy.trustedKeys,
 		proxy.secretKeys,
+		proxy.db,
 	)
 }
 
 type notAllowed struct{}
 
 func (n notAllowed) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	pp("*** 405", r.Method, r.URL.Path, mux.Vars(r))
+	// pp("*** 405", r.Method, r.URL.Path, mux.Vars(r))
 }
 
 type notFound struct{}
@@ -88,7 +152,7 @@ func (n notFound) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 func serveNotFound(w http.ResponseWriter, r *http.Request) {
-	pp("*** 404", r.Method, r.URL.Path, mux.Vars(r))
+	// pp("*** 404", r.Method, r.URL.Path, mux.Vars(r))
 	w.Header().Set(headerContentType, mimeText)
 	w.Header().Set(headerCache, headerCacheMiss)
 	w.WriteHeader(http.StatusNotFound)

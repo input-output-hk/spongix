@@ -11,23 +11,59 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"time"
 
+	"github.com/jmoiron/sqlx"
 	"github.com/pkg/errors"
 )
 
 type Narinfo struct {
-	Name        string   `json:"name"`
-	StorePath   string   `json:"store_path"`
-	URL         string   `json:"url"`
-	Compression string   `json:"compression"`
-	FileHash    string   `json:"file_hash"`
-	FileSize    int64    `json:"file_size"`
-	NarHash     string   `json:"nar_hash"`
-	NarSize     int64    `json:"nar_size"`
-	References  []string `json:"references"`
-	Deriver     string   `json:"deriver"`
-	Sig         []string `json:"sig"`
-	CA          string   `json:"ca"`
+	Name        string     `json:"name"`
+	StorePath   string     `json:"store_path" db:"store_path"`
+	URL         string     `json:"url"`
+	Compression string     `json:"compression"`
+	FileHash    string     `json:"file_hash" db:"file_hash"`
+	FileSize    int64      `json:"file_size" db:"file_size"`
+	NarHash     string     `json:"nar_hash" db:"nar_hash"`
+	NarSize     int64      `json:"nar_size" db:"nar_size"`
+	References  References `json:"references" db:"-"`
+	Deriver     string     `json:"deriver"`
+	Sig         Signatures `json:"sig" db:"-"`
+	CA          string     `json:"ca"`
+	ID          int64
+	Namespace   string
+	CTime       time.Time `db:"ctime"`
+	ATime       time.Time `db:"atime"`
+}
+
+type Reference string
+type References []Reference
+
+func (r References) String() string {
+	return r.join("  ")
+}
+
+func (r References) sigFormat() string {
+	return r.join(",")
+}
+
+func (r References) join(sep string) string {
+	rs := make([]string, len(r))
+	for i, v := range r {
+		rs[i] = string(v)
+	}
+	return strings.Join(rs, sep)
+}
+
+type Signature string
+type Signatures []Signature
+
+func (s Signature) Scan(value any) error {
+	return nil
+}
+
+func (s Signature) Value(value any) error {
+	return nil
 }
 
 /*
@@ -103,34 +139,22 @@ func (info *Narinfo) Marshal(output io.Writer) error {
 
 	if err := write("StorePath: %s\n", info.StorePath); err != nil {
 		return err
-	}
-
-	if err := write("URL: %s\n", info.URL); err != nil {
+	} else if err := write("URL: %s\n", info.URL); err != nil {
 		return err
-	}
-
-	if err := write("Compression: %s\n", info.Compression); err != nil {
+	} else if err := write("Compression: %s\n", info.Compression); err != nil {
 		return err
-	}
-
-	if err := write("FileHash: %s\n", info.FileHash); err != nil {
+	} else if err := write("FileHash: %s\n", info.FileHash); err != nil {
 		return err
-	}
-
-	if err := write("FileSize: %d\n", info.FileSize); err != nil {
+	} else if err := write("FileSize: %d\n", info.FileSize); err != nil {
 		return err
-	}
-
-	if err := write("NarHash: %s\n", info.NarHash); err != nil {
+	} else if err := write("NarHash: %s\n", info.NarHash); err != nil {
 		return err
-	}
-
-	if err := write("NarSize: %d\n", info.NarSize); err != nil {
+	} else if err := write("NarSize: %d\n", info.NarSize); err != nil {
 		return err
 	}
 
 	if len(info.References) > 0 {
-		if err := write("References: %s\n", strings.Join(info.References, " ")); err != nil {
+		if err := write("References: %s\n", info.References.String()); err != nil {
 			return err
 		}
 	}
@@ -154,6 +178,10 @@ func (info *Narinfo) Marshal(output io.Writer) error {
 func (info *Narinfo) Unmarshal(input io.Reader) error {
 	if input == nil {
 		return errors.New("can't unmarshal nil reader")
+	}
+
+	if info.Namespace == "" {
+		return errors.New("Namespace must be set before Unmarshal")
 	}
 
 	scanner := bufio.NewScanner(input)
@@ -221,14 +249,19 @@ func (info *Narinfo) Unmarshal(input io.Reader) error {
 				return err
 			}
 		case "References":
-			info.References = append(info.References, strings.Split(value, " ")...)
+			refsRaw := strings.Split(value, " ")
+			refs := make([]Reference, len(refsRaw))
+			for i, r := range refsRaw {
+				refs[i] = Reference(r)
+			}
+			info.References = append(info.References, refs...)
 		case "Deriver":
 			if info.Deriver != "" {
 				return errors.Errorf("Duplicate Deriver")
 			}
 			info.Deriver = value
 		case "Sig":
-			info.Sig = append(info.Sig, value)
+			info.Sig = append(info.Sig, Signature(value))
 		case "CA":
 			if info.CA != "" {
 				return errors.Errorf("Duplicate CA")
@@ -265,6 +298,10 @@ var (
 )
 
 func (info *Narinfo) Validate() error {
+	if info.Namespace == "" {
+		return errors.New("Empty Namespace")
+	}
+
 	if !validNixStorePath.MatchString(info.StorePath) {
 		return errors.Errorf("Invalid StorePath: %q", info.StorePath)
 	}
@@ -294,7 +331,7 @@ func (info *Narinfo) Validate() error {
 	}
 
 	for _, ref := range info.References {
-		if !validStorePath.MatchString(ref) {
+		if !validStorePath.MatchString(string(ref)) {
 			return errors.Errorf("Invalid Reference: %q", ref)
 		}
 	}
@@ -328,28 +365,28 @@ func (info *Narinfo) SanitizeSignatures(publicKeys map[string]ed25519.PublicKey)
 }
 
 // Returns valid and invalid signatures
-func (info *Narinfo) ValidInvalidSignatures(publicKeys map[string]ed25519.PublicKey) ([]string, []string) {
+func (info *Narinfo) ValidInvalidSignatures(publicKeys map[string]ed25519.PublicKey) ([]Signature, []Signature) {
 	if len(info.Sig) == 0 {
 		return nil, nil
 	}
 
 	signMsg := info.signMsg()
-	valid := []string{}
-	invalid := []string{}
+	valid := []Signature{}
+	invalid := []Signature{}
 
 	// finally we need at leaat one matching signature
 	for _, sig := range info.Sig {
-		i := strings.IndexRune(sig, ':')
-		name := sig[0:i]
-		sigStr := sig[i+1:]
+		i := strings.IndexRune(string(sig), ':')
+		name := string(sig[0:i])
+		sigStr := string(sig[i+1:])
 		signature, err := base64.StdEncoding.DecodeString(sigStr)
 		if err != nil {
 			invalid = append(invalid, sig)
 		} else if key, ok := publicKeys[name]; ok {
 			if ed25519.Verify(key, []byte(signMsg), signature) {
-				valid = append(valid, sig)
+				valid = append(valid, Signature(sig))
 			} else {
-				invalid = append(invalid, sig)
+				invalid = append(invalid, Signature(sig))
 			}
 		}
 	}
@@ -358,36 +395,25 @@ func (info *Narinfo) ValidInvalidSignatures(publicKeys map[string]ed25519.Public
 }
 
 func (info *Narinfo) signMsg() string {
-	refs := []string{}
-	for _, ref := range info.References {
-		refs = append(refs, "/nix/store/"+ref)
+	refs := make(References, len(info.References))
+	for i, ref := range info.References {
+		refs[i] = Reference("/nix/store/" + ref)
 	}
 
 	return fmt.Sprintf("1;%s;%s;%s;%s",
 		info.StorePath,
 		info.NarHash,
 		strconv.FormatInt(info.NarSize, 10),
-		strings.Join(refs, ","))
+		refs.sigFormat())
 }
 
 func (info *Narinfo) Sign(name string, key ed25519.PrivateKey) {
-	signature := info.Signature(name, key)
-	missing := true
-
-	for _, sig := range info.Sig {
-		if sig == signature {
-			missing = false
-		}
-	}
-
-	if missing {
-		info.Sig = append(info.Sig, signature)
-	}
+	info.Sig = append(info.Sig, info.Signature(name, key))
 }
 
-func (info *Narinfo) Signature(name string, key ed25519.PrivateKey) string {
+func (info *Narinfo) Signature(name string, key ed25519.PrivateKey) Signature {
 	signature := ed25519.Sign(key, []byte(info.signMsg()))
-	return name + ":" + base64.StdEncoding.EncodeToString(signature)
+	return Signature(name + ":" + base64.StdEncoding.EncodeToString(signature))
 }
 
 func (info *Narinfo) NarHashType() string {
@@ -404,4 +430,145 @@ func (info *Narinfo) FileHashType() string {
 
 func (info *Narinfo) FileHashValue() string {
 	return strings.SplitN(info.FileHash, ":", 2)[1]
+}
+
+func (info *Narinfo) dbInsert(db *sqlx.DB) error {
+	if info.Namespace == "" {
+		return errors.New("Cannot insert without namespace")
+	}
+
+	info.CTime = time.Now().UTC()
+	info.ATime = time.Now().UTC()
+
+	tx, err := db.Beginx()
+	if err != nil {
+		return err
+	}
+
+	res, err := tx.NamedExec(`
+			INSERT OR REPLACE INTO narinfos
+			( name
+			, store_path
+			, url
+			, compression
+			, file_hash
+			, file_size
+			, nar_hash
+			, nar_size
+			, deriver
+			, ca
+		  , namespace
+		  , ctime
+		  , atime
+			)
+			VALUES
+			( :name
+			, :store_path
+			, :url
+			, :compression
+			, :file_hash
+			, :file_size
+			, :nar_hash
+			, :nar_size
+			, :deriver
+			, :ca
+		  , :namespace
+		  , :ctime
+		  , :atime
+			)
+		`, info,
+	)
+	if err != nil {
+		defer tx.Rollback()
+		return err
+	}
+
+	id, err := res.LastInsertId()
+	if err != nil {
+		defer tx.Rollback()
+		return err
+	}
+	info.ID = id
+
+	for _, ref := range info.References {
+		if _, err := tx.Exec(
+			`INSERT INTO narinfo_refs (narinfo_id, ref) VALUES (?, ?)`,
+			info.ID, ref,
+		); err != nil {
+			defer tx.Rollback()
+			return err
+		}
+	}
+
+	for _, sig := range info.Sig {
+		if _, err := tx.Exec(
+			`INSERT INTO narinfo_sigs (narinfo_id, sig) VALUES (?, ?)`,
+			info.ID, sig,
+		); err != nil {
+			defer tx.Rollback()
+			return err
+		}
+	}
+
+	return tx.Commit()
+}
+
+func findNarinfo(db *sqlx.DB, namespace, name string) (*Narinfo, error) {
+	// use transaction in case of GC.
+	tx, err := db.Beginx()
+	if err != nil {
+		tx.Rollback()
+		return nil, errors.WithMessage(err, "while beginning transaction")
+	}
+
+	narinfoQuery := tx.QueryRowx(`SELECT * FROM narinfos WHERE name IS ? AND namespace IS ?;`, name, namespace)
+	info := Narinfo{}
+	if err := narinfoQuery.StructScan(&info); err != nil {
+		defer tx.Rollback()
+		return nil, errors.WithMessage(err, "while selecting narinfos")
+	}
+
+	refQuery, err := tx.Queryx(`SELECT ref FROM narinfo_refs WHERE narinfo_id IS ?`, info.ID)
+	defer refQuery.Close()
+	if err != nil {
+		defer tx.Rollback()
+		return nil, errors.WithMessage(err, "while selecting narinfo_refs")
+	}
+
+	for refQuery.Next() {
+		var ref string
+		if refQuery.Scan(&ref); err != nil {
+			defer refQuery.Close()
+			defer tx.Rollback()
+			return nil, errors.WithMessage(err, "while scanning narinfo_refs")
+		}
+		info.References = append(info.References, Reference(ref))
+	}
+
+	sigQuery, err := tx.Queryx(`SELECT sig FROM narinfo_sigs WHERE narinfo_id IS ?`, info.ID)
+	defer sigQuery.Close()
+	if err != nil {
+		defer tx.Rollback()
+		return nil, errors.WithMessage(err, "while selecting narinfo_sigs")
+	}
+
+	for sigQuery.Next() {
+		var sig string
+		if sigQuery.Scan(&sig); err != nil {
+			defer sigQuery.Close()
+			defer tx.Rollback()
+			return nil, errors.WithMessage(err, "while scanning narinfo_sigs")
+		}
+		info.Sig = append(info.Sig, Signature(sig))
+	}
+
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+
+	if _, err := db.Exec(`UPDATE narinfos SET atime = ? WHERE id IS ?`, time.Now().UTC(), info.ID); err != nil {
+		return nil, errors.WithMessage(err, "while updating atime")
+	}
+
+	return &info, nil
 }

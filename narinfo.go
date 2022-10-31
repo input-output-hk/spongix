@@ -9,6 +9,7 @@ import (
 	"io"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -28,7 +29,7 @@ type Narinfo struct {
 	NarSize     int64      `json:"nar_size" db:"nar_size"`
 	References  References `json:"references" db:"-"`
 	Deriver     string     `json:"deriver"`
-	Sig         Signatures `json:"sig" db:"-"`
+	Sig         []string   `json:"sig" db:"-"`
 	CA          string     `json:"ca"`
 	ID          int64
 	Namespace   string
@@ -40,7 +41,7 @@ type Reference string
 type References []Reference
 
 func (r References) String() string {
-	return r.join("  ")
+	return r.join(" ")
 }
 
 func (r References) sigFormat() string {
@@ -53,17 +54,6 @@ func (r References) join(sep string) string {
 		rs[i] = string(v)
 	}
 	return strings.Join(rs, sep)
-}
-
-type Signature string
-type Signatures []Signature
-
-func (s Signature) Scan(value any) error {
-	return nil
-}
-
-func (s Signature) Value(value any) error {
-	return nil
 }
 
 /*
@@ -204,69 +194,52 @@ func (info *Narinfo) Unmarshal(input io.Reader) error {
 
 		switch key {
 		case "StorePath":
-			if info.StorePath != "" {
-				return errors.Errorf("Duplicate StorePath")
+			if err := info.SetStorePath(value); err != nil {
+				return errors.WithMessage(err, "parsing StorePath")
 			}
-			info.StorePath = value
-			parts := strings.SplitN(filepath.Base(value), "-", 2)
-			info.Name = parts[0]
 		case "URL":
-			if info.URL != "" {
-				return errors.Errorf("Duplicate URL")
+			if err := info.SetURL(value); err != nil {
+				return errors.WithMessage(err, "parsing URL")
 			}
-			info.URL = value
 		case "Compression":
-			if info.Compression != "" {
-				return errors.Errorf("Duplicate Compression")
+			if err := info.SetCompression(value); err != nil {
+				return errors.WithMessage(err, "parsing Compression")
 			}
-			info.Compression = value
 		case "FileHash":
-			if info.FileHash != "" {
-				return errors.Errorf("Duplicate FileHash")
+			if err := info.SetFileHash(value); err != nil {
+				return errors.WithMessage(err, "parsing FileHash")
 			}
-			info.FileHash = value
 		case "FileSize":
-			if info.FileSize != 0 {
-				return errors.Errorf("Duplicate FileSize")
-			}
-			if fileSize, err := strconv.ParseInt(value, 10, 64); err == nil {
-				info.FileSize = fileSize
-			} else {
-				return err
+			if err := info.SetFileSize(value); err != nil {
+				return errors.WithMessage(err, "parsing FileSize")
 			}
 		case "NarHash":
-			if info.NarHash != "" {
-				return errors.Errorf("Duplicate NarHash")
+			if err := info.SetNarHash(value); err != nil {
+				return errors.WithMessage(err, "parsing NarHash")
 			}
-			info.NarHash = value
 		case "NarSize":
-			if info.NarSize != 0 {
-				return errors.Errorf("Duplicate NarSize")
-			}
-			if narSize, err := strconv.ParseInt(value, 10, 64); err == nil {
-				info.NarSize = narSize
-			} else {
-				return err
+			if narSize, err := strconv.ParseInt(value, 10, 64); err != nil {
+				return errors.WithMessage(err, "parsing NarSize")
+			} else if err := info.SetNarSize(narSize); err != nil {
+				return errors.WithMessage(err, "parsing NarSize")
 			}
 		case "References":
-			refsRaw := strings.Split(value, " ")
-			refs := make([]Reference, len(refsRaw))
-			for i, r := range refsRaw {
-				refs[i] = Reference(r)
+			values := strings.Split(value, " ")
+			if err := info.SetReferences(values); err != nil {
+				return errors.WithMessage(err, "parsing References")
 			}
-			info.References = append(info.References, refs...)
 		case "Deriver":
-			if info.Deriver != "" {
-				return errors.Errorf("Duplicate Deriver")
+			if err := info.SetDeriver(value); err != nil {
+				return errors.WithMessage(err, "parsing Deriver")
 			}
-			info.Deriver = value
 		case "Sig":
-			info.Sig = append(info.Sig, Signature(value))
-		case "CA":
-			if info.CA != "" {
-				return errors.Errorf("Duplicate CA")
+			if err := info.AddSig(value); err != nil {
+				return errors.WithMessage(err, "parsing Sig")
 			}
-			info.CA = value
+		case "CA":
+			if err := info.SetCA(value); err != nil {
+				return errors.WithMessage(err, "parsing CA")
+			}
 		default:
 			return errors.Errorf("Unknown narinfo key: %q: %v", key, value)
 		}
@@ -284,6 +257,121 @@ func (info *Narinfo) Unmarshal(input io.Reader) error {
 		return errors.WithMessage(err, "Validating narinfo")
 	}
 
+	return nil
+}
+
+func (info *Narinfo) AddSig(sig string) error {
+	return info.AddSigs([]string{sig})
+}
+
+func (info *Narinfo) AddSigs(values []string) error {
+	all := map[string]struct{}{}
+
+	for _, sig := range info.Sig {
+		all[sig] = struct{}{}
+	}
+
+	for _, value := range values {
+		all[value] = struct{}{}
+	}
+
+	keys := []string{}
+
+	for sig, _ := range all {
+		keys = append(keys, sig)
+	}
+
+	sort.Strings(keys)
+	info.Sig = keys
+
+	return nil
+}
+
+func (info *Narinfo) SetCA(ca string) error {
+	if info.CA != "" {
+		return errors.Errorf("Duplicate CA")
+	}
+	info.CA = ca
+	return nil
+}
+
+func (info *Narinfo) SetCompression(value string) error {
+	if info.Compression != "" {
+		return errors.Errorf("Duplicate Compression")
+	}
+	info.Compression = value
+	return nil
+}
+
+func (info *Narinfo) SetDeriver(deriver string) error {
+	if info.Deriver != "" {
+		return errors.Errorf("Duplicate Deriver")
+	}
+	info.Deriver = deriver
+	return nil
+}
+
+func (info *Narinfo) SetFileHash(fileHash string) error {
+	if info.FileHash != "" {
+		return errors.Errorf("Duplicate FileHash")
+	}
+	info.FileHash = fileHash
+	return nil
+}
+
+func (info *Narinfo) SetFileSize(fileSize string) error {
+	if info.FileSize != 0 {
+		return errors.Errorf("Duplicate FileSize")
+	} else if fileSize, err := strconv.ParseInt(fileSize, 10, 64); err != nil {
+		return errors.WithMessage(err, "parsing FileSize")
+	} else {
+		info.FileSize = fileSize
+	}
+
+	return nil
+}
+
+func (info *Narinfo) SetNarHash(narHash string) error {
+	if info.NarHash != "" {
+		return errors.Errorf("Duplicate NarHash")
+	}
+	info.NarHash = narHash
+	return nil
+}
+
+func (info *Narinfo) SetNarSize(narSize int64) error {
+	if info.NarSize != 0 {
+		return errors.Errorf("Duplicate NarSize")
+	} else {
+		info.NarSize = narSize
+	}
+	return nil
+}
+
+func (info *Narinfo) SetReferences(references []string) error {
+	refs := make([]Reference, len(references))
+	for i, r := range references {
+		refs[i] = Reference(r)
+	}
+	info.References = append(info.References, refs...)
+	return nil
+}
+
+func (info *Narinfo) SetStorePath(path string) error {
+	if info.StorePath != "" {
+		return errors.Errorf("Duplicate StorePath")
+	}
+	info.StorePath = path
+	parts := strings.SplitN(filepath.Base(path), "-", 2)
+	info.Name = parts[0]
+	return nil
+}
+
+func (info *Narinfo) SetURL(url string) error {
+	if info.URL != "" {
+		return errors.Errorf("Duplicate URL")
+	}
+	info.URL = url
 	return nil
 }
 
@@ -365,14 +453,14 @@ func (info *Narinfo) SanitizeSignatures(publicKeys map[string]ed25519.PublicKey)
 }
 
 // Returns valid and invalid signatures
-func (info *Narinfo) ValidInvalidSignatures(publicKeys map[string]ed25519.PublicKey) ([]Signature, []Signature) {
+func (info *Narinfo) ValidInvalidSignatures(publicKeys map[string]ed25519.PublicKey) ([]string, []string) {
 	if len(info.Sig) == 0 {
 		return nil, nil
 	}
 
 	signMsg := info.signMsg()
-	valid := []Signature{}
-	invalid := []Signature{}
+	valid := []string{}
+	invalid := []string{}
 
 	// finally we need at leaat one matching signature
 	for _, sig := range info.Sig {
@@ -384,9 +472,9 @@ func (info *Narinfo) ValidInvalidSignatures(publicKeys map[string]ed25519.Public
 			invalid = append(invalid, sig)
 		} else if key, ok := publicKeys[name]; ok {
 			if ed25519.Verify(key, []byte(signMsg), signature) {
-				valid = append(valid, Signature(sig))
+				valid = append(valid, sig)
 			} else {
-				invalid = append(invalid, Signature(sig))
+				invalid = append(invalid, sig)
 			}
 		}
 	}
@@ -411,9 +499,9 @@ func (info *Narinfo) Sign(name string, key ed25519.PrivateKey) {
 	info.Sig = append(info.Sig, info.Signature(name, key))
 }
 
-func (info *Narinfo) Signature(name string, key ed25519.PrivateKey) Signature {
+func (info *Narinfo) Signature(name string, key ed25519.PrivateKey) string {
 	signature := ed25519.Sign(key, []byte(info.signMsg()))
-	return Signature(name + ":" + base64.StdEncoding.EncodeToString(signature))
+	return name + ":" + base64.StdEncoding.EncodeToString(signature)
 }
 
 func (info *Narinfo) NarHashType() string {
@@ -559,7 +647,7 @@ func findNarinfo(db *sqlx.DB, namespace, name string) (*Narinfo, error) {
 			defer tx.Rollback()
 			return nil, errors.WithMessage(err, "while scanning narinfo_sigs")
 		}
-		info.Sig = append(info.Sig, Signature(sig))
+		info.Sig = append(info.Sig, sig)
 	}
 
 	if err := tx.Commit(); err != nil {

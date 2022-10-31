@@ -3,25 +3,21 @@ package main
 import (
 	"context"
 	"crypto/ed25519"
-	"database/sql"
 	"log"
 	"net/http"
 	"net/url"
 	"os"
 	"os/signal"
 	"path/filepath"
-	"strings"
 	"syscall"
 	"time"
 
 	"github.com/alexflint/go-arg"
 	"github.com/folbricht/desync"
 	"github.com/jmoiron/sqlx"
-	_ "github.com/mattn/go-sqlite3"
 	"github.com/minio/minio-go/v6"
 	"github.com/minio/minio-go/v6/pkg/credentials"
 	"go.uber.org/zap"
-	"petersanchez.com/migrate"
 )
 
 const (
@@ -34,6 +30,8 @@ func chunkSizeMin() uint64 { return chunkSizeAvg / 4 }
 func chunkSizeMax() uint64 { return chunkSizeAvg * 4 }
 
 func main() {
+	sshServer()
+	return
 	experiment()
 	// cpuprofile := "spongix.pprof"
 	// f, err := os.Create(cpuprofile)
@@ -337,85 +335,85 @@ func (proxy *Proxy) setupLogger() {
 }
 
 func (proxy *Proxy) setupDatabase() {
-	migrations := []migrate.Migration{
-		{
-			ID: "0001_initialize",
-			Migrate: func(ctx context.Context, tx *sql.Tx) error {
-				// Using strict schemas would be nice, but there's no support for doing
-				// time handling with it yet.
-				_, err := tx.ExecContext(ctx, `
-					CREATE TABLE narinfos
-					( id INTEGER PRIMARY KEY ASC
-					, name TEXT NOT NULL
-					, store_path TEXT NOT NULL
-					, url TEXT NOT NULL
-					, compression TEXT
-					, file_hash TEXT NOT NULL
-					, file_size INTEGER NOT NULL
-					, nar_hash TEXT NOT NULL
-					, nar_size INTEGER NOT NULL
-					, deriver TEXT NOT NULL
-					, ca TEXT
-					, namespace TEXT NOT NULL
-					, ctime DATETIME NOT NULL
-					, atime DATETIME NOT NULL
-					);
+	// migrations := []migrate.Migration{
+	// 	{
+	// 		ID: "0001_initialize",
+	// 		Migrate: func(ctx context.Context, tx *sql.Tx) error {
+	// 			// Using strict schemas would be nice, but there's no support for doing
+	// 			// time handling with it yet.
+	// 			_, err := tx.ExecContext(ctx, `
+	// 				CREATE TABLE narinfos
+	// 				( id INTEGER PRIMARY KEY ASC
+	// 				, name TEXT NOT NULL
+	// 				, store_path TEXT NOT NULL
+	// 				, url TEXT NOT NULL
+	// 				, compression TEXT
+	// 				, file_hash TEXT NOT NULL
+	// 				, file_size INTEGER NOT NULL
+	// 				, nar_hash TEXT NOT NULL
+	// 				, nar_size INTEGER NOT NULL
+	// 				, deriver TEXT NOT NULL
+	// 				, ca TEXT
+	// 				, namespace TEXT NOT NULL
+	// 				, ctime DATETIME NOT NULL
+	// 				, atime DATETIME NOT NULL
+	// 				);
 
-					CREATE INDEX narinfos_name ON narinfos(name);
-					CREATE UNIQUE INDEX narinfos_name_namespace ON narinfos(name, namespace);
+	// 				CREATE INDEX narinfos_name ON narinfos(name);
+	// 				CREATE UNIQUE INDEX narinfos_name_namespace ON narinfos(name, namespace);
 
-					CREATE TABLE narinfo_refs
-					( narinfo_id INTEGER NOT NULL
-					, ref TEXT NOT NULL
-					, FOREIGN KEY(narinfo_id) REFERENCES narinfo(id)
-					);
-					CREATE INDEX narinfos_refs_narinfo_id ON narinfo_refs(narinfo_id);
+	// 				CREATE TABLE narinfo_refs
+	// 				( narinfo_id INTEGER NOT NULL
+	// 				, ref TEXT NOT NULL
+	// 				, FOREIGN KEY(narinfo_id) REFERENCES narinfo(id)
+	// 				);
+	// 				CREATE INDEX narinfos_refs_narinfo_id ON narinfo_refs(narinfo_id);
 
-					CREATE TABLE narinfo_sigs
-					( narinfo_id TEXT NOT NULL
-					, sig TEXT NOT NULL
-					, FOREIGN KEY(narinfo_id) REFERENCES narinfo(id)
-					);
-					CREATE INDEX narinfos_sigs_narinfo_id ON narinfo_sigs(narinfo_id);
+	// 				CREATE TABLE narinfo_sigs
+	// 				( narinfo_id TEXT NOT NULL
+	// 				, sig TEXT NOT NULL
+	// 				, FOREIGN KEY(narinfo_id) REFERENCES narinfo(id)
+	// 				);
+	// 				CREATE INDEX narinfos_sigs_narinfo_id ON narinfo_sigs(narinfo_id);
 
-					CREATE TABLE realisations
-					( id TEXT NOT NULL PRIMARY KEY
-					, out_path TEXT NOT NULL
-					, signatures TEXT
-					, dependent_realisations TEXT
-					, namespace TEXT NOT NULL
-					);
-					`)
-				return err
-			},
-			Rollback: func(ctx context.Context, tx *sql.Tx) error {
-				_, err := tx.Exec(`
-					DROP TABLE narinfos;
-					DROP TABLE narinfo_refs;
-					DROP TABLE narinfo_sigs;
-					DROP TABLE realisations;
-				`)
-				return err
-			},
-			Timeout: 5,
-		},
-	}
+	// 				CREATE TABLE realisations
+	// 				( id TEXT NOT NULL PRIMARY KEY
+	// 				, out_path TEXT NOT NULL
+	// 				, signatures TEXT
+	// 				, dependent_realisations TEXT
+	// 				, namespace TEXT NOT NULL
+	// 				);
+	// 				`)
+	// 			return err
+	// 		},
+	// 		Rollback: func(ctx context.Context, tx *sql.Tx) error {
+	// 			_, err := tx.Exec(`
+	// 				DROP TABLE narinfos;
+	// 				DROP TABLE narinfo_refs;
+	// 				DROP TABLE narinfo_sigs;
+	// 				DROP TABLE realisations;
+	// 			`)
+	// 			return err
+	// 		},
+	// 		Timeout: 5,
+	// 	},
+	// }
 
-	if db, err := sqlx.Open("sqlite3", proxy.DSN); err != nil {
-		proxy.log.Fatal("failed creating database", zap.Error(err), zap.String("DSN", proxy.DSN))
-	} else if err := db.Ping(); err != nil {
-		proxy.log.Fatal("failed connecting to database", zap.Error(err), zap.String("DSN", proxy.DSN))
-	} else {
-		engine := migrate.NewEngine(db.DB, migrations, migrate.DOLLAR, true)
-		sugar := proxy.log.Sugar()
-		engine.Printf = func(format string, a ...interface{}) (int, error) {
-			sugar.Debugf(strings.TrimSuffix(format, "\n"), a...)
-			return 0, nil
-		}
-		if err := engine.Migrate(context.Background(), "", false); err != nil {
-			proxy.log.Fatal("failed migrating", zap.Error(err), zap.String("DSN", proxy.DSN))
-		} else {
-			proxy.db = db
-		}
-	}
+	// if db, err := sqlx.Open("sqlite3", proxy.DSN); err != nil {
+	// 	proxy.log.Fatal("failed creating database", zap.Error(err), zap.String("DSN", proxy.DSN))
+	// } else if err := db.Ping(); err != nil {
+	// 	proxy.log.Fatal("failed connecting to database", zap.Error(err), zap.String("DSN", proxy.DSN))
+	// } else {
+	// 	engine := migrate.NewEngine(db.DB, migrations, migrate.DOLLAR, true)
+	// 	sugar := proxy.log.Sugar()
+	// 	engine.Printf = func(format string, a ...interface{}) (int, error) {
+	// 		sugar.Debugf(strings.TrimSuffix(format, "\n"), a...)
+	// 		return 0, nil
+	// 	}
+	// 	if err := engine.Migrate(context.Background(), "", false); err != nil {
+	// 		proxy.log.Fatal("failed migrating", zap.Error(err), zap.String("DSN", proxy.DSN))
+	// 	} else {
+	// 		proxy.db = db
+	// 	}
+	// }
 }

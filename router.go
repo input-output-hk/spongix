@@ -142,7 +142,11 @@ func (proxy *Proxy) withS3CacheHandler() mux.MiddlewareFunc {
 type notAllowed struct{}
 
 func (n notAllowed) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	// pp("*** 405", r.Method, r.URL.Path, mux.Vars(r))
+	pp("*** 403", r.Method, r.URL.Path, mux.Vars(r))
+	w.Header().Set(headerContentType, mimeText)
+	w.Header().Set(headerCache, headerCacheMiss)
+	w.WriteHeader(http.StatusForbidden)
+	_, _ = w.Write([]byte("not allowed"))
 }
 
 type notFound struct{}
@@ -152,7 +156,7 @@ func (n notFound) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 func serveNotFound(w http.ResponseWriter, r *http.Request) {
-	// pp("*** 404", r.Method, r.URL.Path, mux.Vars(r))
+	pp("*** 404", r.Method, r.URL.Path, mux.Vars(r))
 	w.Header().Set(headerContentType, mimeText)
 	w.Header().Set(headerCache, headerCacheMiss)
 	w.WriteHeader(http.StatusNotFound)

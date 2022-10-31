@@ -30,14 +30,6 @@ func withHTTPLogging(log *zap.Logger) func(http.Handler) http.Handler {
 			url := r.URL.String()
 			isMetric := url == "/metrics"
 
-			if !isMetric {
-				log.Info("REQ",
-					zap.String("ident", r.Host),
-					zap.String("method", r.Method),
-					zap.String("url", url),
-				)
-			}
-
 			start := time.Now()
 			record := &LogRecord{
 				ResponseWriter: w,
@@ -45,7 +37,7 @@ func withHTTPLogging(log *zap.Logger) func(http.Handler) http.Handler {
 			}
 			h.ServeHTTP(record, r)
 
-			level := log.Info
+			level := log.Debug
 			if record.status >= 500 {
 				level = log.Error
 			}

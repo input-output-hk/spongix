@@ -8,6 +8,12 @@ package = "treefmt"
 package = "alejandra"
 
 [[commands]]
+package = "sqlite-interactive"
+
+[[commands]]
+package = "time"
+
+[[commands]]
 name = "lint"
 command = "golangci-lint run && treefmt --fail-on-change"
 help = "Run code linters"
@@ -30,4 +36,5 @@ packages = [
   "gnumake",
   "minio",
   "minio-client",
+  "pkg-config",
 ]

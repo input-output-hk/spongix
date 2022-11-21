@@ -1,4 +1,4 @@
-package main
+package assembler
 
 import (
 	"bytes"
@@ -7,10 +7,21 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/folbricht/desync"
 	"github.com/smartystreets/assertions"
 )
+
+var defaultStoreOptions = desync.StoreOptions{
+	N:            1,
+	Timeout:      1 * time.Second,
+	ErrorRetry:   0,
+	Uncompressed: false,
+	SkipVerify:   false,
+}
+
+const defaultThreads = 2
 
 func TestAssemble(t *testing.T) {
 	a := assertions.New(t)
@@ -43,7 +54,7 @@ func TestAssemble(t *testing.T) {
 	} else if err := index.StoreIndex(key, idx); err != nil {
 		t.Fatal(err)
 	} else {
-		asm := newAssembler(store, idx)
+		asm := NewAssembler(store, idx)
 
 		buf := &bytes.Buffer{}
 		n, err := io.Copy(buf, asm)

@@ -2,7 +2,6 @@ package main
 
 import (
 	"net/http"
-	"path/filepath"
 	"strconv"
 
 	"github.com/gorilla/handlers"
@@ -27,8 +26,6 @@ func (proxy *Proxy) router() *mux.Router {
 	)
 
 	r.HandleFunc("/metrics", metrics.ServeHTTP)
-
-	newDockerHandler(proxy.log, proxy.localStore, proxy.localIndex, filepath.Join(proxy.Dir, "oci"), r)
 
 	// backwards compat
 	for _, prefix := range []string{"/cache", ""} {

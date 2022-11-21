@@ -13,12 +13,23 @@ import (
 	"sync"
 	"time"
 
+	"github.com/alexflint/go-arg"
 	"github.com/folbricht/desync"
+	"github.com/input-output-hk/spongix/pkg/assembler"
 	"github.com/numtide/go-nix/nar"
 	"github.com/pascaldekloe/metrics"
 	"github.com/pkg/errors"
 	"go.uber.org/zap"
 )
+
+func main() {
+	gc := newGC()
+	arg.MustParse(gc)
+	gc.setupDesync()
+	gc.setupLogger()
+	gc.verify()
+	gc.gc()
+}
 
 var (
 	metricChunkCount   = metrics.MustInteger("spongix_chunk_count_local", "Number of chunks")
@@ -36,9 +47,91 @@ var (
 	metricMaxSize    = metrics.MustInteger("spongix_max_size_local", "Limit for the local cache in bytes")
 	metricGcTime     = metrics.MustCounter("spongix_gc_time_local", "Total time spent in GC")
 	metricVerifyTime = metrics.MustCounter("spongix_verify_time_local", "Total time spent in verification")
+
+	defaultStoreOptions = desync.StoreOptions{
+		N:            1,
+		Timeout:      1 * time.Second,
+		ErrorRetry:   0,
+		Uncompressed: false,
+		SkipVerify:   false,
+	}
 )
 
 var yes = struct{}{}
+
+type GC struct {
+	Dir        string `arg:"--dir,env:CACHE_DIR" help:"directory for the cache"`
+	CacheSize  uint64 `arg:"--cache-size,env:CACHE_SIZE" help:"Number of gigabytes to keep in the disk cache"`
+	LogLevel   string `arg:"--log-level,env:LOG_LEVEL" help:"One of debug, info, warn, error, dpanic, panic, fatal"`
+	LogMode    string `arg:"--log-mode,env:LOG_MODE" help:"development or production"`
+	log        *zap.Logger
+	localStore desync.LocalStore
+	localIndex desync.LocalIndexStore
+}
+
+func newGC() *GC {
+	devLog, err := zap.NewDevelopment()
+	if err != nil {
+		panic(err)
+	}
+
+	return &GC{
+		Dir:      "./cache",
+		LogLevel: "debug",
+		LogMode:  "production",
+		log:      devLog,
+	}
+}
+
+func (gc *GC) setupLogger() {
+	lvl := zap.NewAtomicLevel()
+	if err := lvl.UnmarshalText([]byte(gc.LogLevel)); err != nil {
+		panic(err)
+	}
+	development := gc.LogMode == "development"
+	encoding := "json"
+	encoderConfig := zap.NewProductionEncoderConfig()
+	if development {
+		encoding = "console"
+		encoderConfig = zap.NewDevelopmentEncoderConfig()
+	}
+
+	l := zap.Config{
+		Level:             lvl,
+		Development:       development,
+		DisableCaller:     false,
+		DisableStacktrace: false,
+		Sampling:          &zap.SamplingConfig{Initial: 1, Thereafter: 2},
+		Encoding:          encoding,
+		EncoderConfig:     encoderConfig,
+		OutputPaths:       []string{"stderr"},
+		ErrorOutputPaths:  []string{"stderr"},
+	}
+
+	var err error
+	gc.log, err = l.Build()
+	if err != nil {
+		panic(err)
+	}
+}
+
+func (gc *GC) setupDesync() {
+	storeDir := filepath.Join(gc.Dir, "store")
+	localStore, err := desync.NewLocalStore(storeDir, defaultStoreOptions)
+	if err != nil {
+		gc.log.Fatal("failed creating local store", zap.Error(err), zap.String("dir", storeDir))
+	}
+	localStore.UpdateTimes = true
+
+	indexDir := filepath.Join(gc.Dir, "index")
+	localIndex, err := desync.NewLocalIndexStore(indexDir)
+	if err != nil {
+		gc.log.Fatal("failed creating local index", zap.Error(err), zap.String("dir", indexDir))
+	}
+
+	gc.localStore = localStore
+	gc.localIndex = localIndex
+}
 
 func measure(metric *metrics.Counter, f func()) {
 	start := time.Now()
@@ -46,38 +139,24 @@ func measure(metric *metrics.Counter, f func()) {
 	metric.Add(uint64(time.Since(start).Milliseconds()))
 }
 
-func (proxy *Proxy) gc() {
-	proxy.log.Debug("Initializing GC", zap.Duration("interval", proxy.GcInterval))
+func (gc *GC) gc() {
 	cacheStat := map[string]*chunkStat{}
-	measure(metricGcTime, func() { proxy.gcOnce(cacheStat) })
-
-	ticker := time.NewTicker(proxy.GcInterval)
-	for {
-		<-ticker.C
-		measure(metricGcTime, func() { proxy.gcOnce(cacheStat) })
-	}
+	measure(metricGcTime, func() { gc.gcOnce(cacheStat) })
 }
 
-func (proxy *Proxy) verify() {
-	proxy.log.Debug("Initializing Verifier", zap.Duration("interval", proxy.VerifyInterval))
-	measure(metricVerifyTime, func() { proxy.verifyOnce() })
-
-	ticker := time.NewTicker(proxy.VerifyInterval)
-	for {
-		<-ticker.C
-		measure(metricVerifyTime, func() { proxy.verifyOnce() })
-	}
+func (gc *GC) verify() {
+	measure(metricVerifyTime, func() { gc.verifyOnce() })
 }
 
-func (proxy *Proxy) verifyOnce() {
-	proxy.log.Info("store verify started")
-	store := proxy.localStore.(desync.LocalStore)
+func (gc *GC) verifyOnce() {
+	gc.log.Info("store verify started")
+	store := gc.localStore
 	err := store.Verify(context.Background(), runtime.GOMAXPROCS(0), true, os.Stderr)
 
 	if err != nil {
-		proxy.log.Error("store verify failed", zap.Error(err))
+		gc.log.Error("store verify failed", zap.Error(err))
 	} else {
-		proxy.log.Info("store verify completed")
+		gc.log.Info("store verify completed")
 	}
 }
 
@@ -151,7 +230,7 @@ type integrityCheck struct {
 }
 
 func checkNarContents(store desync.Store, idx desync.Index) error {
-	buf := newAssembler(store, idx)
+	buf := assembler.NewAssembler(store, idx)
 	narRd := nar.NewReader(buf)
 	none := true
 	for {
@@ -180,15 +259,17 @@ Local GC strategies:
     If index is missing, delete it.
   	If last access is too old, delete it.
 */
-func (proxy *Proxy) gcOnce(cacheStat map[string]*chunkStat) {
-	maxCacheSize := (uint64(math.Pow(2, 30)) * proxy.CacheSize) - maxCacheDirPortion
-	store := proxy.localStore.(desync.LocalStore)
-	indices := proxy.localIndex.(desync.LocalIndexStore)
+func (gc *GC) gcOnce(cacheStat map[string]*chunkStat) {
+	log := gc.log.Named("gc")
+	maxCacheSize := (uint64(math.Pow(2, 30)) * gc.CacheSize) - maxCacheDirPortion
+	store := gc.localStore
+	indices := gc.localIndex
 	lru := NewLRU(maxCacheSize)
 	walkStoreStart := time.Now()
 	chunkDirs := int64(0)
 
 	metricMaxSize.Set(int64(maxCacheSize))
+	log.Info("GC started", zap.Uint64("maxSize", maxCacheSize))
 
 	// filepath.Walk is faster for our usecase because we need the stat result anyway.
 	walkStoreErr := filepath.Walk(store.Base, func(path string, info fs.FileInfo, err error) error {
@@ -225,7 +306,7 @@ func (proxy *Proxy) gcOnce(cacheStat map[string]*chunkStat) {
 		stat := &chunkStat{id: id, size: info.Size(), mtime: info.ModTime()}
 
 		if _, err := store.GetChunk(id); err != nil {
-			proxy.log.Error("getting chunk", zap.Error(err), zap.String("chunk", id.String()))
+			log.Error("getting chunk", zap.Error(err), zap.String("chunk", id.String()))
 			lru.AddDead(stat)
 		} else {
 			lru.Add(stat)
@@ -234,11 +315,12 @@ func (proxy *Proxy) gcOnce(cacheStat map[string]*chunkStat) {
 		return nil
 	})
 
-	metricChunkWalk.Add(uint64(time.Since(walkStoreStart).Milliseconds()))
+	chunkWalkDuration := time.Since(walkStoreStart)
+	metricChunkWalk.Add(uint64(chunkWalkDuration.Milliseconds()))
 	metricChunkDirs.Set(chunkDirs)
 
 	if walkStoreErr != nil {
-		proxy.log.Error("While walking store", zap.Error(walkStoreErr))
+		log.Error("While walking store", zap.Error(walkStoreErr))
 		return
 	}
 
@@ -246,6 +328,14 @@ func (proxy *Proxy) gcOnce(cacheStat map[string]*chunkStat) {
 	metricChunkGcCount.Add(uint64(len(lru.dead)))
 	metricChunkGcSize.Add(lru.deadSize)
 	metricChunkSize.Set(int64(lru.liveSize))
+	log.Info("chunk walk done",
+		zap.Duration("duration", chunkWalkDuration),
+		zap.Int64("dirs", chunkDirs),
+		zap.Int("live chunks", len(lru.live)),
+		zap.Uint64("live size", lru.liveSize),
+		zap.Uint64("dead size", lru.deadSize),
+		zap.Int("dead chunks", len(lru.dead)),
+	)
 
 	deadIndices := &sync.Map{}
 	walkIndicesStart := time.Now()
@@ -264,19 +354,20 @@ func (proxy *Proxy) gcOnce(cacheStat map[string]*chunkStat) {
 
 			for {
 				select {
-				case <-time.After(1 * time.Second):
+				case <-time.After(5 * time.Minute):
 					return
 				case check := <-integrity:
 					switch filepath.Ext(check.path) {
+					case "":
+						return
 					case ".nar":
 						if err := checkNarContents(store, check.index); err != nil {
-							proxy.log.Error("checking NAR contents", zap.Error(err), zap.String("path", check.path))
+							log.Error("checking NAR contents", zap.Error(err), zap.String("path", check.path))
 							deadIndices.Store(check.path, yes)
-							continue
 						}
 					case ".narinfo":
-						if _, err := assembleNarinfo(store, check.index); err != nil {
-							proxy.log.Error("checking narinfo", zap.Error(err), zap.String("path", check.path))
+						if _, err := assembler.AssembleNarinfo(store, check.index); err != nil {
+							log.Error("checking narinfo", zap.Error(err), zap.String("path", check.path))
 							deadIndices.Store(check.path, yes)
 						}
 					}
@@ -313,12 +404,12 @@ func (proxy *Proxy) gcOnce(cacheStat map[string]*chunkStat) {
 		indicesCount++
 
 		if len(index.Chunks) == 0 {
-			proxy.log.Debug("index chunks are empty", zap.String("path", path))
+			log.Debug("index chunks are empty", zap.String("path", path))
 			deadIndices.Store(path, yes)
 		} else {
 			for _, indexChunk := range index.Chunks {
 				if lru.IsDead(indexChunk.ID) {
-					proxy.log.Debug("some chunks are dead", zap.String("path", path))
+					log.Debug("some chunks are dead", zap.String("path", path))
 					deadIndices.Store(path, yes)
 					break
 				}
@@ -328,6 +419,7 @@ func (proxy *Proxy) gcOnce(cacheStat map[string]*chunkStat) {
 		return nil
 	})
 
+	integrity <- integrityCheck{path: "", index: desync.Index{}}
 	wg.Wait()
 	close(integrity)
 
@@ -336,14 +428,14 @@ func (proxy *Proxy) gcOnce(cacheStat map[string]*chunkStat) {
 	metricInflated.Set(inflatedSize)
 
 	if walkIndicesErr != nil {
-		proxy.log.Error("While walking index", zap.Error(walkIndicesErr))
+		log.Error("While walking index", zap.Error(walkIndicesErr))
 		return
 	}
 	deadIndexCount := uint64(0)
 	// time.Sleep(10 * time.Minute)
 	deadIndices.Range(func(key, value interface{}) bool {
 		path := key.(string)
-		proxy.log.Debug("moving index to trash", zap.String("path", path))
+		log.Info("moving index to trash", zap.String("path", path))
 		_ = os.Remove(path)
 		deadIndexCount++
 		return true
@@ -356,11 +448,11 @@ func (proxy *Proxy) gcOnce(cacheStat map[string]*chunkStat) {
 
 	for id := range lru.Dead() {
 		if err := store.RemoveChunk(id); err != nil {
-			proxy.log.Error("Removing chunk", zap.Error(err), zap.String("id", id.String()))
+			log.Error("Removing chunk", zap.Error(err), zap.String("id", id.String()))
 		}
 	}
 
-	proxy.log.Debug(
+	log.Info(
 		"GC stats",
 		zap.Uint64("live_bytes", lru.liveSize),
 		zap.Uint64("live_max_bytes", lru.liveSizeMax),

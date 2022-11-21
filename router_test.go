@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/folbricht/desync"
+	"github.com/input-output-hk/spongix/pkg/narinfo"
 	"github.com/steinfletcher/apitest"
 	"go.uber.org/zap"
 )
@@ -561,7 +562,7 @@ func TestRouterNarinfoPut(t *testing.T) {
 		seed := make([]byte, ed25519.SeedSize)
 		proxy.secretKeys["foo"] = ed25519.NewKeyFromSeed(seed)
 
-		emptyInfo := &Narinfo{}
+		emptyInfo := &narinfo.Narinfo{}
 		if err := emptyInfo.Unmarshal(bytes.NewReader(testdata[fNarinfo])); err != nil {
 			tt.Fatal(err)
 		}
@@ -582,7 +583,7 @@ func TestRouterNarinfoPut(t *testing.T) {
 			Status(http.StatusOK).
 			End()
 
-		expectInfo := &Narinfo{}
+		expectInfo := &narinfo.Narinfo{}
 		if err := expectInfo.Unmarshal(bytes.NewReader(testdata[fNarinfo])); err != nil {
 			tt.Fatal(err)
 		}

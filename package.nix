@@ -5,11 +5,11 @@
   inclusive,
   rev,
 }: let
-  final = package "sha256-NGQZqIawCOb1UPjFCSkSfPV02jMOD+MUx6b5LZyzy94=";
+  final = package "sha256-7HBILEx8nmxwlOCNU7lVovRfutwGb62x0wkP0cot5p0=";
   package = vendorSha256:
     buildGo118Module rec {
       pname = "spongix";
-      version = "2022.05.10.001";
+      version = "2022.11.21.001";
       inherit vendorSha256;
 
       passthru.invalidHash =
@@ -20,23 +20,15 @@
         ./go.mod
         ./go.sum
 
-        ./assemble.go
-        ./assemble_test.go
-        ./blob_manager.go
+        ./cmd
+        ./pkg
         ./cache.go
-        ./docker.go
-        ./docker_test.go
         ./fake.go
-        ./gc.go
         ./helpers.go
         ./log_record.go
         ./main.go
-        ./manifest_manager.go
-        ./narinfo.go
-        ./narinfo_test.go
         ./router.go
         ./router_test.go
-        ./upload_manager.go
       ];
 
       proxyVendor = true;

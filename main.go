@@ -48,8 +48,6 @@ func main() {
 	proxy.setupS3()
 
 	go proxy.startCache()
-	go proxy.gc()
-	go proxy.verify()
 
 	go func() {
 		t := time.Tick(5 * time.Second)
@@ -106,20 +104,17 @@ func main() {
 }
 
 type Proxy struct {
-	BucketURL         string        `arg:"--bucket-url,env:BUCKET_URL" help:"Bucket URL like s3+http://127.0.0.1:9000/ncp"`
-	BucketRegion      string        `arg:"--bucket-region,env:BUCKET_REGION" help:"Region the bucket is in"`
-	Dir               string        `arg:"--dir,env:CACHE_DIR" help:"directory for the cache"`
-	Listen            string        `arg:"--listen,env:LISTEN_ADDR" help:"Listen on this address"`
-	SecretKeyFiles    []string      `arg:"--secret-key-files,required,env:NIX_SECRET_KEY_FILES" help:"Files containing your private nix signing keys"`
-	Substituters      []string      `arg:"--substituters,env:NIX_SUBSTITUTERS"`
-	TrustedPublicKeys []string      `arg:"--trusted-public-keys,env:NIX_TRUSTED_PUBLIC_KEYS"`
-	CacheInfoPriority uint64        `arg:"--cache-info-priority,env:CACHE_INFO_PRIORITY" help:"Priority in nix-cache-info"`
-	AverageChunkSize  uint64        `arg:"--average-chunk-size,env:AVERAGE_CHUNK_SIZE" help:"Chunk size will be between /4 and *4 of this value"`
-	CacheSize         uint64        `arg:"--cache-size,env:CACHE_SIZE" help:"Number of gigabytes to keep in the disk cache"`
-	VerifyInterval    time.Duration `arg:"--verify-interval,env:VERIFY_INTERVAL" help:"Time between verification runs"`
-	GcInterval        time.Duration `arg:"--gc-interval,env:GC_INTERVAL" help:"Time between store garbage collection runs"`
-	LogLevel          string        `arg:"--log-level,env:LOG_LEVEL" help:"One of debug, info, warn, error, dpanic, panic, fatal"`
-	LogMode           string        `arg:"--log-mode,env:LOG_MODE" help:"development or production"`
+	BucketURL         string   `arg:"--bucket-url,env:BUCKET_URL" help:"Bucket URL like s3+http://127.0.0.1:9000/ncp"`
+	BucketRegion      string   `arg:"--bucket-region,env:BUCKET_REGION" help:"Region the bucket is in"`
+	Dir               string   `arg:"--dir,env:CACHE_DIR" help:"directory for the cache"`
+	Listen            string   `arg:"--listen,env:LISTEN_ADDR" help:"Listen on this address"`
+	SecretKeyFiles    []string `arg:"--secret-key-files,required,env:NIX_SECRET_KEY_FILES" help:"Files containing your private nix signing keys"`
+	Substituters      []string `arg:"--substituters,env:NIX_SUBSTITUTERS"`
+	TrustedPublicKeys []string `arg:"--trusted-public-keys,env:NIX_TRUSTED_PUBLIC_KEYS"`
+	CacheInfoPriority uint64   `arg:"--cache-info-priority,env:CACHE_INFO_PRIORITY" help:"Priority in nix-cache-info"`
+	AverageChunkSize  uint64   `arg:"--average-chunk-size,env:AVERAGE_CHUNK_SIZE" help:"Chunk size will be between /4 and *4 of this value"`
+	LogLevel          string   `arg:"--log-level,env:LOG_LEVEL" help:"One of debug, info, warn, error, dpanic, panic, fatal"`
+	LogMode           string   `arg:"--log-mode,env:LOG_MODE" help:"development or production"`
 
 	// derived from the above
 	secretKeys  map[string]ed25519.PrivateKey
@@ -150,8 +145,6 @@ func NewProxy() *Proxy {
 		Substituters:      []string{},
 		CacheInfoPriority: 50,
 		AverageChunkSize:  chunkSizeAvg,
-		VerifyInterval:    time.Hour,
-		GcInterval:        time.Hour,
 		cacheChan:         make(chan string, 10000),
 		log:               devLog,
 		LogLevel:          "debug",

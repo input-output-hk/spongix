@@ -6,6 +6,18 @@
 }: let
   cfg = config.services.spongix;
   join = lib.concatStringsSep ",";
+
+  logLevels = [
+    "debug"
+    "info"
+    "warn"
+    "error"
+    "dpanic"
+    "panic"
+    "fatal"
+  ];
+
+  logModes = ["production" "development"];
 in {
   options = {
     services.spongix = {
@@ -14,6 +26,67 @@ in {
       package = lib.mkOption {
         type = lib.types.package;
         default = pkgs.spongix;
+      };
+
+      gc = lib.mkOption {
+        type = lib.types.submodule {
+          options = {
+            cacheSize = lib.mkOption {
+              type = lib.types.ints.positive;
+              default = 10;
+              description = ''
+                Number of GB to keep in the local cache
+              '';
+            };
+
+            interval = lib.mkOption {
+              type = lib.types.str;
+              default = "daily";
+              description = ''
+                Time between garbage collections of local store files (fast)
+              '';
+            };
+
+            cacheDir = lib.mkOption {
+              type = lib.types.str;
+              default = cfg.cacheDir;
+              description = ''
+                Keep all cache state in this directory.
+              '';
+            };
+
+            host = lib.mkOption {
+              type = lib.types.str;
+              default = cfg.host;
+              description = ''
+                Listen on this host. Will be 0.0.0.0 if empty.
+              '';
+            };
+
+            port = lib.mkOption {
+              type = lib.types.port;
+              default = cfg.port + 1;
+              description = ''
+                Listen on this port.
+              '';
+            };
+
+            logLevel = lib.mkOption {
+              type = lib.types.enum logLevels;
+              default = "info";
+            };
+
+            logMode = lib.mkOption {
+              type = lib.types.enum logModes;
+              default = "production";
+              description = ''
+                production mode uses JSON formatting, while development mode is more
+                human readable.
+              '';
+            };
+          };
+        };
+        default = {};
       };
 
       bucketURL = lib.mkOption {
@@ -100,45 +173,13 @@ in {
         '';
       };
 
-      cacheSize = lib.mkOption {
-        type = lib.types.ints.positive;
-        default = 10;
-        description = ''
-          Number of GB to keep in the local cache
-        '';
-      };
-
-      verifyInterval = lib.mkOption {
-        type = lib.types.str;
-        default = "24h";
-        description = ''
-          Time between verifcations of local store file integrity (slow and I/O intensive)
-        '';
-      };
-
-      gcInterval = lib.mkOption {
-        type = lib.types.str;
-        default = "1h";
-        description = ''
-          Time between garbage collections of local store files (fast)
-        '';
-      };
-
       logLevel = lib.mkOption {
-        type = lib.types.enum [
-          "debug"
-          "info"
-          "warn"
-          "error"
-          "dpanic"
-          "panic"
-          "fatal"
-        ];
+        type = lib.types.enum logLevels;
         default = "info";
       };
 
       logMode = lib.mkOption {
-        type = lib.types.enum ["production" "development"];
+        type = lib.types.enum logModes;
         default = "production";
         description = ''
           production mode uses JSON formatting, while development mode is more
@@ -152,8 +193,6 @@ in {
     systemd.services.spongix = {
       wantedBy = ["multi-user.target"];
 
-      path = [config.nix.package];
-
       environment = {
         BUCKET_URL = cfg.bucketURL;
         BUCKET_REGION = cfg.bucketRegion;
@@ -163,9 +202,6 @@ in {
         NIX_TRUSTED_PUBLIC_KEYS = join cfg.trustedPublicKeys;
         CACHE_INFO_PRIORITY = toString cfg.cacheInfoPriority;
         AVERAGE_CHUNK_SIZE = toString cfg.averageChunkSize;
-        CACHE_SIZE = toString cfg.cacheSize;
-        VERIFY_INTERVAL = cfg.verifyInterval;
-        GC_INTERVAL = cfg.gcInterval;
         LOG_LEVEL = cfg.logLevel;
         LOG_MODE = cfg.logMode;
       };
@@ -192,6 +228,42 @@ in {
         ReadWritePaths = cfg.cacheDir;
         Restart = "on-failure";
         RestartSec = 5;
+      };
+    };
+
+    systemd.timers.spongix-gc = {
+      wantedBy = ["timers.target"];
+      timerConfig = {
+        Persistent = true;
+        OnCalendar = cfg.gc.interval;
+        Unit = "spongix-gc.service";
+      };
+    };
+
+    systemd.services.spongix-gc = {
+      wantedBy = ["multi-user.target"];
+
+      environment = {
+        CACHE_DIR = cfg.gc.cacheDir;
+        LISTEN_ADDR = "${cfg.gc.host}:${toString cfg.gc.port}";
+        CACHE_SIZE = toString cfg.gc.cacheSize;
+        GC_INTERVAL = cfg.gc.interval;
+        LOG_LEVEL = cfg.gc.logLevel;
+        LOG_MODE = cfg.gc.logMode;
+      };
+
+      serviceConfig = {
+        Type = "oneshot";
+        User = "spongix";
+        Group = "spongix";
+        DynamicUser = true;
+        RemainAfterExit = true;
+        StateDirectory = "spongix";
+        WorkingDirectory = cfg.gc.cacheDir;
+        ReadWritePaths = cfg.gc.cacheDir;
+        Restart = "on-failure";
+        RestartSec = "60s";
+        ExecStart = "${cfg.package}/bin/gc";
       };
     };
   };

@@ -1,14 +1,15 @@
-package main
+package assembler
 
 import (
 	"bytes"
 	"io"
 
 	"github.com/folbricht/desync"
+	"github.com/input-output-hk/spongix/pkg/narinfo"
 	"github.com/pkg/errors"
 )
 
-type assembler struct {
+type Assembler struct {
 	store      desync.Store
 	index      desync.Index
 	idx        int
@@ -17,13 +18,13 @@ type assembler struct {
 	wroteBytes int64
 }
 
-func newAssembler(store desync.Store, index desync.Index) *assembler {
-	return &assembler{store: store, index: index, data: &bytes.Buffer{}}
+func NewAssembler(store desync.Store, index desync.Index) *Assembler {
+	return &Assembler{store: store, index: index, data: &bytes.Buffer{}}
 }
 
-func (a *assembler) Close() error { return nil }
+func (a *Assembler) Close() error { return nil }
 
-func (a *assembler) Read(p []byte) (int, error) {
+func (a *Assembler) Read(p []byte) (int, error) {
 	if a.data.Len() > 0 {
 		writeBytes, _ := a.data.Read(p)
 		a.wroteBytes += int64(writeBytes)
@@ -54,18 +55,18 @@ func (a *assembler) Read(p []byte) (int, error) {
 	}
 }
 
-var _ = io.Reader(&assembler{})
+var _ = io.Reader(&Assembler{})
 
 // very simple implementation, mostly used for assembling narinfo which is
 // usually tiny to avoid overhead of creating files.
-func assemble(store desync.Store, index desync.Index) io.ReadCloser {
-	return newAssembler(store, index)
+func Assemble(store desync.Store, index desync.Index) io.ReadCloser {
+	return NewAssembler(store, index)
 }
 
-func assembleNarinfo(store desync.Store, index desync.Index) (*Narinfo, error) {
-	buf := assemble(store, index)
+func AssembleNarinfo(store desync.Store, index desync.Index) (*narinfo.Narinfo, error) {
+	buf := Assemble(store, index)
 
-	info := &Narinfo{}
+	info := &narinfo.Narinfo{}
 	err := info.Unmarshal(buf)
 	if err != nil {
 		return info, errors.WithMessage(err, "while unmarshaling narinfo")

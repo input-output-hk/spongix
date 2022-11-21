@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/folbricht/desync"
+	"github.com/input-output-hk/spongix/pkg/narinfo"
 	"github.com/jamespfennell/xz"
 	"github.com/pascaldekloe/metrics"
 	"github.com/pkg/errors"
@@ -172,7 +173,7 @@ func (c cacheHandler) Put(w http.ResponseWriter, r *http.Request) {
 	urlExt := filepath.Ext(r.URL.String())
 	switch urlExt {
 	case ".narinfo":
-		info := &Narinfo{}
+		info := &narinfo.Narinfo{}
 		if err := info.Unmarshal(r.Body); err != nil {
 			c.log.Error("unmarshaling narinfo", zap.Error(err))
 			answer(w, http.StatusBadRequest, mimeText, err.Error())

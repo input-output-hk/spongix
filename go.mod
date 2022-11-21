@@ -7,7 +7,6 @@ require (
 	github.com/folbricht/desync v0.9.2
 	github.com/gorilla/handlers v1.5.1
 	github.com/gorilla/mux v1.8.0
-	github.com/hashicorp/go-uuid v1.0.1
 	github.com/jamespfennell/xz v0.1.3-0.20210418231708-010343b46672
 	github.com/kr/pretty v0.3.0
 	github.com/minio/minio-go/v6 v6.0.57

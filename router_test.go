@@ -3,7 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
-	"crypto/ed25519"
+	"math/rand"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -11,16 +11,21 @@ import (
 	"time"
 
 	"github.com/folbricht/desync"
-	"github.com/input-output-hk/spongix/pkg/narinfo"
+	"github.com/input-output-hk/spongix/pkg/config"
+	"github.com/nix-community/go-nix/pkg/narinfo"
+	"github.com/nix-community/go-nix/pkg/narinfo/signature"
 	"github.com/steinfletcher/apitest"
-	"go.uber.org/zap"
 )
 
 var (
-	testdata = map[string][]byte{}
-	fNar     = "/nar/0m8sd5qbmvfhyamwfv3af1ff18ykywf3zx5qwawhhp3jv1h777xz.nar"
-	fNarXz   = "/nar/0m8sd5qbmvfhyamwfv3af1ff18ykywf3zx5qwawhhp3jv1h777xz.nar.xz"
-	fNarinfo = "/8ckxc8biqqfdwyhr0w70jgrcb4h7a4y5.narinfo"
+	testdata      = map[string][]byte{}
+	fNar          = "/nar/0m8sd5qbmvfhyamwfv3af1ff18ykywf3zx5qwawhhp3jv1h777xz.nar"
+	fNarXz        = "/nar/0m8sd5qbmvfhyamwfv3af1ff18ykywf3zx5qwawhhp3jv1h777xz.nar.xz"
+	fNarinfo      = "/8ckxc8biqqfdwyhr0w70jgrcb4h7a4y5.narinfo"
+	testNamespace = "test"
+	nsNarinfo     = "/" + testNamespace + fNarinfo
+	nsNarXz       = "/" + testNamespace + fNarXz
+	nsNar         = "/" + testNamespace + fNar
 )
 
 func TestMain(m *testing.M) {
@@ -39,35 +44,32 @@ func TestMain(m *testing.M) {
 }
 
 func testProxy(t *testing.T) *Proxy {
-	proxy := NewProxy()
-	proxy.Substituters = []string{"http://example.com"}
+	proxy := NewProxy(&config.Config{
+		Dir: t.TempDir(),
+		Namespaces: map[string]config.Namespace{
+			testNamespace: {
+				Substituters:      []string{"http://example.com"},
+				TrustedPublicKeys: []string{"cache.nixos.org-1:6NCHdD59X431o0gWypbMrAURkbJ16ZPMQFGspcDShjY="},
+				CacheInfoPriority: 50,
+			},
+		},
+	})
 
-	indexDir := filepath.Join(t.TempDir(), "index")
-	if err := os.MkdirAll(filepath.Join(indexDir, "nar"), 0700); err != nil {
-		panic(err)
-	} else if proxy.localIndex, err = desync.NewLocalIndexStore(indexDir); err != nil {
-		panic(err)
-	}
-
-	storeDir := filepath.Join(t.TempDir(), "store")
-	if err := os.MkdirAll(storeDir, 0700); err != nil {
-		panic(err)
-	} else if proxy.localStore, err = desync.NewLocalStore(storeDir, defaultStoreOptions); err != nil {
-		panic(err)
-	}
+	proxy.setupDesync()
 
 	// proxy.s3Index = newFakeIndex()
 	// proxy.s3Store = newFakeStore()
-	proxy.Dir = t.TempDir()
-	proxy.TrustedPublicKeys = []string{"cache.nixos.org-1:6NCHdD59X431o0gWypbMrAURkbJ16ZPMQFGspcDShjY="}
-	proxy.setupKeys()
-	// NOTE: uncomment this line to enable logging
-	proxy.log = zap.NewNop()
+	// proxy.setupKeys()
+
+	// NOTE: comment the next line to enable logging
+	// proxy.log = zap.NewNop()
 	return proxy
 }
 
 func withS3(proxy *Proxy) *Proxy {
-	proxy.s3Index = newFakeIndex()
+	for namespace := range proxy.config.Namespaces {
+		proxy.s3Indices[namespace] = newFakeIndex()
+	}
 	proxy.s3Store = newFakeStore()
 	return proxy
 }
@@ -77,7 +79,7 @@ func TestRouterNixCacheInfo(t *testing.T) {
 
 	apitest.New().
 		Handler(proxy.router()).
-		Get("/nix-cache-info").
+		Get("/"+testNamespace+"/nix-cache-info").
 		Expect(t).
 		Header(headerContentType, mimeNixCacheInfo).
 		Body(`StoreDir: /nix/store
@@ -94,7 +96,7 @@ func TestRouterNarinfoHead(t *testing.T) {
 		apitest.New().
 			Handler(proxy.router()).
 			Method("HEAD").
-			URL(fNarinfo).
+			URL(nsNarinfo).
 			Expect(tt).
 			Header(headerCache, headerCacheMiss).
 			Header(headerContentType, mimeText).
@@ -116,7 +118,7 @@ func TestRouterNarinfoHead(t *testing.T) {
 			).
 			Handler(proxy.router()).
 			Method("HEAD").
-			URL(fNarinfo).
+			URL(nsNarinfo).
 			Expect(tt).
 			Header(headerCache, headerCacheRemote).
 			Header(headerCacheUpstream, "http://example.com"+fNarinfo).
@@ -128,12 +130,12 @@ func TestRouterNarinfoHead(t *testing.T) {
 
 	t.Run("found local", func(tt *testing.T) {
 		proxy := testProxy(tt)
-		insertFake(tt, proxy.localStore, proxy.localIndex, fNarinfo)
+		insertFake(tt, proxy.localStore, proxy.localIndices[testNamespace], fNarinfo)
 
 		apitest.New().
 			Handler(proxy.router()).
 			Method("HEAD").
-			URL(fNarinfo).
+			URL(nsNarinfo).
 			Expect(tt).
 			Header(headerCache, headerCacheHit).
 			Header(headerContentType, mimeNarinfo).
@@ -144,12 +146,12 @@ func TestRouterNarinfoHead(t *testing.T) {
 
 	t.Run("found s3", func(tt *testing.T) {
 		proxy := withS3(testProxy(tt))
-		insertFake(tt, proxy.s3Store, proxy.s3Index, fNarinfo)
+		insertFake(tt, proxy.s3Store, proxy.s3Indices[testNamespace], fNarinfo)
 
 		apitest.New().
 			Handler(proxy.router()).
 			Method("HEAD").
-			URL(fNarinfo).
+			URL(nsNarinfo).
 			Expect(tt).
 			Header(headerCache, headerCacheHit).
 			Header(headerContentType, mimeNarinfo).
@@ -166,7 +168,7 @@ func TestRouterNarHead(t *testing.T) {
 		apitest.New().
 			Mocks(
 				apitest.NewMock().
-					Head(fNar+".xz").
+					Head(fNarXz).
 					RespondWith().
 					Status(http.StatusNotFound).
 					End(),
@@ -177,7 +179,7 @@ func TestRouterNarHead(t *testing.T) {
 					End()).
 			Handler(proxy.router()).
 			Method("HEAD").
-			URL(fNar).
+			URL(nsNar).
 			Expect(tt).
 			Header(headerCache, headerCacheMiss).
 			Header(headerContentType, mimeText).
@@ -192,7 +194,7 @@ func TestRouterNarHead(t *testing.T) {
 		apitest.New().
 			Mocks(
 				apitest.NewMock().
-					Head(fNar+".xz").
+					Head(fNarXz).
 					RespondWith().
 					Status(http.StatusOK).
 					End(),
@@ -204,10 +206,10 @@ func TestRouterNarHead(t *testing.T) {
 			).
 			Handler(proxy.router()).
 			Method("HEAD").
-			URL(fNar).
+			URL(nsNar).
 			Expect(tt).
 			Header(headerCache, headerCacheRemote).
-			Header(headerCacheUpstream, "http://example.com"+fNar+".xz").
+			Header(headerCacheUpstream, "http://example.com"+fNarXz).
 			Header(headerContentType, mimeNar).
 			Body(``).
 			Status(http.StatusOK).
@@ -216,12 +218,12 @@ func TestRouterNarHead(t *testing.T) {
 
 	t.Run("found local", func(tt *testing.T) {
 		proxy := testProxy(tt)
-		insertFake(tt, proxy.localStore, proxy.localIndex, fNar)
+		insertFake(tt, proxy.localStore, proxy.localIndices[testNamespace], fNar)
 
 		apitest.New().
 			Handler(proxy.router()).
 			Method("HEAD").
-			URL(fNar).
+			URL(nsNar).
 			Expect(tt).
 			Header(headerCache, headerCacheHit).
 			Header(headerContentType, mimeNar).
@@ -232,7 +234,7 @@ func TestRouterNarHead(t *testing.T) {
 
 	t.Run("found s3", func(tt *testing.T) {
 		proxy := withS3(testProxy(tt))
-		insertFake(tt, proxy.s3Store, proxy.s3Index, fNar)
+		insertFake(tt, proxy.s3Store, proxy.s3Indices[testNamespace], fNar)
 
 		apitest.New().
 			Mocks(
@@ -242,9 +244,16 @@ func TestRouterNarHead(t *testing.T) {
 					Status(http.StatusNotFound).
 					End(),
 			).
+			Mocks(
+				apitest.NewMock().
+					Head(fNarXz).
+					RespondWith().
+					Status(http.StatusNotFound).
+					End(),
+			).
 			Handler(proxy.router()).
 			Method("HEAD").
-			URL(fNar).
+			URL(nsNar).
 			Expect(tt).
 			Header(headerCache, headerCacheHit).
 			Header(headerContentType, mimeNar).
@@ -261,7 +270,7 @@ func TestRouterNarGet(t *testing.T) {
 		apitest.New().
 			Mocks(
 				apitest.NewMock().
-					Get(fNar+".xz").
+					Get(fNarXz).
 					RespondWith().
 					Status(http.StatusNotFound).
 					End(),
@@ -273,7 +282,7 @@ func TestRouterNarGet(t *testing.T) {
 			).
 			Handler(proxy.router()).
 			Method("GET").
-			URL(fNar).
+			URL(nsNar).
 			Expect(tt).
 			Header(headerCache, headerCacheMiss).
 			Header(headerContentType, mimeText).
@@ -288,7 +297,7 @@ func TestRouterNarGet(t *testing.T) {
 		apitest.New().
 			Mocks(
 				apitest.NewMock().
-					Get(fNar+".xz").
+					Get(fNarXz).
 					RespondWith().
 					Body(string(testdata[fNarXz])).
 					Status(http.StatusOK).
@@ -301,10 +310,10 @@ func TestRouterNarGet(t *testing.T) {
 			).
 			Handler(proxy.router()).
 			Method("GET").
-			URL(fNar).
+			URL(nsNar).
 			Expect(tt).
 			Header(headerCache, headerCacheRemote).
-			Header(headerCacheUpstream, "http://example.com"+fNar+".xz").
+			Header(headerCacheUpstream, "http://example.com"+fNarXz).
 			Header(headerContentType, mimeNar).
 			Body(string(testdata[fNar])).
 			Status(http.StatusOK).
@@ -330,10 +339,10 @@ func TestRouterNarGet(t *testing.T) {
 			).
 			Handler(proxy.router()).
 			Method("GET").
-			URL(fNarXz).
+			URL(nsNarXz).
 			Expect(tt).
 			Header(headerCache, headerCacheRemote).
-			Header(headerCacheUpstream, "http://example.com"+fNar+".xz").
+			Header(headerCacheUpstream, "http://example.com"+fNarXz).
 			Header(headerContentType, mimeNar).
 			Body(string(testdata[fNarXz])).
 			Status(http.StatusOK).
@@ -342,12 +351,12 @@ func TestRouterNarGet(t *testing.T) {
 
 	t.Run("found local", func(tt *testing.T) {
 		proxy := testProxy(tt)
-		insertFake(tt, proxy.localStore, proxy.localIndex, fNar)
+		insertFake(tt, proxy.localStore, proxy.localIndices[testNamespace], fNar)
 
 		apitest.New().
 			Handler(proxy.router()).
 			Method("GET").
-			URL(fNar).
+			URL(nsNar).
 			Expect(tt).
 			Header(headerCache, headerCacheHit).
 			Header(headerContentType, mimeNar).
@@ -358,12 +367,12 @@ func TestRouterNarGet(t *testing.T) {
 
 	t.Run("found s3", func(tt *testing.T) {
 		proxy := withS3(testProxy(tt))
-		insertFake(tt, proxy.s3Store, proxy.s3Index, fNar)
+		insertFake(tt, proxy.s3Store, proxy.s3Indices[testNamespace], fNar)
 
 		apitest.New().
 			Handler(proxy.router()).
 			Method("GET").
-			URL(fNar).
+			URL(nsNar).
 			Expect(tt).
 			Header(headerCache, headerCacheHit).
 			Header(headerContentType, mimeNar).
@@ -380,7 +389,7 @@ func TestRouterNarinfoGet(t *testing.T) {
 		apitest.New().
 			Handler(proxy.router()).
 			Method("GET").
-			URL(fNarinfo).
+			URL(nsNarinfo).
 			Expect(tt).
 			Header(headerCache, headerCacheMiss).
 			Header(headerContentType, mimeText).
@@ -391,12 +400,12 @@ func TestRouterNarinfoGet(t *testing.T) {
 
 	t.Run("found local", func(tt *testing.T) {
 		proxy := testProxy(tt)
-		insertFake(tt, proxy.localStore, proxy.localIndex, fNarinfo)
+		insertFake(tt, proxy.localStore, proxy.localIndices[testNamespace], fNarinfo)
 
 		apitest.New().
 			Handler(proxy.router()).
 			Method("GET").
-			URL(fNarinfo).
+			URL(nsNarinfo).
 			Expect(tt).
 			Header(headerCache, headerCacheHit).
 			Header(headerContentType, mimeNarinfo).
@@ -407,12 +416,12 @@ func TestRouterNarinfoGet(t *testing.T) {
 
 	t.Run("found s3", func(tt *testing.T) {
 		proxy := withS3(testProxy(tt))
-		insertFake(tt, proxy.s3Store, proxy.s3Index, fNarinfo)
+		insertFake(tt, proxy.s3Store, proxy.s3Indices[testNamespace], fNarinfo)
 
 		apitest.New().
 			Handler(proxy.router()).
 			Method("GET").
-			URL(fNarinfo).
+			URL(nsNarinfo).
 			Expect(tt).
 			Header(headerCache, headerCacheHit).
 			Header(headerContentType, mimeNarinfo).
@@ -437,7 +446,7 @@ func TestRouterNarinfoGet(t *testing.T) {
 			).
 			Handler(proxy.router()).
 			Method("GET").
-			URL(fNarinfo).
+			URL(nsNarinfo).
 			Expect(tt).
 			Header(headerCache, headerCacheRemote).
 			Header(headerCacheUpstream, "http://example.com"+fNarinfo).
@@ -473,7 +482,7 @@ func TestRouterNarinfoGet(t *testing.T) {
 			).
 			Handler(proxy.router()).
 			Method("GET").
-			URL(fNarinfo).
+			URL(nsNarinfo).
 			Expect(tt).
 			Header(headerCache, headerCacheRemote).
 			Header(headerCacheUpstream, "http://example.com"+fNarinfo).
@@ -489,7 +498,7 @@ func TestRouterNarinfoGet(t *testing.T) {
 		apitest.New().
 			Handler(proxy.router()).
 			Method("GET").
-			URL(fNarinfo).
+			URL(nsNarinfo).
 			Expect(tt).
 			Header(headerCache, headerCacheHit).
 			Header(headerContentType, mimeNarinfo).
@@ -506,7 +515,7 @@ func TestRouterNarinfoPut(t *testing.T) {
 		apitest.New().
 			Handler(proxy.router()).
 			Method("PUT").
-			URL(fNarinfo).
+			URL(nsNarinfo).
 			Body(string(testdata[fNarinfo])).
 			Expect(tt).
 			Header(headerContentType, mimeText).
@@ -517,7 +526,7 @@ func TestRouterNarinfoPut(t *testing.T) {
 		apitest.New().
 			Handler(proxy.router()).
 			Method("GET").
-			URL(fNarinfo).
+			URL(nsNarinfo).
 			Expect(tt).
 			Header(headerContentType, mimeNarinfo).
 			Header(headerCache, headerCacheHit).
@@ -532,11 +541,11 @@ func TestRouterNarinfoPut(t *testing.T) {
 		apitest.New().
 			Handler(proxy.router()).
 			Method("PUT").
-			URL(fNarinfo).
+			URL(nsNarinfo).
 			Body("blah").
 			Expect(tt).
 			Header(headerContentType, mimeText).
-			Body(`Failed to parse line: "blah"`).
+			Body(`unable to find separator ': ' in blah`).
 			Status(http.StatusBadRequest).
 			End()
 	})
@@ -547,60 +556,63 @@ func TestRouterNarinfoPut(t *testing.T) {
 		apitest.New().
 			Handler(proxy.router()).
 			Method("PUT").
-			URL(fNarinfo).
+			URL(nsNarinfo).
 			Body("blah").
 			Expect(tt).
 			Header(headerContentType, mimeText).
-			Body(`Failed to parse line: "blah"`).
+			Body(`unable to find separator ': ' in blah`).
 			Status(http.StatusBadRequest).
 			End()
 	})
 
 	t.Run("signs unsigned narinfos", func(tt *testing.T) {
+		rng := rand.New(rand.NewSource(42))
 		proxy := testProxy(tt)
 
-		seed := make([]byte, ed25519.SeedSize)
-		proxy.secretKeys["foo"] = ed25519.NewKeyFromSeed(seed)
+		sec, pub, err := signature.GenerateKeypair("test", rng)
+		if err != nil {
+			tt.Fatal(err)
+		}
 
-		emptyInfo := &narinfo.Narinfo{}
-		if err := emptyInfo.Unmarshal(bytes.NewReader(testdata[fNarinfo])); err != nil {
+		proxy.secretKeys[testNamespace] = sec
+		_ = pub
+
+		emptyInfo, err := narinfo.Parse(bytes.NewReader(testdata[fNarinfo]))
+		if err != nil {
 			tt.Fatal(err)
 		}
-		emptyInfo.Sig = []string{}
-		empty := &bytes.Buffer{}
-		if err := emptyInfo.Marshal(empty); err != nil {
-			tt.Fatal(err)
-		}
+		emptyInfo.Signatures = []signature.Signature{}
+		empty := emptyInfo.String()
 
 		apitest.New().
 			Handler(proxy.router()).
 			Method("PUT").
-			URL(fNarinfo).
-			Body(empty.String()).
+			URL(nsNarinfo).
+			Body(empty).
 			Expect(tt).
 			Header(headerContentType, mimeText).
 			Body("ok\n").
 			Status(http.StatusOK).
 			End()
 
-		expectInfo := &narinfo.Narinfo{}
-		if err := expectInfo.Unmarshal(bytes.NewReader(testdata[fNarinfo])); err != nil {
+		expectInfo, err := narinfo.Parse(bytes.NewReader(testdata[fNarinfo]))
+		if err != nil {
 			tt.Fatal(err)
 		}
-		expectInfo.Sig = []string{"foo:MGrENumWZ1kbm23vCTyYrw6hRBJtLGIIpfHjpZszs2D1G1AALMKvl49T66WIhx2X02s8n/zsfUPpga2bL6PmBQ=="}
-		expect := &bytes.Buffer{}
-		if err := expectInfo.Marshal(expect); err != nil {
+		sig, err := sec.Sign(rng, emptyInfo.Fingerprint())
+		if err != nil {
 			tt.Fatal(err)
 		}
+		expectInfo.Signatures = []signature.Signature{sig}
 
 		apitest.New().
 			Handler(proxy.router()).
 			Method("GET").
-			URL(fNarinfo).
+			URL(nsNarinfo).
 			Expect(tt).
 			Header(headerCache, headerCacheHit).
 			Header(headerContentType, mimeNarinfo).
-			Body(expect.String()).
+			Body(expectInfo.String()).
 			Status(http.StatusOK).
 			End()
 	})
@@ -613,7 +625,7 @@ func TestRouterNarPut(t *testing.T) {
 		apitest.New().
 			Handler(proxy.router()).
 			Method("PUT").
-			URL(fNar).
+			URL(nsNar).
 			Body(string(testdata[fNar])).
 			Expect(tt).
 			Header(headerContentType, mimeText).
@@ -624,7 +636,7 @@ func TestRouterNarPut(t *testing.T) {
 		apitest.New().
 			Handler(proxy.router()).
 			Method("GET").
-			URL(fNar).
+			URL(nsNar).
 			Expect(tt).
 			Header(headerContentType, mimeNar).
 			Header(headerCache, headerCacheHit).
@@ -639,7 +651,7 @@ func TestRouterNarPut(t *testing.T) {
 		apitest.New().
 			Handler(proxy.router()).
 			Method("PUT").
-			URL(fNarXz).
+			URL(nsNarXz).
 			Body(string(testdata[fNarXz])).
 			Expect(tt).
 			Header(headerContentType, mimeText).
@@ -650,33 +662,7 @@ func TestRouterNarPut(t *testing.T) {
 		apitest.New().
 			Handler(proxy.router()).
 			Method("GET").
-			URL(fNar).
-			Expect(tt).
-			Header(headerContentType, mimeNar).
-			Header(headerCache, headerCacheHit).
-			Body(string(testdata[fNar])).
-			Status(http.StatusOK).
-			End()
-	})
-
-	t.Run("upload xz to /cache success", func(tt *testing.T) {
-		proxy := withS3(testProxy(tt))
-
-		apitest.New().
-			Handler(proxy.router()).
-			Method("PUT").
-			URL("/cache"+fNarXz).
-			Body(string(testdata[fNarXz])).
-			Expect(tt).
-			Header(headerContentType, mimeText).
-			Body("ok\n").
-			Status(http.StatusOK).
-			End()
-
-		apitest.New().
-			Handler(proxy.router()).
-			Method("GET").
-			URL(fNar).
+			URL(nsNar).
 			Expect(tt).
 			Header(headerContentType, mimeNar).
 			Header(headerCache, headerCacheHit).

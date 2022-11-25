@@ -435,7 +435,7 @@ func (gc *GC) gcOnce(cacheStat map[string]*chunkStat) {
 	// time.Sleep(10 * time.Minute)
 	deadIndices.Range(func(key, value interface{}) bool {
 		path := key.(string)
-		log.Info("moving index to trash", zap.String("path", path))
+		log.Info("deleting index", zap.String("path", path))
 		_ = os.Remove(path)
 		deadIndexCount++
 		return true

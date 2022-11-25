@@ -5,7 +5,7 @@ import (
 	"io"
 
 	"github.com/folbricht/desync"
-	"github.com/input-output-hk/spongix/pkg/narinfo"
+	"github.com/nix-community/go-nix/pkg/narinfo"
 	"github.com/pkg/errors"
 )
 
@@ -63,11 +63,10 @@ func Assemble(store desync.Store, index desync.Index) io.ReadCloser {
 	return NewAssembler(store, index)
 }
 
-func AssembleNarinfo(store desync.Store, index desync.Index) (*narinfo.Narinfo, error) {
+func AssembleNarinfo(store desync.Store, index desync.Index) (*narinfo.NarInfo, error) {
 	buf := Assemble(store, index)
 
-	info := &narinfo.Narinfo{}
-	err := info.Unmarshal(buf)
+	info, err := narinfo.Parse(buf)
 	if err != nil {
 		return info, errors.WithMessage(err, "while unmarshaling narinfo")
 	}

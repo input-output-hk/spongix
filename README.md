@@ -49,6 +49,20 @@ Set a `post-build-hook` in your nix configuration to a script like this:
 
 ## TODO
 
+- [ ] Support more compression algorithms
+  - [ ] bzip2
+  - [ ] compress
+  - [ ] grzip
+  - [ ] gzip
+  - [ ] lrzip
+  - [ ] lz4
+  - [ ] lzip
+  - [ ] lzma
+  - [ ] lzop
+  - [x] none
+  - [x] xz
+  - [x] brotli
+  - [ ] zstd
 - [ ] Write better integration tests (with cicero)
 - [ ] Healthchecks
 - [ ] A way to horizontally scale (probably by just locking via consul, s3, raft, postgres, rqlite, dqlite, ...)

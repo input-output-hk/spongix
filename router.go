@@ -46,6 +46,14 @@ func (proxy *Proxy) router() *mux.Router {
 			withRemoteHandler(proxy.log, ns.Substituters, []string{"", ".xz"}, proxy.cacheChan),
 		)
 		nar.Methods("HEAD", "GET", "PUT").HandlerFunc(serveNotFound)
+
+		realisation := r.Name("realisation").Path(prefix + "/realisation/{hash:sha256:[0-9a-df-np-sv-z]{52}}{ext:\\.nar(?:\\.xz|)}").Subrouter()
+		realisation.Use(
+			proxy.withLocalCacheHandler(namespace),
+			proxy.withS3CacheHandler(namespace),
+			withRemoteHandler(proxy.log, ns.Substituters, []string{""}, proxy.cacheChan),
+		)
+		realisation.Methods("HEAD", "GET", "PUT").HandlerFunc(serveNotFound)
 	}
 
 	return r

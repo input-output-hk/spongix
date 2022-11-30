@@ -51,10 +51,6 @@ func getIndex(index desync.IndexStore, r *http.Request) (i desync.Index, err err
 	return index.GetIndex(urlToIndexName(r))
 }
 
-func storeIndex(index desync.IndexWriteStore, r *http.Request, idx desync.Index) error {
-	return index.StoreIndex(urlToIndexName(r), idx)
-}
-
 func urlToIndexName(r *http.Request) string {
 	vars := mux.Vars(r)
 	if vars["ext"] == ".narinfo" {

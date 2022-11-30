@@ -16,6 +16,7 @@ import (
 	"github.com/alexflint/go-arg"
 	"github.com/folbricht/desync"
 	"github.com/input-output-hk/spongix/pkg/assembler"
+	"github.com/input-output-hk/spongix/pkg/logger"
 	"github.com/numtide/go-nix/nar"
 	"github.com/pascaldekloe/metrics"
 	"github.com/pkg/errors"
@@ -84,34 +85,10 @@ func newGC() *GC {
 }
 
 func (gc *GC) setupLogger() {
-	lvl := zap.NewAtomicLevel()
-	if err := lvl.UnmarshalText([]byte(gc.LogLevel)); err != nil {
+	if log, err := logger.SetupLogger(gc.LogMode, gc.LogLevel); err != nil {
 		panic(err)
-	}
-	development := gc.LogMode == "development"
-	encoding := "json"
-	encoderConfig := zap.NewProductionEncoderConfig()
-	if development {
-		encoding = "console"
-		encoderConfig = zap.NewDevelopmentEncoderConfig()
-	}
-
-	l := zap.Config{
-		Level:             lvl,
-		Development:       development,
-		DisableCaller:     false,
-		DisableStacktrace: false,
-		Sampling:          &zap.SamplingConfig{Initial: 1, Thereafter: 2},
-		Encoding:          encoding,
-		EncoderConfig:     encoderConfig,
-		OutputPaths:       []string{"stderr"},
-		ErrorOutputPaths:  []string{"stderr"},
-	}
-
-	var err error
-	gc.log, err = l.Build()
-	if err != nil {
-		panic(err)
+	} else {
+		gc.log = log
 	}
 }
 

@@ -14,6 +14,7 @@ import (
 	"github.com/alexflint/go-arg"
 	"github.com/folbricht/desync"
 	"github.com/input-output-hk/spongix/pkg/config"
+	"github.com/input-output-hk/spongix/pkg/logger"
 	"github.com/minio/minio-go/v6"
 	"github.com/minio/minio-go/v6/pkg/credentials"
 	"github.com/nix-community/go-nix/pkg/narinfo/signature"
@@ -206,11 +207,13 @@ func (proxy *Proxy) setupS3() {
 
 func (proxy *Proxy) setupKeys() {
 	for namespace, ns := range proxy.config.Namespaces {
-		secretKey, err := signature.LoadSecretKey(ns.SecretKeyFile)
-		if err != nil {
+		if content, err := os.ReadFile(ns.SecretKeyFile); err != nil {
+			proxy.log.Fatal("failed reading private key file", zap.Error(err), zap.String("file", ns.SecretKeyFile))
+		} else if secretKey, err := signature.LoadSecretKey(string(content)); err != nil {
 			proxy.log.Fatal("failed loading private keys", zap.Error(err), zap.String("file", ns.SecretKeyFile))
+		} else {
+			proxy.secretKeys[namespace] = secretKey
 		}
-		proxy.secretKeys[namespace] = secretKey
 
 		proxy.trustedKeys[namespace] = make([]signature.PublicKey, len(ns.TrustedPublicKeys))
 		for _, trustedKeySource := range ns.TrustedPublicKeys {
@@ -254,33 +257,9 @@ func (proxy *Proxy) setupDesync() {
 }
 
 func (proxy *Proxy) setupLogger() {
-	lvl := zap.NewAtomicLevel()
-	if err := lvl.UnmarshalText([]byte(proxy.config.LogLevel)); err != nil {
+	if log, err := logger.SetupLogger(proxy.config.LogMode, proxy.config.LogLevel); err != nil {
 		panic(err)
-	}
-	development := proxy.config.LogMode == "development"
-	encoding := "json"
-	encoderConfig := zap.NewProductionEncoderConfig()
-	if development {
-		encoding = "console"
-		encoderConfig = zap.NewDevelopmentEncoderConfig()
-	}
-
-	l := zap.Config{
-		Level:             lvl,
-		Development:       development,
-		DisableCaller:     false,
-		DisableStacktrace: false,
-		Sampling:          &zap.SamplingConfig{Initial: 1, Thereafter: 2},
-		Encoding:          encoding,
-		EncoderConfig:     encoderConfig,
-		OutputPaths:       []string{"stderr"},
-		ErrorOutputPaths:  []string{"stderr"},
-	}
-
-	var err error
-	proxy.log, err = l.Build()
-	if err != nil {
-		panic(err)
+	} else {
+		proxy.log = log
 	}
 }

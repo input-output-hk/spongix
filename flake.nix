@@ -81,7 +81,10 @@
         test = callPackage ./test.nix {inherit inputs;};
       };
 
-      nixosModules.spongix = import ./module.nix;
+      nixosModules = {
+        spongix = import ./modules/spongix.nix;
+        nar-proxy = import ./modules/nar-proxy.nix;
+      };
 
       devShell = {devshell}: devshell.fromTOML ./devshell.toml;
 

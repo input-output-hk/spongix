@@ -4,17 +4,19 @@ go 1.18
 
 require (
 	github.com/alexflint/go-arg v1.4.2
+	github.com/andybalholm/brotli v1.0.4
 	github.com/folbricht/desync v0.9.2
 	github.com/gorilla/handlers v1.5.1
 	github.com/gorilla/mux v1.8.0
 	github.com/jamespfennell/xz v0.1.3-0.20210418231708-010343b46672
+	github.com/klauspost/compress v1.12.3
 	github.com/kr/pretty v0.3.0
 	github.com/minio/minio-go/v6 v6.0.57
 	github.com/nix-community/go-nix v0.0.0-20220906172053-6b0185c1190b
 	github.com/numtide/go-nix v0.0.0-20211215191921-37a8ad2f9e4f
 	github.com/pascaldekloe/metrics v1.3.0
 	github.com/pkg/errors v0.9.1
-	github.com/smartystreets/assertions v0.0.0-20180927180507-b2de0cb4f26d
+	github.com/smartystreets/assertions v1.2.0
 	github.com/steinfletcher/apitest v1.5.11
 	go.uber.org/zap v1.10.0
 )
@@ -37,7 +39,6 @@ require (
 	github.com/hanwen/go-fuse/v2 v2.0.3 // indirect
 	github.com/json-iterator/go v1.1.9 // indirect
 	github.com/jstemmer/go-junit-report v0.9.1 // indirect
-	github.com/klauspost/compress v1.12.3 // indirect
 	github.com/klauspost/cpuid v1.2.3 // indirect
 	github.com/klauspost/cpuid/v2 v2.0.9 // indirect
 	github.com/kr/fs v0.1.0 // indirect
@@ -55,6 +56,7 @@ require (
 	github.com/pmezard/go-difflib v1.0.0 // indirect
 	github.com/rogpeppe/go-internal v1.6.1 // indirect
 	github.com/sirupsen/logrus v1.7.0 // indirect
+	github.com/smartystreets/goconvey v1.7.2 // indirect
 	github.com/spaolacci/murmur3 v1.1.0 // indirect
 	github.com/stretchr/testify v1.7.0 // indirect
 	go.opencensus.io v0.22.5 // indirect

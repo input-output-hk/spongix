@@ -5,11 +5,12 @@
   inclusive,
   rev,
 }: let
-  final = package "sha256-7HBILEx8nmxwlOCNU7lVovRfutwGb62x0wkP0cot5p0=";
+  # TODO: split into multiple packages for each command.
+  final = package "sha256-o2DiTC2sRZ33LY+hfH9tfFwkzi+JySS6+d/ibBdl6q0=";
   package = vendorSha256:
     buildGo118Module rec {
       pname = "spongix";
-      version = "2022.11.21.001";
+      version = "2022.11.30.001";
       inherit vendorSha256;
 
       passthru.invalidHash =

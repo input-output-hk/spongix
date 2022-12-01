@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"math/rand"
 	"net/http"
 	"os"
@@ -15,6 +16,7 @@ import (
 	"github.com/nix-community/go-nix/pkg/narinfo"
 	"github.com/nix-community/go-nix/pkg/narinfo/signature"
 	"github.com/steinfletcher/apitest"
+	"gotest.tools/assert"
 )
 
 var (
@@ -31,9 +33,11 @@ var (
 )
 
 func TestMain(m *testing.M) {
-	for _, name := range []string{
-		fNar, fNarXz, fNarinfo,
-	} {
+	fixtures := []string{
+		fNar, fNarXz, fNarinfo, fRealisation,
+	}
+
+	for _, name := range fixtures {
 		content, err := os.ReadFile(filepath.Join("testdata", filepath.Base(name)))
 		if err != nil {
 			panic(err)
@@ -696,10 +700,31 @@ func TestRouterRealisationPut(t *testing.T) {
 			Expect(tt).
 			Header(headerContentType, mimeJson).
 			Header(headerCache, headerCacheHit).
-			Body(string(testdata[fRealisation])).
 			Status(http.StatusOK).
+			Assert(jsonMatches(tt, testdata[fRealisation])).
 			End()
 	})
+}
+
+func jsonMatches(t *testing.T, expected []byte) func(*http.Response, *http.Request) error {
+	return func(w *http.Response, r *http.Request) error {
+		expectedMap := map[string]interface{}{}
+		if err := json.Unmarshal(expected, &expectedMap); err != nil {
+			return err
+		}
+
+		actualMap := map[string]interface{}{}
+		dec := json.NewDecoder(r.Body)
+		if err := dec.Decode(&actualMap); err != nil {
+			return err
+		}
+
+		pp(expectedMap, actualMap)
+
+		assert.DeepEqual(t, expectedMap, actualMap)
+
+		return nil
+	}
 }
 
 func insertFake(

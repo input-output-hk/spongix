@@ -1,7 +1,9 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -100,8 +102,6 @@ type cacheHandler struct {
 }
 
 func (c cacheHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	pp(r.URL.EscapedPath())
-
 	switch r.Method {
 	case "HEAD":
 		c.Head(w, r)
@@ -173,19 +173,29 @@ func (c cacheHandler) Put(w http.ResponseWriter, r *http.Request) {
 			c.log.Error("unmarshaling narinfo", zap.Error(err))
 			answer(w, http.StatusBadRequest, mimeText, err.Error())
 		} else if err := c.signUnsignedNarinfo(info); err != nil {
-			c.log.Error("failed serializing narinfo", zap.Error(err))
-			answer(w, http.StatusInternalServerError, mimeText, "failed serializing narinfo")
+			c.log.Error("failed signing narinfo", zap.Error(err))
+			answer(w, http.StatusInternalServerError, mimeText, "failed signing narinfo")
 		} else {
+			narExt := filepath.Ext(info.URL)
+			if narExt != ".nar" {
+				info.URL = strings.TrimSuffix(info.URL, narExt)
+			}
 			info.Compression = "none"
 			c.putCommon(w, r, strings.NewReader(info.String()))
 		}
 	case ".doi":
-		c.putCommon(w, r, r.Body)
-		// TODO: validate, and avoid chunk storage...
-		// {"dependentRealisations":{},
-		// "id":"sha256:08774c781e1ec069012f193f196d9535b4d5cae5a5614280426a808ea3793b49!out",
-		// "outPath":"g2m8kfw7kpgpph05v2fxcx4d5an09hl3-hello-2.12.1",
-		// "signatures":[]}
+		rs := realisation{}
+		dec := json.NewDecoder(r.Body)
+		if err := dec.Decode(&rs); err != nil {
+			c.log.Error("failed decoding realisation", zap.Error(err))
+			answer(w, http.StatusInternalServerError, mimeText, "failed decoding realisation")
+		} else if enc, err := json.Marshal(rs); err != nil {
+			c.log.Error("failed encoding realisation", zap.Error(err))
+			answer(w, http.StatusInternalServerError, mimeText, "failed encoding realisation")
+		} else {
+			pp(rs)
+			c.putCommon(w, r, bytes.NewReader(enc))
+		}
 	case ".nar":
 		c.putCommon(w, r, r.Body)
 	case ".xz":
@@ -195,6 +205,13 @@ func (c cacheHandler) Put(w http.ResponseWriter, r *http.Request) {
 	default:
 		answer(w, http.StatusBadRequest, mimeText, "compression is not supported\n")
 	}
+}
+
+type realisation struct {
+	DependentRealisations map[string]string `json:"dependentRealisations"`
+	ID                    string            `json:"id"`
+	OutPath               string            `json:"outPath"`
+	Signatures            []string
 }
 
 func (c cacheHandler) signUnsignedNarinfo(info *narinfo.NarInfo) error {

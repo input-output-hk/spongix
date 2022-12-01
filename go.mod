@@ -19,6 +19,7 @@ require (
 	github.com/smartystreets/assertions v1.2.0
 	github.com/steinfletcher/apitest v1.5.11
 	go.uber.org/zap v1.10.0
+	gotest.tools v2.2.0+incompatible
 )
 
 require (

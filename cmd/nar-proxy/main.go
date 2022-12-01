@@ -133,7 +133,7 @@ func (np *NarProxy) narHandler(w http.ResponseWriter, r *http.Request) {
 		}
 	default:
 		w.WriteHeader(http.StatusInternalServerError)
-		_, _ = io.WriteString(w, "unknown NAR compression: '"+narinfo.Compression+"'")
+		_, _ = fmt.Fprintf(w, "unknown NAR compression: '%s'", narinfo.Compression)
 		return
 	}
 

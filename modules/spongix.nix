@@ -266,7 +266,6 @@ in {
       wantedBy = ["timers.target"];
       timerConfig = {
         Persistent = true;
-        OnCalendar = cfg.gc.interval;
         Unit = "spongix-gc.service";
       };
     };
@@ -283,6 +282,7 @@ in {
         LOG_MODE = cfg.gc.logMode;
       };
 
+      startAt = cfg.gc.interval;
       serviceConfig = {
         ExecStart = "${cfg.package}/bin/gc";
         Type = "oneshot";

@@ -14,6 +14,7 @@ const (
 	mimeNar          = "application/x-nix-nar"
 	mimeText         = "text/plain"
 	mimeNixCacheInfo = "text/x-nix-cache-info"
+	mimeJson         = "application/json"
 )
 
 func (proxy *Proxy) router() *mux.Router {
@@ -31,7 +32,7 @@ func (proxy *Proxy) router() *mux.Router {
 		prefix := "/{namespace:" + namespace + "}"
 		r.HandleFunc(prefix+"/nix-cache-info", proxy.nixCacheInfo).Methods("GET")
 
-		narinfo := r.Name("narinfo").Path(prefix + "/{hash:[0-9a-df-np-sv-z]{32}}{ext:.narinfo}").Subrouter()
+		narinfo := r.Name("narinfo").Path(prefix + "/{hash:[0-9a-df-np-sv-z]{32}}{ext:\\.narinfo}").Subrouter()
 		narinfo.Use(
 			proxy.withLocalCacheHandler(namespace),
 			proxy.withS3CacheHandler(namespace),
@@ -47,13 +48,13 @@ func (proxy *Proxy) router() *mux.Router {
 		)
 		nar.Methods("HEAD", "GET", "PUT").HandlerFunc(serveNotFound)
 
-		realisation := r.Name("realisation").Path(prefix + "/realisation/{hash:sha256:[0-9a-df-np-sv-z]{52}}{ext:\\.nar(?:\\.xz|)}").Subrouter()
-		realisation.Use(
+		realisations := r.Name("realisations").Path(prefix + "/realisations/sha256:{hash:[0-9a-f]{64}}!{output:[^.]+}{ext:\\.doi}").Subrouter()
+		realisations.Use(
 			proxy.withLocalCacheHandler(namespace),
 			proxy.withS3CacheHandler(namespace),
 			withRemoteHandler(proxy.log, ns.Substituters, []string{""}, proxy.cacheChan),
 		)
-		realisation.Methods("HEAD", "GET", "PUT").HandlerFunc(serveNotFound)
+		realisations.Methods("HEAD", "GET", "PUT").HandlerFunc(serveNotFound)
 	}
 
 	return r

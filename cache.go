@@ -42,6 +42,8 @@ func urlToMime(u string) string {
 		return mimeNar
 	case ".narinfo":
 		return mimeNarinfo
+	case ".doi":
+		return mimeJson
 	default:
 		return mimeText
 	}
@@ -53,20 +55,14 @@ func getIndex(index desync.IndexStore, r *http.Request) (i desync.Index, err err
 
 func urlToIndexName(r *http.Request) string {
 	vars := mux.Vars(r)
-	if vars["ext"] == ".narinfo" {
+	switch vars["ext"] {
+	case ".narinfo":
 		return vars["hash"] + vars["ext"]
-	} else {
+	case ".doi":
+		return vars["hash"] + "!" + vars["output"] + vars["ext"]
+	default:
 		return narSuffix.ReplaceAllLiteralString("nar/"+vars["hash"]+vars["ext"], ".nar")
 	}
-}
-
-type cacheHandler struct {
-	log         *zap.Logger
-	handler     http.Handler
-	store       desync.WriteStore
-	index       desync.IndexWriteStore
-	trustedKeys []signature.PublicKey
-	secretKey   signature.SecretKey
 }
 
 func withCacheHandler(
@@ -94,7 +90,18 @@ func withCacheHandler(
 	}
 }
 
+type cacheHandler struct {
+	log         *zap.Logger
+	handler     http.Handler
+	store       desync.WriteStore
+	index       desync.IndexWriteStore
+	trustedKeys []signature.PublicKey
+	secretKey   signature.SecretKey
+}
+
 func (c cacheHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	pp(r.URL.EscapedPath())
+
 	switch r.Method {
 	case "HEAD":
 		c.Head(w, r)
@@ -169,8 +176,16 @@ func (c cacheHandler) Put(w http.ResponseWriter, r *http.Request) {
 			c.log.Error("failed serializing narinfo", zap.Error(err))
 			answer(w, http.StatusInternalServerError, mimeText, "failed serializing narinfo")
 		} else {
+			info.Compression = "none"
 			c.putCommon(w, r, strings.NewReader(info.String()))
 		}
+	case ".doi":
+		c.putCommon(w, r, r.Body)
+		// TODO: validate, and avoid chunk storage...
+		// {"dependentRealisations":{},
+		// "id":"sha256:08774c781e1ec069012f193f196d9535b4d5cae5a5614280426a808ea3793b49!out",
+		// "outPath":"g2m8kfw7kpgpph05v2fxcx4d5an09hl3-hello-2.12.1",
+		// "signatures":[]}
 	case ".nar":
 		c.putCommon(w, r, r.Body)
 	case ".xz":

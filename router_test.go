@@ -22,10 +22,12 @@ var (
 	fNar          = "/nar/0m8sd5qbmvfhyamwfv3af1ff18ykywf3zx5qwawhhp3jv1h777xz.nar"
 	fNarXz        = "/nar/0m8sd5qbmvfhyamwfv3af1ff18ykywf3zx5qwawhhp3jv1h777xz.nar.xz"
 	fNarinfo      = "/8ckxc8biqqfdwyhr0w70jgrcb4h7a4y5.narinfo"
+	fRealisation  = "/realisations/sha256:b95e6ccddcbc1df53705c1d66e96e6afd19f2629885755e98972e9b95d18cfa8!out.doi"
 	testNamespace = "test"
 	nsNarinfo     = "/" + testNamespace + fNarinfo
 	nsNarXz       = "/" + testNamespace + fNarXz
 	nsNar         = "/" + testNamespace + fNar
+	nsRealisation = "/" + testNamespace + fRealisation
 )
 
 func TestMain(m *testing.M) {
@@ -667,6 +669,34 @@ func TestRouterNarPut(t *testing.T) {
 			Header(headerContentType, mimeNar).
 			Header(headerCache, headerCacheHit).
 			Body(string(testdata[fNar])).
+			Status(http.StatusOK).
+			End()
+	})
+}
+
+func TestRouterRealisationPut(t *testing.T) {
+	t.Run("upload success", func(tt *testing.T) {
+		proxy := withS3(testProxy(tt))
+
+		apitest.New().
+			Handler(proxy.router()).
+			Method("PUT").
+			URL(nsRealisation).
+			Body(string(testdata[fRealisation])).
+			Expect(tt).
+			Header(headerContentType, mimeText).
+			Body("ok\n").
+			Status(http.StatusOK).
+			End()
+
+		apitest.New().
+			Handler(proxy.router()).
+			Method("GET").
+			URL(nsRealisation).
+			Expect(tt).
+			Header(headerContentType, mimeJson).
+			Header(headerCache, headerCacheHit).
+			Body(string(testdata[fRealisation])).
 			Status(http.StatusOK).
 			End()
 	})

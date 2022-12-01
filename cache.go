@@ -211,7 +211,7 @@ type realisation struct {
 	DependentRealisations map[string]string `json:"dependentRealisations"`
 	ID                    string            `json:"id"`
 	OutPath               string            `json:"outPath"`
-	Signatures            []string
+	Signatures            []string          `json:"signatures"`
 }
 
 func (c cacheHandler) signUnsignedNarinfo(info *narinfo.NarInfo) error {

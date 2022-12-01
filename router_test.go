@@ -15,8 +15,9 @@ import (
 	"github.com/input-output-hk/spongix/pkg/config"
 	"github.com/nix-community/go-nix/pkg/narinfo"
 	"github.com/nix-community/go-nix/pkg/narinfo/signature"
+	"github.com/pkg/errors"
 	"github.com/steinfletcher/apitest"
-	"gotest.tools/assert"
+	"github.com/stretchr/testify/assert"
 )
 
 var (
@@ -498,7 +499,7 @@ func TestRouterNarinfoGet(t *testing.T) {
 			End()
 
 		for metricRemoteCachedOk.Get()+metricRemoteCachedFail.Get() == 0 {
-			time.Sleep(1 * time.Millisecond)
+			time.Sleep(1 * time.Second)
 		}
 
 		apitest.New().
@@ -701,27 +702,25 @@ func TestRouterRealisationPut(t *testing.T) {
 			Header(headerContentType, mimeJson).
 			Header(headerCache, headerCacheHit).
 			Status(http.StatusOK).
-			Assert(jsonMatches(tt, testdata[fRealisation])).
+			Assert(realisationMatches(tt, testdata[fRealisation])).
 			End()
 	})
 }
 
-func jsonMatches(t *testing.T, expected []byte) func(*http.Response, *http.Request) error {
+func realisationMatches(t *testing.T, expectedBody []byte) func(*http.Response, *http.Request) error {
 	return func(w *http.Response, r *http.Request) error {
-		expectedMap := map[string]interface{}{}
-		if err := json.Unmarshal(expected, &expectedMap); err != nil {
-			return err
+		expected := realisation{}
+		if err := json.Unmarshal(expectedBody, &expected); err != nil {
+			return errors.WithMessage(err, "decoding expected")
 		}
 
-		actualMap := map[string]interface{}{}
-		dec := json.NewDecoder(r.Body)
-		if err := dec.Decode(&actualMap); err != nil {
-			return err
+		actual := realisation{}
+		dec := json.NewDecoder(w.Body)
+		if err := dec.Decode(&actual); err != nil {
+			return errors.WithMessage(err, "decoding actual")
 		}
 
-		pp(expectedMap, actualMap)
-
-		assert.DeepEqual(t, expectedMap, actualMap)
+		assert.Equal(t, expected, actual)
 
 		return nil
 	}

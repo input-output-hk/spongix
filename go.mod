@@ -18,8 +18,8 @@ require (
 	github.com/pkg/errors v0.9.1
 	github.com/smartystreets/assertions v1.2.0
 	github.com/steinfletcher/apitest v1.5.11
+	github.com/stretchr/testify v1.7.0
 	go.uber.org/zap v1.10.0
-	gotest.tools v2.2.0+incompatible
 )
 
 require (
@@ -59,7 +59,6 @@ require (
 	github.com/sirupsen/logrus v1.7.0 // indirect
 	github.com/smartystreets/goconvey v1.7.2 // indirect
 	github.com/spaolacci/murmur3 v1.1.0 // indirect
-	github.com/stretchr/testify v1.7.0 // indirect
 	go.opencensus.io v0.22.5 // indirect
 	go.uber.org/atomic v1.4.0 // indirect
 	go.uber.org/multierr v1.1.0 // indirect

@@ -54,7 +54,8 @@ func main() {
 	proxy.setupKeys()
 	proxy.setupS3()
 
-	go proxy.startCache()
+	// go proxy.startCache()
+	proxy.migrate()
 
 	go func() {
 		t := time.Tick(5 * time.Second)
@@ -143,6 +144,10 @@ func NewProxy(config *config.Config) *Proxy {
 		secretKeys:   map[string]signature.SecretKey{},
 		trustedKeys:  map[string][]signature.PublicKey{},
 	}
+}
+
+func (p *Proxy) dbFile() string {
+	return filepath.Join(p.config.Dir, "index.sqlite")
 }
 
 var (

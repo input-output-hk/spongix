@@ -3,6 +3,7 @@ module github.com/input-output-hk/spongix
 go 1.18
 
 require (
+	crawshaw.io/sqlite v0.3.3-0.20220618202545-d1964889ea3c
 	github.com/alexflint/go-arg v1.4.2
 	github.com/andybalholm/brotli v1.0.4
 	github.com/folbricht/desync v0.9.2
@@ -18,7 +19,6 @@ require (
 	github.com/pkg/errors v0.9.1
 	github.com/smartystreets/assertions v1.2.0
 	github.com/steinfletcher/apitest v1.5.11
-	github.com/stretchr/testify v1.7.0
 	go.uber.org/zap v1.10.0
 )
 
@@ -59,17 +59,19 @@ require (
 	github.com/sirupsen/logrus v1.7.0 // indirect
 	github.com/smartystreets/goconvey v1.7.2 // indirect
 	github.com/spaolacci/murmur3 v1.1.0 // indirect
+	github.com/stretchr/testify v1.7.0 // indirect
 	go.opencensus.io v0.22.5 // indirect
 	go.uber.org/atomic v1.4.0 // indirect
 	go.uber.org/multierr v1.1.0 // indirect
-	golang.org/x/crypto v0.0.0-20220525230936-793ad666bf5e // indirect
+	golang.org/x/crypto v0.0.0-20220826181053-bd7e27e6170d // indirect
 	golang.org/x/lint v0.0.0-20200302205851-738671d3881b // indirect
 	golang.org/x/mod v0.3.0 // indirect
-	golang.org/x/net v0.0.0-20211112202133-69e39bad7dc2 // indirect
+	golang.org/x/net v0.0.0-20220826154423-83b083e8dc8b // indirect
 	golang.org/x/oauth2 v0.0.0-20201109201403-9fd604954f58 // indirect
 	golang.org/x/sync v0.0.0-20201207232520-09787c993a3a // indirect
-	golang.org/x/sys v0.0.0-20210615035016-665e8c7367d1 // indirect
-	golang.org/x/text v0.3.6 // indirect
+	golang.org/x/sys v0.0.0-20220825204002-c680a09ffe64 // indirect
+	golang.org/x/term v0.0.0-20220722155259-a9ba230a4035 // indirect
+	golang.org/x/text v0.3.7 // indirect
 	golang.org/x/tools v0.0.0-20201201161351-ac6f37ff4c2a // indirect
 	golang.org/x/xerrors v0.0.0-20200804184101-5ec99f83aff1 // indirect
 	google.golang.org/api v0.36.0 // indirect

@@ -10,6 +10,11 @@ in {
     services.nar-proxy = {
       enable = lib.mkEnableOption "nar-proxy";
 
+      package = lib.mkOption {
+        type = lib.types.package;
+        default = pkgs.spongix;
+      };
+
       cacheUrl = lib.mkOption {
         type = lib.types.str;
         default = "https://cache.iog.io/";
@@ -65,7 +70,7 @@ in {
           listen = "${cfg.host}:${toString cfg.port}";
         };
       in {
-        ExecStart = toString (["${pkgs.spongix}/bin/nar-proxy"] ++ args);
+        ExecStart = toString (["${cfg.package}/bin/nar-proxy"] ++ args);
         User = "nar-proxy";
         Group = "nar-proxy";
         DynamicUser = true;

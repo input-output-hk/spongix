@@ -2,98 +2,57 @@
   description = "Flake for spongix";
 
   inputs = {
-    devshell.url = "github:numtide/devshell";
     inclusive.url = "github:input-output-hk/nix-inclusive";
-    nixpkgs.url = "github:nixos/nixpkgs/nixpkgs-unstable";
-    utils.url = "github:kreisys/flake-utils";
-    cicero.url = "github:input-output-hk/cicero";
-    n2c.url = "github:nlewo/nix2container";
-    alejandra.url = "github:kamadorueda/alejandra";
+    nixpkgs.url = "github:nixos/nixpkgs/nixos-23.05";
+    treefmt-nix.url = "github:numtide/treefmt-nix";
+    flake-parts.url = "github:hercules-ci/flake-parts";
   };
 
-  outputs = {
-    self,
-    nixpkgs,
-    utils,
-    devshell,
-    cicero,
-    ...
-  } @ inputs:
-    utils.lib.simpleFlake {
-      systems = ["x86_64-linux"];
-      inherit nixpkgs;
+  outputs = inputs:
+    inputs.flake-parts.lib.mkFlake {inherit inputs;} {
+      systems = ["x86_64-linux" "aarch64-linux" "aarch64-darwin" "x86_64-darwin"];
 
-      preOverlays = [devshell.overlay];
+      imports = [
+        inputs.flake-parts.flakeModules.easyOverlay
+        inputs.treefmt-nix.flakeModule
+      ];
 
-      overlay = final: prev: {
-        go = prev.go_1_18;
-        golangci-lint = prev.golangci-lint.override {buildGoModule = prev.buildGo118Module;};
-        gotools = prev.gotools.override {buildGoModule = prev.buildGo118Module;};
-        gocode = prev.gocode.override {buildGoPackage = prev.buildGo118Package;};
-
-        alejandra = inputs.alejandra.defaultPackage.x86_64-linux;
-        spongix = prev.callPackage ./package.nix {
-          inherit (inputs.inclusive.lib) inclusive;
-          rev = self.rev or "dirty";
-        };
-      };
-
-      packages = {
-        spongix,
-        hello,
-        cowsay,
-        ponysay,
-        lib,
-        coreutils,
-        bashInteractive,
+      perSystem = {
+        self',
+        pkgs,
+        config,
+        ...
       }: {
-        inherit spongix;
-        defaultPackage = spongix;
-
-        oci-tiny = inputs.n2c.packages.x86_64-linux.nix2container.buildImage {
-          name = "localhost:7777/spongix";
-          tag = "v1";
-          config = {
-            Cmd = ["${ponysay}/bin/ponysay" "hi"];
-            Env = [
-              "PATH=${lib.makeBinPath [coreutils bashInteractive]}"
-            ];
+        packages = {
+          spongix = pkgs.callPackage ./package.nix {
+            inherit (inputs.inclusive.lib) inclusive;
+            rev = inputs.self.rev or "dirty";
           };
-          maxLayers = 128;
+
+          default = self'.packages.spongix;
         };
 
-        oci = inputs.n2c.packages.x86_64-linux.nix2container.buildImage {
-          name = "localhost:7745/spongix";
-          tag = spongix.version;
-          config = {
-            entrypoint = ["${spongix}/bin/spongix"];
-            environment = ["CACHE_DIR=/cache"];
-          };
-          maxLayers = 250;
+        devShells.default = pkgs.mkShell {
+          nativeBuildInputs = with pkgs; [
+            config.treefmt.package
+            go
+            golangci-lint
+            gotools
+            gocode
+          ];
+        };
+
+        treefmt = {
+          programs.alejandra.enable = true;
+          programs.gofmt.enable = true;
+          projectRootFile = "flake.nix";
         };
       };
 
-      hydraJobs = {
-        spongix,
-        callPackage,
-      }: {
-        inherit spongix;
-        test = callPackage ./test.nix {inherit inputs;};
-      };
-
-      nixosModules = {
+      flake.nixosModules = rec {
         spongix = import ./modules/spongix.nix;
         nar-proxy = import ./modules/nar-proxy.nix;
+        default = spongix;
       };
-
-      devShell = {devshell}: devshell.fromTOML ./devshell.toml;
-
-      extraOutputs.ciceroActions =
-        cicero.lib.callActionsWithExtraArgs rec {
-          inherit (cicero.lib) std;
-          inherit (nixpkgs) lib;
-          actionLib = import "${cicero}/action-lib.nix" {inherit std lib;};
-        }
-        ./cicero/actions;
     };
 }

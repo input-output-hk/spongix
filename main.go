@@ -161,7 +161,7 @@ func (proxy *Proxy) Version() string {
 
 func (proxy *Proxy) setupDir(dir string) {
 	if _, err := os.Stat(dir); err != nil {
-		proxy.log.Debug("Creating directory", zap.String("dir", dir))
+		// proxy.log.Debug("Creating directory", zap.String("dir", dir))
 		if err := os.MkdirAll(dir, 0o755); err != nil {
 			proxy.log.Fatal("couldn't create directory", zap.String("dir", dir))
 		}

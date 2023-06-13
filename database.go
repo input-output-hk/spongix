@@ -1,6 +1,8 @@
 package main
 
 import (
+	"time"
+
 	"crawshaw.io/sqlite"
 	"github.com/pkg/errors"
 	"go.uber.org/zap"
@@ -49,11 +51,9 @@ func (p *Proxy) migrate() {
 
 		`CREATE TABLE IF NOT EXISTS indices_chunks
 			( id INTEGER PRIMARY KEY NOT NULL
-			, index_url TEXT NOT NULL
-			, chunk_hash TEXT NOT NULL
+			, index_url TEXT NOT NULL REFERENCES indices(url) DEFERRABLE INITIALLY DEFERRED
+			, chunk_hash TEXT NOT NULL REFERENCES chunks(hash) DEFERRABLE INITIALLY DEFERRED
 			, offset INTEGER NOT NULL
-			, FOREIGN KEY(index_url) REFERENCES indices(url)
-			, FOREIGN KEY(chunk_hash) REFERENCES chunks(hash)
 			) STRICT`,
 		`CREATE INDEX IF NOT EXISTS indices_chunks_index_url ON indices_chunks(index_url)`,
 		`CREATE UNIQUE INDEX IF NOT EXISTS indices_chunks_combined ON indices_chunks(index_url, chunk_hash, offset)`,
@@ -69,6 +69,14 @@ func (p *Proxy) migrate() {
 			) STRICT`,
 		`CREATE UNIQUE INDEX IF NOT EXISTS files_url ON files(url)`,
 		`CREATE INDEX IF NOT EXISTS files_combined ON files(url, namespace)`,
+
+		`CREATE TABLE IF NOT EXISTS hashes
+			( id INTEGER PRIMARY KEY NOT NULL
+			, url TEXT NOT NULL
+			, compression TEXT NOT NULL
+			, hash TEXT NOT NULL
+			) STRICT`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS hashes_url_compression ON hashes(url, compression)`,
 	} {
 		if _, err := db.Prep(sql).Step(); err != nil {
 			panic(err)
@@ -88,19 +96,11 @@ func (p *Proxy) withDbReadOnly(f func(*sqlite.Conn) error) error {
 	if err != nil {
 		return errors.WithMessagef(err, "while opening database: %q", p.dbFile())
 	}
-	defer func() {
-		go func() {
-			for _, sql := range []string{
-				`PRAGMA analysis_limit=1000`,
-				`PRAGMA optimize`,
-			} {
-				_, _ = db.Prep(sql).Step()
-			}
 
-			if err := db.Close(); err != nil {
-				p.log.Error("while closing database", zap.Error(err))
-			}
-		}()
+	defer func() {
+		if err := retry(db.Close); err != nil {
+			p.log.Error("while closing database", zap.Error(err))
+		}
 	}()
 
 	if ferr := f(db); ferr != nil {
@@ -108,6 +108,19 @@ func (p *Proxy) withDbReadOnly(f func(*sqlite.Conn) error) error {
 	}
 
 	return nil
+}
+
+func retry(fn func() error) error {
+	var err error
+	for i := 2; i < 30; i *= i {
+		if err = fn(); err != nil {
+			pp(err)
+			time.Sleep(time.Duration(i) * time.Second)
+		} else {
+			return nil
+		}
+	}
+	return err
 }
 
 func (p *Proxy) withDbReadWrite(f func(*sqlite.Conn) error) error {

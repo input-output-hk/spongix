@@ -76,3 +76,31 @@ Set a `post-build-hook` in your nix configuration to a script like this:
 - [x] Store narinfo in a database
 - [x] Upload to S3 as well as the local store
 - [x] Verify existing signatures
+
+## Issues
+
+Implementing a Nix cache that can handle deduplication and compressed NAR files
+is a very tricky task.
+The `FileHash` and `FileSize` properties of `.narinfo` files are mainly useful
+for static cashes that store files without any modification.
+We want, however, to store NARs uncompressed for optimal deduplication while
+transmitting them compressed for optimal speed.
+
+While that sounds easy on the outset, the problem comes down to reproducability.
+For example `xz` compression gives no guarantees that running the same
+compression twice will result in the same output.
+For `zstd` there is (for now), a guarantee that the same version of `zstd` will
+always return the same output, and it can uncompress the output of earlier
+versions, but newer versions most likely will produce different output.
+
+So, simply trusting the transmitted `.narinfo` with its `FileHash`/`FileSize`
+is not an option, since we don't know what version and parameters were used to
+create the compressed file and won't be able to replicate it anyway in a lot of
+cases.
+
+Additionally, the `.narinfo` is somewhat write-once, due to potential caching
+across mutliple layers. If we were to return a different info on every request,
+that would not be very cacheable, and if Spongix were to upgrade and suddenly
+return different hashes, that would cause issues with clients that still have
+older narinfos in their cache.
+

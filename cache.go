@@ -8,12 +8,19 @@ import (
 )
 
 const (
-	headerCache         = "X-Cache"
-	headerCacheHit      = "HIT"
-	headerCacheRemote   = "REMOTE"
-	headerCacheMiss     = "MISS"
-	headerCacheUpstream = "X-Cache-Upstream"
 	headerContentType   = "Content-Type"
+	headerContentLength = "Content-Length"
+
+	headerCache       = "X-Cache"
+	headerCacheHit    = "HIT"
+	headerCacheRemote = "REMOTE"
+	headerCacheMiss   = "MISS"
+
+	headerCacheUpstream = "X-Cache-Upstream"
+
+	headerCacheStorage = "X-Cache-Storage"
+	headerCacheFile    = "FILE"
+	headerCacheIndices = "INDICIES"
 )
 
 var (
@@ -28,7 +35,7 @@ type cacheRequest struct {
 	indexName string
 }
 
-type realisation struct {
+type Realisation struct {
 	DependentRealisations map[string]string `json:"dependentRealisations"`
 	ID                    string            `json:"id"`
 	OutPath               string            `json:"outPath"`
@@ -37,7 +44,7 @@ type realisation struct {
 
 func urlToMime(u string) string {
 	switch filepath.Ext(u) {
-	case ".nar", ".xz":
+	case ".nar", ".xz", ".zst":
 		return mimeNar
 	case ".narinfo":
 		return mimeNarinfo

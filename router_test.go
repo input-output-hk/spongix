@@ -1,48 +1,185 @@
 package main
 
 import (
-	"bytes"
-	"context"
+	"encoding/json"
 	"net/http"
-	"os"
-	"path/filepath"
+	"reflect"
+	"strings"
 	"testing"
 
 	"crawshaw.io/sqlite"
-	"github.com/folbricht/desync"
 	"github.com/input-output-hk/spongix/pkg/config"
+	"github.com/nix-community/go-nix/pkg/narinfo"
+	"github.com/pkg/errors"
 	"github.com/steinfletcher/apitest"
+	"gotest.tools/assert"
 )
 
 var (
-	testdata      = map[string][]byte{}
-	fNar          = "/nar/0m8sd5qbmvfhyamwfv3af1ff18ykywf3zx5qwawhhp3jv1h777xz.nar"
-	fNarXz        = "/nar/0m8sd5qbmvfhyamwfv3af1ff18ykywf3zx5qwawhhp3jv1h777xz.nar.xz"
-	fNarinfo      = "/8ckxc8biqqfdwyhr0w70jgrcb4h7a4y5.narinfo"
-	fRealisation  = "/realisations/sha256:b95e6ccddcbc1df53705c1d66e96e6afd19f2629885755e98972e9b95d18cfa8!out.doi"
+	fNarinfo           = "/hyhrnrnpsz9fw5p9dk85a58y31ink18c.narinfo"
+	fixtureNarinfoNone = `StorePath: /nix/store/hyhrnrnpsz9fw5p9dk85a58y31ink18c-test
+URL: nar/1h6m2q7f8zq5z4kvn8j5wiz05jdic77df1x68dfwqg149jsy7gyp.nar
+Compression: none
+FileHash: sha256:1h6m2q7f8zq5z4kvn8j5wiz05jdic77df1x68dfwqg149jsy7gyp
+FileSize: 512
+NarHash: sha256:1h6m2q7f8zq5z4kvn8j5wiz05jdic77df1x68dfwqg149jsy7gyp
+NarSize: 512
+References: 5b4cprjhjw35wyzvgmgvqay4hjf59h7x-test
+Deriver: 914ivbx6hfpgczwphndm0vc4z6q2c8a1-test.drv
+Sig: kappa:JccDYkaQjN7ywE9VGJ6/RAzCt7XJoqWsmjTRsdAdM8DF40ebDDu3XWaasuJkaezbhVxjaRLJm3VWDEk6EmRpCw==
+`
+
+	fixtureNarinfoNoneClean = `StorePath: /nix/store/hyhrnrnpsz9fw5p9dk85a58y31ink18c-test
+URL: nar/1h6m2q7f8zq5z4kvn8j5wiz05jdic77df1x68dfwqg149jsy7gyp.nar
+Compression: none
+NarHash: sha256:1h6m2q7f8zq5z4kvn8j5wiz05jdic77df1x68dfwqg149jsy7gyp
+NarSize: 512
+References: 5b4cprjhjw35wyzvgmgvqay4hjf59h7x-test
+Deriver: 914ivbx6hfpgczwphndm0vc4z6q2c8a1-test.drv
+Sig: kappa:JccDYkaQjN7ywE9VGJ6/RAzCt7XJoqWsmjTRsdAdM8DF40ebDDu3XWaasuJkaezbhVxjaRLJm3VWDEk6EmRpCw==
+`
+
+	fixtureNarinfoNoneUpstream = `StorePath: /nix/store/hyhrnrnpsz9fw5p9dk85a58y31ink18c-test
+URL: nar/1h6m2q7f8zq5z4kvn8j5wiz05jdic77df1x68dfwqg149jsy7gyp.nar
+Compression: none
+FileHash: sha256:1h6m2q7f8zq5z4kvn8j5wiz05jdic77df1x68dfwqg149jsy7gyp
+FileSize: 512
+NarHash: sha256:1h6m2q7f8zq5z4kvn8j5wiz05jdic77df1x68dfwqg149jsy7gyp
+NarSize: 512
+References: 5b4cprjhjw35wyzvgmgvqay4hjf59h7x-test
+Deriver: 914ivbx6hfpgczwphndm0vc4z6q2c8a1-test.drv
+Sig: kappa:JccDYkaQjN7ywE9VGJ6/RAzCt7XJoqWsmjTRsdAdM8DF40ebDDu3XWaasuJkaezbhVxjaRLJm3VWDEk6EmRpCw==
+`
+
+	fixtureNarinfoXz = `StorePath: /nix/store/hyhrnrnpsz9fw5p9dk85a58y31ink18c-test
+URL: nar/1h6m2q7f8zq5z4kvn8j5wiz05jdic77df1x68dfwqg149jsy7gyp.nar.xz
+Compression: xz
+NarHash: sha256:1h6m2q7f8zq5z4kvn8j5wiz05jdic77df1x68dfwqg149jsy7gyp
+NarSize: 512
+References: 5b4cprjhjw35wyzvgmgvqay4hjf59h7x-test
+Deriver: 914ivbx6hfpgczwphndm0vc4z6q2c8a1-test.drv
+Sig: kappa:JccDYkaQjN7ywE9VGJ6/RAzCt7XJoqWsmjTRsdAdM8DF40ebDDu3XWaasuJkaezbhVxjaRLJm3VWDEk6EmRpCw==
+`
+
+	fixtureNarinfoXzUpstream = `StorePath: /nix/store/hyhrnrnpsz9fw5p9dk85a58y31ink18c-test
+URL: nar/0rjb49w7dldq79d3ax30gw279bnbn48w9q925g3lr0rhrl0ycxvs.nar.xz
+Compression: xz
+FileHash: sha256:0rjb49w7dldq79d3ax30gw279bnbn48w9q925g3lr0rhrl0ycxvs
+FileSize: 220
+NarHash: sha256:1h6m2q7f8zq5z4kvn8j5wiz05jdic77df1x68dfwqg149jsy7gyp
+NarSize: 512
+References: 5b4cprjhjw35wyzvgmgvqay4hjf59h7x-test
+Deriver: 914ivbx6hfpgczwphndm0vc4z6q2c8a1-test.drv
+Sig: kappa:JccDYkaQjN7ywE9VGJ6/RAzCt7XJoqWsmjTRsdAdM8DF40ebDDu3XWaasuJkaezbhVxjaRLJm3VWDEk6EmRpCw==
+`
+
+	fNar       = "/nar/1h6m2q7f8zq5z4kvn8j5wiz05jdic77df1x68dfwqg149jsy7gyp.nar"
+	fixtureNar = []byte{
+		0x0d, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x6e, 0x69, 0x78, 0x2d, 0x61, 0x72, 0x63, 0x68,
+		0x69, 0x76, 0x65, 0x2d, 0x31, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+		0x28, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x04, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+		0x74, 0x79, 0x70, 0x65, 0x00, 0x00, 0x00, 0x00, 0x09, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+		0x64, 0x69, 0x72, 0x65, 0x63, 0x74, 0x6f, 0x72, 0x79, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+		0x05, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x65, 0x6e, 0x74, 0x72, 0x79, 0x00, 0x00, 0x00,
+		0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x28, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+		0x04, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x6e, 0x61, 0x6d, 0x65, 0x00, 0x00, 0x00, 0x00,
+		0x03, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x62, 0x69, 0x6e, 0x00, 0x00, 0x00, 0x00, 0x00,
+		0x04, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x6e, 0x6f, 0x64, 0x65, 0x00, 0x00, 0x00, 0x00,
+		0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x28, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+		0x04, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x74, 0x79, 0x70, 0x65, 0x00, 0x00, 0x00, 0x00,
+		0x09, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x64, 0x69, 0x72, 0x65, 0x63, 0x74, 0x6f, 0x72,
+		0x79, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x05, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+		0x65, 0x6e, 0x74, 0x72, 0x79, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+		0x28, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x04, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+		0x6e, 0x61, 0x6d, 0x65, 0x00, 0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+		0x68, 0x69, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x04, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+		0x6e, 0x6f, 0x64, 0x65, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+		0x28, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x04, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+		0x74, 0x79, 0x70, 0x65, 0x00, 0x00, 0x00, 0x00, 0x07, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+		0x73, 0x79, 0x6d, 0x6c, 0x69, 0x6e, 0x6b, 0x00, 0x06, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+		0x74, 0x61, 0x72, 0x67, 0x65, 0x74, 0x00, 0x00, 0x39, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+		0x2f, 0x6e, 0x69, 0x78, 0x2f, 0x73, 0x74, 0x6f, 0x72, 0x65, 0x2f, 0x35, 0x62, 0x34, 0x63, 0x70,
+		0x72, 0x6a, 0x68, 0x6a, 0x77, 0x33, 0x35, 0x77, 0x79, 0x7a, 0x76, 0x67, 0x6d, 0x67, 0x76, 0x71,
+		0x61, 0x79, 0x34, 0x68, 0x6a, 0x66, 0x35, 0x39, 0x68, 0x37, 0x78, 0x2d, 0x74, 0x65, 0x73, 0x74,
+		0x2f, 0x62, 0x69, 0x6e, 0x2f, 0x74, 0x65, 0x73, 0x74, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+		0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x29, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+		0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x29, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+		0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x29, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+		0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x29, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+		0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x29, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+	}
+
+	fNarXz         = fNar + ".xz"
+	fNarXzUpstream = "/nar/0rjb49w7dldq79d3ax30gw279bnbn48w9q925g3lr0rhrl0ycxvs.nar.xz"
+	fixtureNarXz   = []byte{
+		0xfd, 0x37, 0x7a, 0x58, 0x5a, 0x00, 0x00, 0x04, 0xe6, 0xd6, 0xb4, 0x46, 0x02, 0x00, 0x21, 0x01,
+		0x16, 0x00, 0x00, 0x00, 0x74, 0x2f, 0xe5, 0xa3, 0xe0, 0x01, 0xff, 0x00, 0x9b, 0x5d, 0x00, 0x06,
+		0x80, 0x36, 0x1f, 0xef, 0xa6, 0xce, 0xbf, 0x76, 0xba, 0x1a, 0x7a, 0x4f, 0x2b, 0xea, 0xa4, 0x53,
+		0x24, 0xed, 0xa1, 0x23, 0x04, 0x71, 0xff, 0x5b, 0xbf, 0x97, 0x69, 0xba, 0xf3, 0x29, 0xbe, 0x25,
+		0x7a, 0x71, 0x2b, 0xe9, 0xb4, 0xda, 0x0d, 0x7e, 0x9a, 0x8f, 0x9d, 0x5e, 0x24, 0x6d, 0xe2, 0x14,
+		0x06, 0xd9, 0x0d, 0xdf, 0x06, 0x03, 0x65, 0xda, 0x60, 0x9a, 0xeb, 0x90, 0x01, 0xd6, 0x81, 0xe1,
+		0x86, 0x82, 0x61, 0x5d, 0x1f, 0x0a, 0x64, 0x2c, 0xa8, 0x02, 0x61, 0x61, 0x36, 0x75, 0x72, 0xc6,
+		0x52, 0x06, 0xc5, 0x9b, 0xa9, 0x2e, 0x1f, 0x1f, 0xb8, 0xc3, 0xb9, 0x90, 0x7d, 0xec, 0x38, 0x61,
+		0xde, 0xab, 0x15, 0x77, 0x0c, 0x70, 0x75, 0x3c, 0xca, 0x33, 0x62, 0x92, 0x89, 0x31, 0xea, 0x53,
+		0x4e, 0xb9, 0xf8, 0x9c, 0xfc, 0x3f, 0x23, 0xb5, 0x80, 0x92, 0x10, 0x0c, 0xe0, 0x7c, 0xca, 0xf3,
+		0x2c, 0x0c, 0x34, 0x9e, 0x8b, 0x3f, 0x9d, 0x4b, 0x98, 0x36, 0xe0, 0x8f, 0xea, 0x49, 0x71, 0xc2,
+		0x79, 0x53, 0xb1, 0xfc, 0x31, 0x59, 0xf1, 0xe8, 0x91, 0xa0, 0x00, 0x00, 0x65, 0xe0, 0x26, 0xb1,
+		0x82, 0x0d, 0x97, 0xb8, 0x00, 0x01, 0xb7, 0x01, 0x80, 0x04, 0x00, 0x00, 0x47, 0xc0, 0xaa, 0x13,
+		0xb1, 0xc4, 0x67, 0xfb, 0x02, 0x00, 0x00, 0x00, 0x00, 0x04, 0x59, 0x5a,
+	}
+
+	fNarZst         = fNar + ".zst"
+	fNarZstUpstream = "/nar/0mn3yn1dh5l065jjrj7b3gc8sn3kbji32w16dwgcs6yqgada09jv.nar.zst"
+	fixtureNarZst   = []byte{
+		0x28, 0xb5, 0x2f, 0xfd, 0x04, 0x58, 0x9d, 0x05, 0x00, 0xf2, 0x08, 0x1e, 0x1d, 0x50, 0xab, 0x73,
+		0x84, 0x06, 0x92, 0x9a, 0x85, 0x1a, 0x66, 0x9a, 0x95, 0x6e, 0x4f, 0x66, 0x66, 0x86, 0x65, 0x96,
+		0xb1, 0x2d, 0x45, 0x66, 0x1c, 0x54, 0x49, 0x52, 0xbd, 0x53, 0x2c, 0xd1, 0x30, 0xbb, 0xad, 0x36,
+		0xad, 0x61, 0x76, 0x72, 0x31, 0x1e, 0xb3, 0x34, 0xa2, 0xa7, 0x44, 0x07, 0xa9, 0x20, 0x09, 0xaa,
+		0x22, 0xd1, 0x5a, 0x16, 0x56, 0xf4, 0x22, 0xa6, 0x1c, 0xa5, 0x59, 0x5a, 0xf2, 0xd4, 0xb0, 0x5d,
+		0xba, 0xed, 0xcc, 0xdf, 0x09, 0xb1, 0x6b, 0xc2, 0x1d, 0xab, 0x0f, 0x29, 0xc2, 0xc2, 0xf5, 0x01,
+		0xd8, 0x33, 0xed, 0x6a, 0x13, 0x90, 0xdc, 0xf6, 0xe6, 0x07, 0x8f, 0x3c, 0xb5, 0x93, 0xac, 0xcf,
+		0x0d, 0xff, 0x9f, 0x54, 0xec, 0x0b, 0x8e, 0x38, 0xfb, 0xaf, 0x48, 0xb2, 0xd2, 0xe7, 0xb0, 0x4b,
+		0x2e, 0xdd, 0x1f, 0x02, 0x19, 0x00, 0x9d, 0x79, 0x00, 0xb8, 0x03, 0xc7, 0x13, 0x0b, 0xad, 0x06,
+		0x41, 0x40, 0x99, 0xe3, 0x80, 0x7c, 0x20, 0xbb, 0x02, 0x67, 0xc0, 0xbd, 0x5e, 0x98, 0x19, 0x20,
+		0x2f, 0xb4, 0x63, 0x0d, 0x67, 0x40, 0x5e, 0x68, 0x67, 0x09, 0x00, 0xdc, 0x14, 0x03, 0x0c, 0x0c,
+		0x06, 0x02, 0x03, 0x81, 0x81, 0xc1, 0xc0, 0xc0, 0x08, 0x03, 0x68, 0x03, 0x3f, 0x3a, 0x98, 0xd0,
+	}
+
+	fRealisation       = "/realisations/sha256:4ef2eb79caed8101898542afdbc991f969d915773ece52dbf3b6cfa78fa08d92!out.doi"
+	fixtureRealisation = strings.TrimSpace(`
+{
+  "dependentRealisations": {},
+  "id": "sha256:4ef2eb79caed8101898542afdbc991f969d915773ece52dbf3b6cfa78fa08d92!out",
+  "outPath": "hyhrnrnpsz9fw5p9dk85a58y31ink18c-test",
+  "signatures": [
+    "kappa:oCQlzq3S7dzADbX5SeDhl95sQLbQYc1Pf5cmUuPDMLcIjI5iG8LxMojoQbhr9VgEWg/TZ5D7vCSaXknJyAEuBQ=="
+  ]
+}
+`)
+
+	suffix        = "/something"
+	upstream      = "http://example.com" + suffix
 	testNamespace = "test"
+
 	nsNarinfo     = "/" + testNamespace + fNarinfo
-	nsNarXz       = "/" + testNamespace + fNarXz
 	nsNar         = "/" + testNamespace + fNar
+	nsNarXz       = "/" + testNamespace + fNarXz
+	nsNarZst      = "/" + testNamespace + fNarZst
 	nsRealisation = "/" + testNamespace + fRealisation
-	upstream      = "http://example.com"
+
+	mockGetNar200     = mockGet(suffix+fNar, 200).Body(string(fixtureNar)).Header(headerContentType, mimeNar).End()
+	mockGetNarinfo200 = mockGet(suffix+fNarinfo, 200).Body(fixtureNarinfoNoneUpstream).Header(headerContentType, mimeNarinfo).End()
+	mockGetNar404     = mockGet(suffix+fNar, 404).End()
+	mockGetNarinfo404 = mockGet(suffix+fNarinfo, 404).End()
+
+	mockGetNarXz200     = mockGet(suffix+fNarXzUpstream, 200).Body(string(fixtureNarXz)).Header(headerContentType, mimeNar).End()
+	mockGetNarinfoXz200 = mockGet(suffix+fNarinfo, 200).Body(fixtureNarinfoXzUpstream).Header(headerContentType, mimeNarinfo).End()
+	mockGetNarXz404     = mockGet(suffix+fNarXzUpstream, 404).End()
+	mockGetNarinfoXz404 = mockGet(suffix+fNarinfo, 404).End()
 )
 
-func TestMain(m *testing.M) {
-	fixtures := []string{
-		fNar, fNarXz, fNarinfo, fRealisation,
-	}
-
-	for _, name := range fixtures {
-		content, err := os.ReadFile(filepath.Join("testdata", filepath.Base(name)))
-		if err != nil {
-			panic(err)
-		}
-
-		testdata[name] = content
-	}
-
-	os.Exit(m.Run())
+func mockGet(url string, status int) *apitest.MockResponse {
+	return apitest.NewMock().Get(url).RespondWith().Status(status)
 }
 
 func testProxy(t *testing.T) *Proxy {
@@ -60,20 +197,10 @@ func testProxy(t *testing.T) *Proxy {
 	proxy.setupDesync()
 	proxy.migrate()
 
-	// proxy.s3Index = newFakeIndex()
-	// proxy.s3Store = newFakeStore()
 	// proxy.setupKeys()
 
 	// NOTE: comment the next line to enable logging
 	// proxy.log = zap.NewNop()
-	return proxy
-}
-
-func withS3(proxy *Proxy) *Proxy {
-	for namespace := range proxy.config.Namespaces {
-		proxy.s3Indices[namespace] = newFakeIndex()
-	}
-	proxy.s3Store = newFakeStore()
 	return proxy
 }
 
@@ -98,13 +225,13 @@ func TestRouterNarinfoHead(t *testing.T) {
 
 		apitest.New().
 			Handler(proxy.router()).
-			Method("HEAD").
+			Method(http.MethodHead).
 			URL(nsNarinfo).
 			Expect(tt).
+			Status(http.StatusNotFound).
 			Header(headerCache, headerCacheMiss).
 			Header(headerContentType, mimeText).
 			Body(``).
-			Status(http.StatusNotFound).
 			End()
 	})
 
@@ -112,23 +239,16 @@ func TestRouterNarinfoHead(t *testing.T) {
 		proxy := testProxy(tt)
 
 		apitest.New().
-			Mocks(
-				apitest.NewMock().
-					Head(fNarinfo).
-					RespondWith().
-					Header(headerContentType, mimeNarinfo).
-					Status(http.StatusOK).
-					End(),
-			).
+			Mocks(mockGetNarinfo200, mockGetNar200).
 			Handler(proxy.router()).
-			Method("HEAD").
+			Method(http.MethodHead).
 			URL(nsNarinfo).
 			Expect(tt).
+			Status(http.StatusOK).
 			Header(headerCache, headerCacheRemote).
 			Header(headerCacheUpstream, upstream+fNarinfo).
 			Header(headerContentType, mimeNarinfo).
 			Body(``).
-			Status(http.StatusOK).
 			End()
 	})
 
@@ -137,671 +257,516 @@ func TestRouterNarinfoHead(t *testing.T) {
 
 		apitest.New().
 			Handler(proxy.router()).
-			Method("PUT").
+			Method(http.MethodPut).
 			URL(nsNarinfo).
-			Body(string(testdata[fNarinfo])).
+			Body(fixtureNarinfoNone).
 			Expect(tt).
 			Status(http.StatusOK).
 			End()
 
-		proxy.inspectTable("files")
-		proxy.inspectTable("indices")
-
-		dbErr := proxy.withDbReadOnly(func(db *sqlite.Conn) error {
-			query := db.Prep(`
-			SELECT
-			COALESCE(files.content_type, indices.content_type)
-			FROM files, indices
-			WHERE (  files.namespace IS :namespace AND   files.url IS :url) 
-			   OR (indices.namespace IS :namespace AND indices.url IS :url)
-			LIMIT 1
-`)
-
-			query.SetText(":namespace", testNamespace)
-			query.SetText(":url", "8ckxc8biqqfdwyhr0w70jgrcb4h7a4y5.narinfo")
-
-			if err := query.Reset(); err != nil {
-				return err
-			}
-
-			rowReturned, err := query.Step()
-			if !rowReturned {
-				pp("no rows")
-				return nil
-			}
-
-			if err != nil {
-				return err
-			}
-
-			for col := 0; col < query.ColumnCount(); col += 1 {
-				switch query.ColumnType(col) {
-				case sqlite.SQLITE_INTEGER:
-					pp(query.ColumnName(col), ":", query.ColumnInt(col))
-				case sqlite.SQLITE_FLOAT:
-					pp(query.ColumnName(col), ":", query.ColumnFloat(col))
-				case sqlite.SQLITE_TEXT:
-					pp(query.ColumnName(col), ":", query.ColumnText(col))
-				case sqlite.SQLITE_BLOB:
-					head := make([]byte, 1024)
-					query.ColumnBytes(col, head)
-					pp(query.ColumnName(col), ":", head)
-				case sqlite.SQLITE_NULL:
-					pp(query.ColumnName(col), ":", "NULL")
-				}
-			}
-
-			return nil
-		})
-
-		if dbErr != nil {
-			panic(dbErr)
-		}
-
 		apitest.New().
 			Handler(proxy.router()).
-			Method("HEAD").
+			Method(http.MethodHead).
 			URL(nsNarinfo).
 			Expect(tt).
+			Status(http.StatusOK).
 			Header(headerCache, headerCacheHit).
 			Header(headerContentType, mimeNarinfo).
+			Header(headerCacheUpstream, headerCacheHit).
 			Body(``).
-			Status(http.StatusOK).
-			End()
-	})
-
-	t.Run("found s3", func(tt *testing.T) {
-		proxy := withS3(testProxy(tt))
-		insertFake(tt, proxy.s3Store, proxy.s3Indices[testNamespace], fNarinfo)
-
-		apitest.New().
-			Handler(proxy.router()).
-			Method("HEAD").
-			URL(nsNarinfo).
-			Expect(tt).
-			Header(headerCache, headerCacheHit).
-			Header(headerContentType, mimeNarinfo).
-			Body(``).
-			Status(http.StatusOK).
 			End()
 	})
 }
 
-// func TestRouterNarHead(t *testing.T) {
-// 	t.Run("not found", func(tt *testing.T) {
-// 		proxy := testProxy(tt)
-//
-// 		apitest.New().
-// 			Mocks(
-// 				apitest.NewMock().
-// 					Head(fNarXz).
-// 					RespondWith().
-// 					Status(http.StatusNotFound).
-// 					End(),
-// 				apitest.NewMock().
-// 					Head(fNar).
-// 					RespondWith().
-// 					Status(http.StatusNotFound).
-// 					End()).
-// 			Handler(proxy.router()).
-// 			Method("HEAD").
-// 			URL(nsNar).
-// 			Expect(tt).
-// 			Header(headerCache, headerCacheMiss).
-// 			Header(headerContentType, mimeText).
-// 			Body(``).
-// 			Status(http.StatusNotFound).
-// 			End()
-// 	})
-//
-// 	t.Run("found remote", func(tt *testing.T) {
-// 		proxy := testProxy(tt)
-//
-// 		apitest.New().
-// 			Mocks(
-// 				apitest.NewMock().
-// 					Head(fNarXz).
-// 					RespondWith().
-// 					Status(http.StatusOK).
-// 					End(),
-// 				apitest.NewMock().
-// 					Head(fNar).
-// 					RespondWith().
-// 					Status(http.StatusNotFound).
-// 					End(),
-// 			).
-// 			Handler(proxy.router()).
-// 			Method("HEAD").
-// 			URL(nsNar).
-// 			Expect(tt).
-// 			Header(headerCache, headerCacheRemote).
-// 			Header(headerCacheUpstream, upstream+fNarXz).
-// 			Header(headerContentType, mimeNar).
-// 			Body(``).
-// 			Status(http.StatusOK).
-// 			End()
-// 	})
-//
-// 	t.Run("found local", func(tt *testing.T) {
-// 		proxy := testProxy(tt)
-// 		insertFake(tt, proxy.localStore, proxy.localIndices[testNamespace], fNar)
-//
-// 		apitest.New().
-// 			Handler(proxy.router()).
-// 			Method("HEAD").
-// 			URL(nsNar).
-// 			Expect(tt).
-// 			Header(headerCache, headerCacheHit).
-// 			Header(headerContentType, mimeNar).
-// 			Body(``).
-// 			Status(http.StatusOK).
-// 			End()
-// 	})
-//
-// 	t.Run("found s3", func(tt *testing.T) {
-// 		proxy := withS3(testProxy(tt))
-// 		insertFake(tt, proxy.s3Store, proxy.s3Indices[testNamespace], fNar)
-//
-// 		apitest.New().
-// 			Mocks(
-// 				apitest.NewMock().
-// 					Head(fNar).
-// 					RespondWith().
-// 					Status(http.StatusNotFound).
-// 					End(),
-// 			).
-// 			Mocks(
-// 				apitest.NewMock().
-// 					Head(fNarXz).
-// 					RespondWith().
-// 					Status(http.StatusNotFound).
-// 					End(),
-// 			).
-// 			Handler(proxy.router()).
-// 			Method("HEAD").
-// 			URL(nsNar).
-// 			Expect(tt).
-// 			Header(headerCache, headerCacheHit).
-// 			Header(headerContentType, mimeNar).
-// 			Body(``).
-// 			Status(http.StatusOK).
-// 			End()
-// 	})
-// }
-//
-// func TestRouterNarGet(t *testing.T) {
-// 	t.Run("not found", func(tt *testing.T) {
-// 		proxy := testProxy(tt)
-//
-// 		apitest.New().
-// 			Mocks(
-// 				apitest.NewMock().
-// 					Get(fNarXz).
-// 					RespondWith().
-// 					Status(http.StatusNotFound).
-// 					End(),
-// 				apitest.NewMock().
-// 					Get(fNar).
-// 					RespondWith().
-// 					Status(http.StatusNotFound).
-// 					End(),
-// 			).
-// 			Handler(proxy.router()).
-// 			Method("GET").
-// 			URL(nsNar).
-// 			Expect(tt).
-// 			Header(headerCache, headerCacheMiss).
-// 			Header(headerContentType, mimeText).
-// 			Body(`not found`).
-// 			Status(http.StatusNotFound).
-// 			End()
-// 	})
-//
-// 	t.Run("found remote xz", func(tt *testing.T) {
-// 		proxy := testProxy(tt)
-//
-// 		apitest.New().
-// 			Mocks(
-// 				apitest.NewMock().
-// 					Get(fNarXz).
-// 					RespondWith().
-// 					Body(string(testdata[fNarXz])).
-// 					Status(http.StatusOK).
-// 					End(),
-// 				apitest.NewMock().
-// 					Get(fNar).
-// 					RespondWith().
-// 					Status(http.StatusNotFound).
-// 					End(),
-// 			).
-// 			Handler(proxy.router()).
-// 			Method("GET").
-// 			URL(nsNar).
-// 			Expect(tt).
-// 			Header(headerCache, headerCacheRemote).
-// 			Header(headerCacheUpstream, upstream+fNarXz).
-// 			Header(headerContentType, mimeNar).
-// 			Body(string(testdata[fNar])).
-// 			Status(http.StatusOK).
-// 			End()
-// 	})
-//
-// 	t.Run("found remote xz and requested xz", func(tt *testing.T) {
-// 		proxy := testProxy(tt)
-//
-// 		apitest.New().
-// 			Mocks(
-// 				apitest.NewMock().
-// 					Get(fNarXz).
-// 					RespondWith().
-// 					Body(string(testdata[fNarXz])).
-// 					Status(http.StatusOK).
-// 					End(),
-// 				apitest.NewMock().
-// 					Get(fNar).
-// 					RespondWith().
-// 					Status(http.StatusNotFound).
-// 					End(),
-// 			).
-// 			Handler(proxy.router()).
-// 			Method("GET").
-// 			URL(nsNarXz).
-// 			Expect(tt).
-// 			Header(headerCache, headerCacheRemote).
-// 			Header(headerCacheUpstream, upstream+fNarXz).
-// 			Header(headerContentType, mimeNar).
-// 			Body(string(testdata[fNarXz])).
-// 			Status(http.StatusOK).
-// 			End()
-// 	})
-//
-// 	t.Run("found local", func(tt *testing.T) {
-// 		proxy := testProxy(tt)
-// 		insertFake(tt, proxy.localStore, proxy.localIndices[testNamespace], fNar)
-//
-// 		apitest.New().
-// 			Handler(proxy.router()).
-// 			Method("GET").
-// 			URL(nsNar).
-// 			Expect(tt).
-// 			Header(headerCache, headerCacheHit).
-// 			Header(headerContentType, mimeNar).
-// 			Body(``).
-// 			Status(http.StatusOK).
-// 			End()
-// 	})
-//
-// 	t.Run("found s3", func(tt *testing.T) {
-// 		proxy := withS3(testProxy(tt))
-// 		insertFake(tt, proxy.s3Store, proxy.s3Indices[testNamespace], fNar)
-//
-// 		apitest.New().
-// 			Handler(proxy.router()).
-// 			Method("GET").
-// 			URL(nsNar).
-// 			Expect(tt).
-// 			Header(headerCache, headerCacheHit).
-// 			Header(headerContentType, mimeNar).
-// 			Body(``).
-// 			Status(http.StatusOK).
-// 			End()
-// 	})
-// }
-//
-// func TestRouterNarinfoGet(t *testing.T) {
-// 	t.Run("not found", func(tt *testing.T) {
-// 		proxy := testProxy(tt)
-//
-// 		apitest.New().
-// 			Handler(proxy.router()).
-// 			Method("GET").
-// 			URL(nsNarinfo).
-// 			Expect(tt).
-// 			Header(headerCache, headerCacheMiss).
-// 			Header(headerContentType, mimeText).
-// 			Body(`not found`).
-// 			Status(http.StatusNotFound).
-// 			End()
-// 	})
-//
-// 	t.Run("found local", func(tt *testing.T) {
-// 		proxy := testProxy(tt)
-// 		insertFake(tt, proxy.localStore, proxy.localIndices[testNamespace], fNarinfo)
-//
-// 		apitest.New().
-// 			Handler(proxy.router()).
-// 			Method("GET").
-// 			URL(nsNarinfo).
-// 			Expect(tt).
-// 			Header(headerCache, headerCacheHit).
-// 			Header(headerContentType, mimeNarinfo).
-// 			Body(string(testdata[fNarinfo])).
-// 			Status(http.StatusOK).
-// 			End()
-// 	})
-//
-// 	t.Run("found s3", func(tt *testing.T) {
-// 		proxy := withS3(testProxy(tt))
-// 		insertFake(tt, proxy.s3Store, proxy.s3Indices[testNamespace], fNarinfo)
-//
-// 		apitest.New().
-// 			Handler(proxy.router()).
-// 			Method("GET").
-// 			URL(nsNarinfo).
-// 			Expect(tt).
-// 			Header(headerCache, headerCacheHit).
-// 			Header(headerContentType, mimeNarinfo).
-// 			Body(string(testdata[fNarinfo])).
-// 			Status(http.StatusOK).
-// 			End()
-// 	})
-//
-// 	t.Run("found remote", func(tt *testing.T) {
-// 		proxy := testProxy(tt)
-//
-// 		apitest.New().
-// 			EnableMockResponseDelay().
-// 			Mocks(
-// 				apitest.NewMock().
-// 					Get(fNarinfo).
-// 					RespondWith().
-// 					FixedDelay((1*time.Second).Milliseconds()).
-// 					Body(string(testdata[fNarinfo])).
-// 					Status(http.StatusOK).
-// 					End(),
-// 			).
-// 			Handler(proxy.router()).
-// 			Method("GET").
-// 			URL(nsNarinfo).
-// 			Expect(tt).
-// 			Header(headerCache, headerCacheRemote).
-// 			Header(headerCacheUpstream, upstream+fNarinfo).
-// 			Header(headerContentType, mimeNarinfo).
-// 			Body(string(testdata[fNarinfo])).
-// 			Status(http.StatusOK).
-// 			End()
-// 	})
-//
-// 	t.Run("copies remote to local", func(tt *testing.T) {
-// 		proxy := testProxy(tt)
-// 		// go proxy.startCache()
-// 		defer close(proxy.cacheChan)
-//
-// 		mockReset := apitest.NewStandaloneMocks(
-// 			apitest.NewMock().
-// 				Get(upstream + fNarinfo).
-// 				RespondWith().
-// 				Body(string(testdata[fNarinfo])).
-// 				Status(http.StatusOK).
-// 				End(),
-// 		).End()
-// 		defer mockReset()
-//
-// 		apitest.New().
-// 			Mocks(
-// 				apitest.NewMock().
-// 					Get(fNarinfo).
-// 					RespondWith().
-// 					Body(string(testdata[fNarinfo])).
-// 					Status(http.StatusOK).
-// 					End(),
-// 			).
-// 			Handler(proxy.router()).
-// 			Method("GET").
-// 			URL(nsNarinfo).
-// 			Expect(tt).
-// 			Header(headerCache, headerCacheRemote).
-// 			Header(headerCacheUpstream, upstream+fNarinfo).
-// 			Header(headerContentType, mimeNarinfo).
-// 			Body(string(testdata[fNarinfo])).
-// 			Status(http.StatusOK).
-// 			End()
-//
-// 		for metricRemoteCachedOk.Get()+metricRemoteCachedFail.Get() == 0 {
-// 			time.Sleep(1 * time.Second)
-// 		}
-//
-// 		apitest.New().
-// 			Handler(proxy.router()).
-// 			Method("GET").
-// 			URL(nsNarinfo).
-// 			Expect(tt).
-// 			Header(headerCache, headerCacheHit).
-// 			Header(headerContentType, mimeNarinfo).
-// 			Body(string(testdata[fNarinfo])).
-// 			Status(http.StatusOK).
-// 			End()
-// 	})
-// }
-//
-// func TestRouterNarinfoPut(t *testing.T) {
-// 	t.Run("upload success", func(tt *testing.T) {
-// 		proxy := withS3(testProxy(tt))
-//
-// 		apitest.New().
-// 			Handler(proxy.router()).
-// 			Method("PUT").
-// 			URL(nsNarinfo).
-// 			Body(string(testdata[fNarinfo])).
-// 			Expect(tt).
-// 			Header(headerContentType, mimeText).
-// 			Body("ok\n").
-// 			Status(http.StatusOK).
-// 			End()
-//
-// 		apitest.New().
-// 			Handler(proxy.router()).
-// 			Method("GET").
-// 			URL(nsNarinfo).
-// 			Expect(tt).
-// 			Header(headerContentType, mimeNarinfo).
-// 			Header(headerCache, headerCacheHit).
-// 			Body(string(testdata[fNarinfo])).
-// 			Status(http.StatusOK).
-// 			End()
-// 	})
-//
-// 	t.Run("upload invalid", func(tt *testing.T) {
-// 		proxy := testProxy(tt)
-//
-// 		apitest.New().
-// 			Handler(proxy.router()).
-// 			Method("PUT").
-// 			URL(nsNarinfo).
-// 			Body("blah").
-// 			Expect(tt).
-// 			Header(headerContentType, mimeText).
-// 			Body(`unable to find separator ': ' in blah`).
-// 			Status(http.StatusBadRequest).
-// 			End()
-// 	})
-//
-// 	t.Run("upload unsigned", func(tt *testing.T) {
-// 		proxy := testProxy(tt)
-//
-// 		apitest.New().
-// 			Handler(proxy.router()).
-// 			Method("PUT").
-// 			URL(nsNarinfo).
-// 			Body("blah").
-// 			Expect(tt).
-// 			Header(headerContentType, mimeText).
-// 			Body(`unable to find separator ': ' in blah`).
-// 			Status(http.StatusBadRequest).
-// 			End()
-// 	})
-//
-// 	t.Run("signs unsigned narinfos", func(tt *testing.T) {
-// 		rng := rand.New(rand.NewSource(42))
-// 		proxy := testProxy(tt)
-//
-// 		sec, pub, err := signature.GenerateKeypair("test", rng)
-// 		if err != nil {
-// 			tt.Fatal(err)
-// 		}
-//
-// 		proxy.secretKeys[testNamespace] = sec
-// 		_ = pub
-//
-// 		emptyInfo, err := narinfo.Parse(bytes.NewReader(testdata[fNarinfo]))
-// 		if err != nil {
-// 			tt.Fatal(err)
-// 		}
-// 		emptyInfo.Signatures = []signature.Signature{}
-// 		empty := emptyInfo.String()
-//
-// 		apitest.New().
-// 			Handler(proxy.router()).
-// 			Method("PUT").
-// 			URL(nsNarinfo).
-// 			Body(empty).
-// 			Expect(tt).
-// 			Header(headerContentType, mimeText).
-// 			Body("ok\n").
-// 			Status(http.StatusOK).
-// 			End()
-//
-// 		expectInfo, err := narinfo.Parse(bytes.NewReader(testdata[fNarinfo]))
-// 		if err != nil {
-// 			tt.Fatal(err)
-// 		}
-// 		sig, err := sec.Sign(rng, emptyInfo.Fingerprint())
-// 		if err != nil {
-// 			tt.Fatal(err)
-// 		}
-// 		expectInfo.Signatures = []signature.Signature{sig}
-//
-// 		apitest.New().
-// 			Handler(proxy.router()).
-// 			Method("GET").
-// 			URL(nsNarinfo).
-// 			Expect(tt).
-// 			Header(headerCache, headerCacheHit).
-// 			Header(headerContentType, mimeNarinfo).
-// 			Body(expectInfo.String()).
-// 			Status(http.StatusOK).
-// 			End()
-// 	})
-// }
-//
-// func TestRouterNarPut(t *testing.T) {
-// 	t.Run("upload success", func(tt *testing.T) {
-// 		proxy := withS3(testProxy(tt))
-//
-// 		apitest.New().
-// 			Handler(proxy.router()).
-// 			Method("PUT").
-// 			URL(nsNar).
-// 			Body(string(testdata[fNar])).
-// 			Expect(tt).
-// 			Header(headerContentType, mimeText).
-// 			Body("ok\n").
-// 			Status(http.StatusOK).
-// 			End()
-//
-// 		apitest.New().
-// 			Handler(proxy.router()).
-// 			Method("GET").
-// 			URL(nsNar).
-// 			Expect(tt).
-// 			Header(headerContentType, mimeNar).
-// 			Header(headerCache, headerCacheHit).
-// 			Body(string(testdata[fNar])).
-// 			Status(http.StatusOK).
-// 			End()
-// 	})
-//
-// 	t.Run("upload xz success", func(tt *testing.T) {
-// 		proxy := withS3(testProxy(tt))
-//
-// 		apitest.New().
-// 			Handler(proxy.router()).
-// 			Method("PUT").
-// 			URL(nsNarXz).
-// 			Body(string(testdata[fNarXz])).
-// 			Expect(tt).
-// 			Header(headerContentType, mimeText).
-// 			Body("ok\n").
-// 			Status(http.StatusOK).
-// 			End()
-//
-// 		apitest.New().
-// 			Handler(proxy.router()).
-// 			Method("GET").
-// 			URL(nsNar).
-// 			Expect(tt).
-// 			Header(headerContentType, mimeNar).
-// 			Header(headerCache, headerCacheHit).
-// 			Body(string(testdata[fNar])).
-// 			Status(http.StatusOK).
-// 			End()
-// 	})
-// }
-//
-// func TestRouterRealisationPut(t *testing.T) {
-// 	t.Run("upload success", func(tt *testing.T) {
-// 		proxy := withS3(testProxy(tt))
-//
-// 		apitest.New().
-// 			Handler(proxy.router()).
-// 			Method("PUT").
-// 			URL(nsRealisation).
-// 			Body(string(testdata[fRealisation])).
-// 			Expect(tt).
-// 			Header(headerContentType, mimeText).
-// 			Body("ok\n").
-// 			Status(http.StatusOK).
-// 			End()
-//
-// 		apitest.New().
-// 			Handler(proxy.router()).
-// 			Method("GET").
-// 			URL(nsRealisation).
-// 			Expect(tt).
-// 			Header(headerContentType, mimeJson).
-// 			Header(headerCache, headerCacheHit).
-// 			Status(http.StatusOK).
-// 			Assert(realisationMatches(tt, testdata[fRealisation])).
-// 			End()
-// 	})
-// }
-//
-// func realisationMatches(t *testing.T, expectedBody []byte) func(*http.Response, *http.Request) error {
-// 	return func(w *http.Response, r *http.Request) error {
-// 		expected := realisation{}
-// 		if err := json.Unmarshal(expectedBody, &expected); err != nil {
-// 			return errors.WithMessage(err, "decoding expected")
-// 		}
-//
-// 		actual := realisation{}
-// 		dec := json.NewDecoder(w.Body)
-// 		if err := dec.Decode(&actual); err != nil {
-// 			return errors.WithMessage(err, "decoding actual")
-// 		}
-//
-// 		assert.Equal(t, expected, actual)
-//
-// 		return nil
-// 	}
-// }
+func TestRouterNarHead(t *testing.T) {
+	t.Run("not found", func(tt *testing.T) {
+		proxy := testProxy(tt)
 
-func insertFake(
-	t *testing.T,
-	store desync.WriteStore,
-	index desync.IndexWriteStore,
-	path string) {
-	if chunker, err := desync.NewChunker(bytes.NewBuffer(testdata[path]), chunkSizeMin(), chunkSizeAvg, chunkSizeMax()); err != nil {
-		t.Fatal(err)
-	} else if idx, err := desync.ChunkStream(context.Background(), chunker, store, 1); err != nil {
-		t.Fatal(err)
-	} else if rel, err := filepath.Rel("/", path); err != nil {
-		t.Fatal(err)
-	} else if err := index.StoreIndex(rel, idx); err != nil {
-		t.Fatal(err)
+		apitest.New().
+			Mocks(mockGetNarXz404, mockGetNar404).
+			Handler(proxy.router()).
+			Method(http.MethodHead).
+			URL(nsNar).
+			Expect(tt).
+			Status(http.StatusNotFound).
+			Header(headerCache, headerCacheMiss).
+			Header(headerContentType, mimeText).
+			Body(``).
+			End()
+	})
+
+	t.Run("not found because of missing remote narinfo", func(tt *testing.T) {
+		proxy := testProxy(tt)
+
+		apitest.New().
+			Mocks(mockGetNar200, mockGetNarinfo404).
+			Handler(proxy.router()).
+			Method(http.MethodHead).
+			URL(nsNar).
+			Expect(tt).
+			Status(http.StatusNotFound).
+			Body(``).
+			End()
+	})
+
+	t.Run("found local", func(tt *testing.T) {
+		proxy := testProxy(tt)
+
+		apitest.New().
+			Handler(proxy.router()).
+			Method(http.MethodPut).
+			URL(nsNar).
+			Body(string(fixtureNar)).
+			Expect(tt).
+			Status(http.StatusOK).
+			End()
+
+		apitest.New().
+			Handler(proxy.router()).
+			Method(http.MethodHead).
+			URL(nsNar).
+			Expect(tt).
+			Status(http.StatusOK).
+			Header(headerCache, headerCacheHit).
+			Header(headerContentType, mimeNar).
+			Body(``).
+			End()
+	})
+}
+
+func TestRouterNarGet(t *testing.T) {
+	t.Run("not found", func(tt *testing.T) {
+		proxy := testProxy(tt)
+
+		apitest.New().
+			Mocks(mockGetNar404).
+			Handler(proxy.router()).
+			Method(http.MethodGet).
+			URL(nsNar).
+			Expect(tt).
+			Status(http.StatusNotFound).
+			Header(headerCache, headerCacheMiss).
+			Header(headerContentType, mimeText).
+			Body(``).
+			End()
+	})
+
+	narinfoWithCompression := func(t *testing.T) *narinfo.NarInfo {
+		info, err := narinfo.Parse(strings.NewReader(fixtureNarinfoNone))
+		assert.NilError(t, err)
+		return info
+	}
+
+	t.Run("found remote after Narinfo GET", func(tt *testing.T) {
+		proxy := testProxy(tt)
+
+		info := narinfoWithCompression(tt)
+
+		apitest.New().
+			Mocks(
+				mockGetNarinfo200,
+				mockGetNar200,
+			).
+			Handler(proxy.router()).
+			Method(http.MethodGet).
+			URL(nsNarinfo).
+			Expect(tt).
+			Status(http.StatusOK).
+			Header(headerCache, headerCacheRemote).
+			Header(headerCacheUpstream, upstream+fNarinfo).
+			Header(headerContentType, mimeNarinfo).
+			Body(info.String()).
+			End()
+
+		apitest.New().
+			Handler(proxy.router()).
+			Method(http.MethodGet).
+			URL(nsNarinfo).
+			Expect(tt).
+			Status(http.StatusOK).
+			Header(headerCache, headerCacheHit).
+			Header(headerContentType, mimeNarinfo).
+			Body(fixtureNarinfoNone).
+			End()
+
+		apitest.New().
+			Handler(proxy.router()).
+			Method(http.MethodGet).
+			URL(nsNar).
+			Expect(tt).
+			Status(http.StatusOK).
+			Header(headerCache, headerCacheHit).
+			Header(headerContentType, mimeNar).
+			Body(string(fixtureNar)).
+			End()
+	})
+
+	t.Run("found remote after Narinfo HEAD", func(tt *testing.T) {
+		proxy := testProxy(tt)
+
+		// This unfortunately can't be easily deduplicated because for some reason
+		// one cannot specify the `URL` when using `Method` on mocks.
+		apitest.New().
+			Mocks(mockGetNarinfo200, mockGetNar200).
+			Handler(proxy.router()).
+			Method(http.MethodHead).
+			URL(nsNarinfo).
+			Expect(tt).
+			Status(http.StatusOK).
+			Header(headerCache, headerCacheRemote).
+			Header(headerCacheUpstream, upstream+fNarinfo).
+			Header(headerContentType, mimeNarinfo).
+			Body(``).
+			End()
+
+		apitest.New().
+			Handler(proxy.router()).
+			Method(http.MethodGet).
+			URL(nsNar).
+			Expect(tt).
+			Status(http.StatusOK).
+			Header(headerCache, headerCacheHit).
+			Header(headerContentType, mimeNar).
+			Body(string(fixtureNar)).
+			End()
+	})
+
+	t.Run("found remote xz after GET", func(tt *testing.T) {
+		proxy := testProxy(tt)
+
+		apitest.New().
+			Mocks(mockGetNarinfoXz200, mockGetNarXz200).
+			Handler(proxy.router()).
+			Method(http.MethodGet).
+			URL(nsNarinfo).
+			Expect(tt).
+			Status(http.StatusOK).
+			Header(headerCache, headerCacheRemote).
+			Header(headerCacheUpstream, upstream+fNarinfo).
+			Header(headerContentType, mimeNarinfo).
+			Body(fixtureNarinfoNoneClean).
+			End()
+
+		apitest.New().
+			Handler(proxy.router()).
+			Method(http.MethodGet).
+			URL(nsNar).
+			Expect(tt).
+			Status(http.StatusOK).
+			Header(headerCache, headerCacheHit).
+			Header(headerContentType, mimeNar).
+			Body(string(fixtureNar)).
+			End()
+	})
+}
+
+func TestRouterNarinfoGet(t *testing.T) {
+	t.Run("not found", func(tt *testing.T) {
+		proxy := testProxy(tt)
+
+		apitest.New().
+			Handler(proxy.router()).
+			Method(http.MethodGet).
+			URL(nsNarinfo).
+			Expect(tt).
+			Status(http.StatusNotFound).
+			Header(headerCache, headerCacheMiss).
+			Header(headerContentType, mimeText).
+			Body(``).
+			End()
+	})
+
+	t.Run("found remote", func(tt *testing.T) {
+		proxy := testProxy(tt)
+
+		apitest.New().
+			EnableMockResponseDelay().
+			Mocks(mockGetNarinfo200, mockGetNar200).
+			Handler(proxy.router()).
+			Method(http.MethodGet).
+			URL(nsNarinfo).
+			Expect(tt).
+			Status(http.StatusOK).
+			Header(headerCache, headerCacheRemote).
+			Header(headerCacheUpstream, upstream+fNarinfo).
+			Header(headerContentType, mimeNarinfo).
+			Body(fixtureNarinfoNone).
+			End()
+	})
+
+}
+
+func TestRouterNarinfoPut(t *testing.T) {
+	t.Run("upload success", func(tt *testing.T) {
+		proxy := testProxy(tt)
+
+		apitest.New().
+			Handler(proxy.router()).
+			Method(http.MethodPut).
+			URL(nsNarinfo).
+			Body(fixtureNarinfoNone).
+			Expect(tt).
+			Status(http.StatusOK).
+			Header(headerContentType, mimeText).
+			Body(``).
+			End()
+
+		apitest.New().
+			Handler(proxy.router()).
+			Method(http.MethodGet).
+			URL(nsNarinfo).
+			Expect(tt).
+			Status(http.StatusOK).
+			Header(headerContentType, mimeNarinfo).
+			Header(headerCache, headerCacheHit).
+			Body(fixtureNarinfoNone).
+			End()
+	})
+
+	t.Run("upload invalid", func(tt *testing.T) {
+		proxy := testProxy(tt)
+
+		apitest.New().
+			Handler(proxy.router()).
+			Method(http.MethodPut).
+			URL(nsNarinfo).
+			Body("blah").
+			Expect(tt).
+			Status(http.StatusBadRequest).
+			Header(headerContentType, mimeText).
+			Body(`unable to find separator ': ' in blah`).
+			End()
+	})
+
+	t.Run("upload unsigned", func(tt *testing.T) {
+		proxy := testProxy(tt)
+
+		apitest.New().
+			Handler(proxy.router()).
+			Method(http.MethodPut).
+			URL(nsNarinfo).
+			Body("blah").
+			Expect(tt).
+			Status(http.StatusBadRequest).
+			Header(headerContentType, mimeText).
+			Body(`unable to find separator ': ' in blah`).
+			End()
+	})
+
+	// t.Run("signs unsigned narinfos", func(tt *testing.T) {
+	// 	rng := rand.New(rand.NewSource(42))
+	// 	proxy := testProxy(tt)
+
+	// 	sec, pub, err := signature.GenerateKeypair("test", rng)
+	// 	if err != nil {
+	// 		tt.Fatal(err)
+	// 	}
+
+	// 	proxy.secretKeys[testNamespace] = sec
+	// 	_ = pub
+
+	// 	emptyInfo, err := narinfo.Parse(bytes.NewReader(testdata[fNarinfo]))
+	// 	if err != nil {
+	// 		tt.Fatal(err)
+	// 	}
+	// 	emptyInfo.Signatures = []signature.Signature{}
+	// 	empty := emptyInfo.String()
+
+	// 	apitest.New().
+	// 		Handler(proxy.router()).
+	// 		Method(http.MethodPut).
+	// 		URL(nsNarinfo).
+	// 		Body(empty).
+	// 		Expect(tt).
+	// 		Header(headerContentType, mimeText).
+	// 		Body("ok\n").
+	// 		Status(http.StatusOK).
+	// 		End()
+
+	// 	expectInfo, err := narinfo.Parse(bytes.NewReader(testdata[fNarinfo]))
+	// 	if err != nil {
+	// 		tt.Fatal(err)
+	// 	}
+	// 	sig, err := sec.Sign(rng, emptyInfo.Fingerprint())
+	// 	if err != nil {
+	// 		tt.Fatal(err)
+	// 	}
+	// 	expectInfo.Signatures = []signature.Signature{sig}
+
+	// 	apitest.New().
+	// 		Handler(proxy.router()).
+	// 		Method(http.MethodGet).
+	// 		URL(nsNarinfo).
+	// 		Expect(tt).
+	// 		Header(headerCache, headerCacheHit).
+	// 		Header(headerContentType, mimeNarinfo).
+	// 		Body(expectInfo.String()).
+	// 		Status(http.StatusOK).
+	// 		End()
+	// })
+}
+
+func TestRouterNarPut(t *testing.T) {
+	t.Run("upload success", func(tt *testing.T) {
+		proxy := testProxy(tt)
+
+		apitest.New().
+			Handler(proxy.router()).
+			Method(http.MethodPut).
+			URL(nsNar).
+			Body(string(fixtureNar)).
+			Expect(tt).
+			Status(http.StatusOK).
+			Header(headerContentType, mimeText).
+			Body("ok\n").
+			End()
+
+		apitest.New().
+			Handler(proxy.router()).
+			Method(http.MethodGet).
+			URL(nsNar).
+			Expect(tt).
+			Status(http.StatusOK).
+			Header(headerContentType, mimeNar).
+			Header(headerCache, headerCacheHit).
+			Body(string(fixtureNar)).
+			End()
+	})
+
+	t.Run("upload xz success", func(tt *testing.T) {
+		proxy := testProxy(tt)
+
+		apitest.New().
+			Handler(proxy.router()).
+			Method(http.MethodPut).
+			URL(nsNarXz).
+			Body(string(fixtureNarXz)).
+			Expect(tt).
+			Status(http.StatusOK).
+			Header(headerContentType, mimeText).
+			Body("ok\n").
+			End()
+
+		apitest.New().
+			Handler(proxy.router()).
+			Method(http.MethodGet).
+			URL(nsNar).
+			Expect(tt).
+			Status(http.StatusOK).
+			Header(headerContentType, mimeNar).
+			Header(headerCache, headerCacheHit).
+			Body(string(fixtureNar)).
+			End()
+	})
+
+	// t.Run("upload zst success", func(tt *testing.T) {
+	// 	proxy := testProxy(tt)
+
+	// 	apitest.New().
+	// 		Handler(proxy.router()).
+	// 		Method(http.MethodPut).
+	// 		URL(nsNarZst).
+	// 		Body(string(fixtureNarZst)).
+	// 		Expect(tt).
+	// 		Status(http.StatusOK).
+	// 		Header(headerContentType, mimeText).
+	// 		Body("ok\n").
+	// 		End()
+
+	// 	apitest.New().
+	// 		Handler(proxy.router()).
+	// 		Method(http.MethodGet).
+	// 		URL(nsNar).
+	// 		Expect(tt).
+	// 		Status(http.StatusOK).
+	// 		Header(headerContentType, mimeNar).
+	// 		Header(headerCache, headerCacheHit).
+	// 		Body(string(fixtureNar)).
+	// 		End()
+	// })
+}
+
+func TestRouterRealisationPut(t *testing.T) {
+	t.Run("upload success", func(tt *testing.T) {
+		proxy := testProxy(tt)
+
+		apitest.New().
+			Handler(proxy.router()).
+			Method(http.MethodPut).
+			URL(nsRealisation).
+			Body(fixtureRealisation).
+			Expect(tt).
+			Status(http.StatusOK).
+			Header(headerContentType, mimeText).
+			Body("ok\n").
+			End()
+
+		proxy.inspectTable("files")
+
+		apitest.New().
+			Handler(proxy.router()).
+			Method(http.MethodGet).
+			URL(nsRealisation).
+			Expect(tt).
+			Status(http.StatusOK).
+			Header(headerContentType, mimeJson).
+			Header(headerCache, headerCacheHit).
+			Assert(realisationMatches(tt, []byte(fixtureRealisation))).
+			End()
+	})
+}
+
+func TestRouterLogPut(t *testing.T) {
+	t.Run("upload success", func(tt *testing.T) {
+		proxy := testProxy(tt)
+
+		apitest.New().
+			Handler(proxy.router()).
+			Method(http.MethodPut).
+			URL(nsRealisation).
+			Body(fixtureRealisation).
+			Expect(tt).
+			Status(http.StatusOK).
+			Header(headerContentType, mimeText).
+			Body("ok\n").
+			End()
+
+		proxy.inspectTable("files")
+
+		apitest.New().
+			Handler(proxy.router()).
+			Method(http.MethodGet).
+			URL(nsRealisation).
+			Expect(tt).
+			Status(http.StatusOK).
+			Header(headerContentType, mimeJson).
+			Header(headerCache, headerCacheHit).
+			Assert(realisationMatches(tt, []byte(fixtureRealisation))).
+			End()
+	})
+}
+
+func realisationMatches(t *testing.T, expectedBody []byte) func(*http.Response, *http.Request) error {
+	return func(w *http.Response, r *http.Request) error {
+		expected := Realisation{}
+		if err := json.Unmarshal(expectedBody, &expected); err != nil {
+			return errors.WithMessage(err, "decoding expected")
+		}
+
+		actual := Realisation{}
+		dec := json.NewDecoder(w.Body)
+		if err := dec.Decode(&actual); err != nil {
+			return errors.WithMessage(err, "decoding actual")
+		}
+
+		assert.Equal(t, reflect.DeepEqual(expected, actual), true)
+
+		return nil
 	}
 }
 
 func (proxy *Proxy) inspectTable(name string) {
+	pp("inspect", name)
 	dbErr := proxy.withDbReadOnly(func(db *sqlite.Conn) error {
 		query := db.Prep(`SELECT * FROM ` + name)
 
@@ -828,7 +793,7 @@ func (proxy *Proxy) inspectTable(name string) {
 			case sqlite.SQLITE_TEXT:
 				pp(query.ColumnName(col), ":", query.ColumnText(col))
 			case sqlite.SQLITE_BLOB:
-				head := make([]byte, 1024)
+				head := make([]byte, query.ColumnLen(col))
 				query.ColumnBytes(col, head)
 				pp(query.ColumnName(col), ":", head)
 			case sqlite.SQLITE_NULL:

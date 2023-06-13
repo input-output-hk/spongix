@@ -17,8 +17,8 @@ import (
 	"github.com/input-output-hk/spongix/pkg/logger"
 	"github.com/jamespfennell/xz"
 	"github.com/klauspost/compress/zstd"
+	"github.com/nix-community/go-nix/pkg/nar"
 	"github.com/nix-community/go-nix/pkg/narinfo"
-	"github.com/numtide/go-nix/nar"
 	"github.com/pkg/errors"
 	"go.uber.org/zap"
 )
@@ -138,7 +138,12 @@ func (np *NarProxy) narHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	symlink := ""
-	nrd := nar.NewReader(rd)
+	nrd, err := nar.NewReader(rd)
+	if err != nil {
+		_, _ = fmt.Fprintf(w, "creating NAR reader: %s", err)
+		return
+	}
+
 	for {
 		x, err := nrd.Next()
 		if err != nil {
@@ -150,11 +155,11 @@ func (np *NarProxy) narHandler(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		if (symlink != "" && nameMatches(x.Name, symlink)) || nameMatches(x.Name, path) {
+		if (symlink != "" && nameMatches(x.Path, symlink)) || nameMatches(x.Path, path) {
 			switch x.Type {
 			case nar.TypeSymlink:
 				// TODO: ensure regular files always come after symlinks
-				rel := filepath.Join(filepath.Dir(x.Name), x.Linkname)
+				rel := filepath.Join(filepath.Dir(x.Path), x.LinkTarget)
 				symlink = rel
 			case nar.TypeRegular:
 				mtype := mime.TypeByExtension(filepath.Ext(path))
@@ -183,7 +188,7 @@ func (np *NarProxy) narHandler(w http.ResponseWriter, r *http.Request) {
       <tbody>
 `)))
 
-				entries, err := listDir(nrd, x.Name)
+				entries, err := listDir(nrd, x.Path)
 				if err != nil {
 					w.WriteHeader(http.StatusInternalServerError)
 					_, _ = io.WriteString(w, errors.WithMessage(err, "listing dir").Error())
@@ -191,7 +196,7 @@ func (np *NarProxy) narHandler(w http.ResponseWriter, r *http.Request) {
 				}
 
 				for _, entry := range entries {
-					eurl := np.Prefix + hash + name + "/" + entry.Name
+					eurl := np.Prefix + hash + name + "/" + entry.Path
 					fmt.Fprintf(w, `<tr><td>%s</td><td><a href="%s">%s</a></td><td>%d</td></tr>`, entry.Type, eurl, eurl, entry.Size)
 				}
 
@@ -202,7 +207,7 @@ func (np *NarProxy) narHandler(w http.ResponseWriter, r *http.Request) {
 </html>
 				 `))
 				return
-			case nar.TypeUnknown:
+			default:
 				w.WriteHeader(http.StatusInternalServerError)
 				_, _ = io.WriteString(w, "unknown type for NAR header")
 				return
@@ -232,7 +237,7 @@ func listDir(n *nar.Reader, root string) ([]*nar.Header, error) {
 			return nil, errors.WithMessage(err, "getting next NAR header")
 		}
 
-		if filepath.Dir(x.Name) == root {
+		if filepath.Dir(x.Path) == root {
 			out = append(out, x)
 		}
 	}

@@ -17,7 +17,7 @@ import (
 	"github.com/folbricht/desync"
 	"github.com/input-output-hk/spongix/pkg/assembler"
 	"github.com/input-output-hk/spongix/pkg/logger"
-	"github.com/numtide/go-nix/nar"
+	"github.com/nix-community/go-nix/pkg/nar"
 	"github.com/pascaldekloe/metrics"
 	"github.com/pkg/errors"
 	"go.uber.org/zap"
@@ -208,7 +208,11 @@ type integrityCheck struct {
 
 func checkNarContents(store desync.Store, idx desync.Index) error {
 	buf := assembler.NewAssembler(store, idx)
-	narRd := nar.NewReader(buf)
+	narRd, err := nar.NewReader(buf)
+	if err != nil {
+		return err
+	}
+
 	none := true
 	for {
 		if _, err := narRd.Next(); err == nil {
@@ -229,12 +233,13 @@ func checkNarContents(store desync.Store, idx desync.Index) error {
 
 /*
 Local GC strategies:
-  Check every index file:
-    If chunks are missing, delete it.
-  	If it is not referenced by the database anymore, delete it.
-  Check every narinfo in the database:
-    If index is missing, delete it.
-  	If last access is too old, delete it.
+
+	Check every index file:
+	  If chunks are missing, delete it.
+		If it is not referenced by the database anymore, delete it.
+	Check every narinfo in the database:
+	  If index is missing, delete it.
+		If last access is too old, delete it.
 */
 func (gc *GC) gcOnce(cacheStat map[string]*chunkStat) {
 	log := gc.log.Named("gc")

@@ -1,5 +1,5 @@
 {
-  buildGo118Module,
+  buildGo120Module,
   lzma,
   pkg-config,
   inclusive,
@@ -8,7 +8,7 @@
   # TODO: split into multiple packages for each command.
   final = package "sha256-o2DiTC2sRZ33LY+hfH9tfFwkzi+JySS6+d/ibBdl6q0=";
   package = vendorSha256:
-    buildGo118Module rec {
+    buildGo120Module rec {
       pname = "spongix";
       version = "2022.11.30.001";
       inherit vendorSha256;

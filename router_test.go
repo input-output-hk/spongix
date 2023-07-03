@@ -27,43 +27,11 @@ Deriver: 914ivbx6hfpgczwphndm0vc4z6q2c8a1-test.drv
 Sig: kappa:JccDYkaQjN7ywE9VGJ6/RAzCt7XJoqWsmjTRsdAdM8DF40ebDDu3XWaasuJkaezbhVxjaRLJm3VWDEk6EmRpCw==
 `
 
-	fixtureNarinfoNoneClean = `StorePath: /nix/store/hyhrnrnpsz9fw5p9dk85a58y31ink18c-test
-URL: nar/1h6m2q7f8zq5z4kvn8j5wiz05jdic77df1x68dfwqg149jsy7gyp.nar
-Compression: none
-NarHash: sha256:1h6m2q7f8zq5z4kvn8j5wiz05jdic77df1x68dfwqg149jsy7gyp
-NarSize: 512
-References: 5b4cprjhjw35wyzvgmgvqay4hjf59h7x-test
-Deriver: 914ivbx6hfpgczwphndm0vc4z6q2c8a1-test.drv
-Sig: kappa:JccDYkaQjN7ywE9VGJ6/RAzCt7XJoqWsmjTRsdAdM8DF40ebDDu3XWaasuJkaezbhVxjaRLJm3VWDEk6EmRpCw==
-`
-
 	fixtureNarinfoNoneUpstream = `StorePath: /nix/store/hyhrnrnpsz9fw5p9dk85a58y31ink18c-test
 URL: nar/1h6m2q7f8zq5z4kvn8j5wiz05jdic77df1x68dfwqg149jsy7gyp.nar
 Compression: none
 FileHash: sha256:1h6m2q7f8zq5z4kvn8j5wiz05jdic77df1x68dfwqg149jsy7gyp
 FileSize: 512
-NarHash: sha256:1h6m2q7f8zq5z4kvn8j5wiz05jdic77df1x68dfwqg149jsy7gyp
-NarSize: 512
-References: 5b4cprjhjw35wyzvgmgvqay4hjf59h7x-test
-Deriver: 914ivbx6hfpgczwphndm0vc4z6q2c8a1-test.drv
-Sig: kappa:JccDYkaQjN7ywE9VGJ6/RAzCt7XJoqWsmjTRsdAdM8DF40ebDDu3XWaasuJkaezbhVxjaRLJm3VWDEk6EmRpCw==
-`
-
-	fixtureNarinfoXz = `StorePath: /nix/store/hyhrnrnpsz9fw5p9dk85a58y31ink18c-test
-URL: nar/1h6m2q7f8zq5z4kvn8j5wiz05jdic77df1x68dfwqg149jsy7gyp.nar.xz
-Compression: xz
-NarHash: sha256:1h6m2q7f8zq5z4kvn8j5wiz05jdic77df1x68dfwqg149jsy7gyp
-NarSize: 512
-References: 5b4cprjhjw35wyzvgmgvqay4hjf59h7x-test
-Deriver: 914ivbx6hfpgczwphndm0vc4z6q2c8a1-test.drv
-Sig: kappa:JccDYkaQjN7ywE9VGJ6/RAzCt7XJoqWsmjTRsdAdM8DF40ebDDu3XWaasuJkaezbhVxjaRLJm3VWDEk6EmRpCw==
-`
-
-	fixtureNarinfoXzUpstream = `StorePath: /nix/store/hyhrnrnpsz9fw5p9dk85a58y31ink18c-test
-URL: nar/0rjb49w7dldq79d3ax30gw279bnbn48w9q925g3lr0rhrl0ycxvs.nar.xz
-Compression: xz
-FileHash: sha256:0rjb49w7dldq79d3ax30gw279bnbn48w9q925g3lr0rhrl0ycxvs
-FileSize: 220
 NarHash: sha256:1h6m2q7f8zq5z4kvn8j5wiz05jdic77df1x68dfwqg149jsy7gyp
 NarSize: 512
 References: 5b4cprjhjw35wyzvgmgvqay4hjf59h7x-test
@@ -128,23 +96,6 @@ Sig: kappa:JccDYkaQjN7ywE9VGJ6/RAzCt7XJoqWsmjTRsdAdM8DF40ebDDu3XWaasuJkaezbhVxja
 		0xb1, 0xc4, 0x67, 0xfb, 0x02, 0x00, 0x00, 0x00, 0x00, 0x04, 0x59, 0x5a,
 	}
 
-	fNarZst         = fNar + ".zst"
-	fNarZstUpstream = "/nar/0mn3yn1dh5l065jjrj7b3gc8sn3kbji32w16dwgcs6yqgada09jv.nar.zst"
-	fixtureNarZst   = []byte{
-		0x28, 0xb5, 0x2f, 0xfd, 0x04, 0x58, 0x9d, 0x05, 0x00, 0xf2, 0x08, 0x1e, 0x1d, 0x50, 0xab, 0x73,
-		0x84, 0x06, 0x92, 0x9a, 0x85, 0x1a, 0x66, 0x9a, 0x95, 0x6e, 0x4f, 0x66, 0x66, 0x86, 0x65, 0x96,
-		0xb1, 0x2d, 0x45, 0x66, 0x1c, 0x54, 0x49, 0x52, 0xbd, 0x53, 0x2c, 0xd1, 0x30, 0xbb, 0xad, 0x36,
-		0xad, 0x61, 0x76, 0x72, 0x31, 0x1e, 0xb3, 0x34, 0xa2, 0xa7, 0x44, 0x07, 0xa9, 0x20, 0x09, 0xaa,
-		0x22, 0xd1, 0x5a, 0x16, 0x56, 0xf4, 0x22, 0xa6, 0x1c, 0xa5, 0x59, 0x5a, 0xf2, 0xd4, 0xb0, 0x5d,
-		0xba, 0xed, 0xcc, 0xdf, 0x09, 0xb1, 0x6b, 0xc2, 0x1d, 0xab, 0x0f, 0x29, 0xc2, 0xc2, 0xf5, 0x01,
-		0xd8, 0x33, 0xed, 0x6a, 0x13, 0x90, 0xdc, 0xf6, 0xe6, 0x07, 0x8f, 0x3c, 0xb5, 0x93, 0xac, 0xcf,
-		0x0d, 0xff, 0x9f, 0x54, 0xec, 0x0b, 0x8e, 0x38, 0xfb, 0xaf, 0x48, 0xb2, 0xd2, 0xe7, 0xb0, 0x4b,
-		0x2e, 0xdd, 0x1f, 0x02, 0x19, 0x00, 0x9d, 0x79, 0x00, 0xb8, 0x03, 0xc7, 0x13, 0x0b, 0xad, 0x06,
-		0x41, 0x40, 0x99, 0xe3, 0x80, 0x7c, 0x20, 0xbb, 0x02, 0x67, 0xc0, 0xbd, 0x5e, 0x98, 0x19, 0x20,
-		0x2f, 0xb4, 0x63, 0x0d, 0x67, 0x40, 0x5e, 0x68, 0x67, 0x09, 0x00, 0xdc, 0x14, 0x03, 0x0c, 0x0c,
-		0x06, 0x02, 0x03, 0x81, 0x81, 0xc1, 0xc0, 0xc0, 0x08, 0x03, 0x68, 0x03, 0x3f, 0x3a, 0x98, 0xd0,
-	}
-
 	fRealisation       = "/realisations/sha256:4ef2eb79caed8101898542afdbc991f969d915773ece52dbf3b6cfa78fa08d92!out.doi"
 	fLog               = "/log/hyhrnrnpsz9fw5p9dk85a58y31ink18c-test.drv"
 	fixtureRealisation = strings.TrimSpace(`
@@ -165,20 +116,15 @@ Sig: kappa:JccDYkaQjN7ywE9VGJ6/RAzCt7XJoqWsmjTRsdAdM8DF40ebDDu3XWaasuJkaezbhVxja
 	nsNarinfo     = "/" + testNamespace + fNarinfo
 	nsNar         = "/" + testNamespace + fNar
 	nsNarXz       = "/" + testNamespace + fNarXz
-	nsNarZst      = "/" + testNamespace + fNarZst
 	nsRealisation = "/" + testNamespace + fRealisation
 	nsLog         = "/" + testNamespace + fLog
 
 	mockGetNar200      = mockGet(suffix+fNar, 200).Body(string(fixtureNar)).Header(headerContentType, mimeNar).End()
-	mockGetNarinfo200  = mockGet(suffix+fNarinfo, 200).Body(fixtureNarinfoNoneUpstream).Header(headerContentType, mimeNarinfo).End()
 	mockHeadNarinfo200 = mockHead(suffix+fNarinfo, 200).Body(fixtureNarinfoNoneUpstream).Header(headerContentType, mimeNarinfo).End()
 	mockGetNar404      = mockGet(suffix+fNar, 404).End()
 	mockGetNarinfo404  = mockGet(suffix+fNarinfo, 404).End()
 
-	mockGetNarXz200     = mockGet(suffix+fNarXzUpstream, 200).Body(string(fixtureNarXz)).Header(headerContentType, mimeNar).End()
-	mockGetNarinfoXz200 = mockGet(suffix+fNarinfo, 200).Body(fixtureNarinfoXzUpstream).Header(headerContentType, mimeNarinfo).End()
-	mockGetNarXz404     = mockGet(suffix+fNarXzUpstream, 404).End()
-	mockGetNarinfoXz404 = mockGet(suffix+fNarinfo, 404).End()
+	mockGetNarXz404 = mockGet(suffix+fNarXzUpstream, 404).End()
 )
 
 func mockHead(url string, status int) *apitest.MockResponse {

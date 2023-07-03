@@ -9,8 +9,6 @@ const (
 	headerCacheHit    = "HIT"
 	headerCacheRemote = "REMOTE"
 	headerCacheMiss   = "MISS"
-
-	headerCacheUpstream = "X-Cache-Upstream"
 )
 
 type cacheRequest struct {

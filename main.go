@@ -236,17 +236,20 @@ func (proxy *Proxy) setupLogger() {
 func (proxy *Proxy) startCache() {
 	for req := range proxy.cacheChan {
 		proxy.log.Info("Caching", zap.String("location", req.location), zap.String("namespace", req.namespace), zap.String("url", req.url))
+		proxy.doCache(req)
+	}
+}
 
-		if response, err := http.Get(req.url); err != nil {
-			proxy.log.Error("failed downloading file", zap.Error(err), zap.String("url", req.url))
-		} else {
-			defer response.Body.Close()
-			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-			defer cancel()
+func (proxy *Proxy) doCache(req *cacheRequest) {
+	if response, err := http.Get(req.url); err != nil {
+		proxy.log.Error("failed downloading file", zap.Error(err), zap.String("url", req.url))
+	} else {
+		defer response.Body.Close()
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
 
-			if err := proxy.insert(ctx, req.location, response.Body); err != nil {
-				proxy.log.Error("failed caching file", zap.Error(err), zap.String("url", req.url))
-			}
+		if err := proxy.insert(ctx, req.location, response.Body); err != nil {
+			proxy.log.Error("failed caching file", zap.Error(err), zap.String("url", req.url))
 		}
 	}
 }

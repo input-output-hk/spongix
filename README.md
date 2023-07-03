@@ -59,23 +59,34 @@ Set a `post-build-hook` in your nix configuration to a script like this:
   - [ ] lzip
   - [ ] lzma
   - [ ] lzop
-  - [x] none
-  - [x] xz
-  - [x] brotli
+  - [ ] none
+  - [ ] xz
+  - [ ] brotli
   - [ ] zstd
-- [ ] Write better integration tests (with cicero)
 - [ ] Healthchecks
-- [ ] A way to horizontally scale (probably by just locking via consul, s3, raft, postgres, rqlite, dqlite, ...)
+- [ ] A way to horizontally scale
 - [ ] Proper CLI usage
 - [ ] Benchmark of desync index vs db lookup performance
-- [x] Additional signing for a set of allowed public keys
-- [x] Disk cache size limits and LRU eviction
-- [x] Forward lookups across multiple upstream caches
-- [x] Identify and solve concurrency issues
-- [x] Prometheus metrics
-- [x] Store narinfo in a database
-- [x] Upload to S3 as well as the local store
-- [x] Verify existing signatures
+- [ ] Additional signing for a set of allowed public keys
+- [ ] Disk cache size limits and LRU eviction
+- [ ] Forward lookups across multiple upstream caches
+- [ ] Identify and solve concurrency issues
+- [ ] Prometheus metrics
+- [ ] Store narinfo in a database
+- [ ] Upload to S3 compatible storage as well as the local store
+- [ ] Verify existing signatures
+
+## Storage
+
+R2:
+* `/bucket/$namespace/$hash.narinfo`
+* `/bucket/$namespace/nar/$hash.nar`
+* `/bucket/$namespace/log/$hash.drv`
+* `/bucket/$namespace/realisations/sha256:$hash.doi`
+
+Pipeline:
+
+* Upload NAR
 
 ## Issues
 
@@ -103,4 +114,3 @@ across mutliple layers. If we were to return a different info on every request,
 that would not be very cacheable, and if Spongix were to upgrade and suddenly
 return different hashes, that would cause issues with clients that still have
 older narinfos in their cache.
-

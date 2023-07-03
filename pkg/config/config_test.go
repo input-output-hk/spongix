@@ -3,7 +3,7 @@ package config
 import (
 	"testing"
 
-	"github.com/smartystreets/assertions"
+	"github.com/smarty/assertions"
 )
 
 const exampleConfig = `

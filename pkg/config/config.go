@@ -13,9 +13,9 @@ type Config struct {
 	LogLevel         string               `json:"log_level" arg:"--log-level,env:LOG_LEVEL" help:"One of debug, info, warn, error, dpanic, panic, fatal"`
 	LogMode          string               `json:"log_mode" arg:"--log-mode,env:LOG_MODE" help:"development or production"`
 	AverageChunkSize uint64               `json:"average_chunk_size" arg:"--average-chunk-size,env:AVERAGE_CHUNK_SIZE" help:"Chunk size will be between /4 and *4 of this value"`
+	Namespaces       map[string]Namespace `json:"namespaces"`
 	S3BucketUrl      string               `json:"s3_bucket_url"`
 	S3BucketRegion   string               `json:"s3_bucket_region"`
-	Namespaces       map[string]Namespace `json:"namespaces"`
 }
 
 type Namespace struct {

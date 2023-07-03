@@ -10,7 +10,7 @@ import (
 	"time"
 
 	"github.com/folbricht/desync"
-	"github.com/smartystreets/assertions"
+	"github.com/smarty/assertions"
 )
 
 var defaultStoreOptions = desync.StoreOptions{

@@ -13,7 +13,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/alexflint/go-arg"
+	arg "github.com/alexflint/go-arg"
 	"github.com/folbricht/desync"
 	"github.com/input-output-hk/spongix/pkg/assembler"
 	"github.com/input-output-hk/spongix/pkg/logger"

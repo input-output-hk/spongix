@@ -7,11 +7,11 @@ import (
 	"net/url"
 	"os"
 	"os/signal"
-	"path/filepath"
 	"syscall"
 	"time"
 
 	"github.com/alexflint/go-arg"
+	"github.com/alitto/pond"
 	"github.com/folbricht/desync"
 	"github.com/input-output-hk/spongix/pkg/config"
 	"github.com/input-output-hk/spongix/pkg/logger"
@@ -50,12 +50,10 @@ func main() {
 	chunkSizeAvg = proxy.config.AverageChunkSize
 
 	proxy.setupLogger()
-	proxy.setupDesync()
 	proxy.setupKeys()
 	proxy.setupS3()
 
-	// go proxy.startCache()
-	proxy.migrate()
+	go proxy.startCache()
 
 	go func() {
 		t := time.Tick(5 * time.Second)
@@ -118,15 +116,13 @@ type Proxy struct {
 	secretKeys  map[string]signature.SecretKey
 	trustedKeys map[string][]signature.PublicKey
 
-	s3Store    desync.WriteStore
-	localStore desync.WriteStore
-
-	s3Indices    map[string]desync.IndexWriteStore
-	localIndices map[string]desync.IndexWriteStore
+	s3Store desync.WriteStore
+	s3Index desync.IndexWriteStore
 
 	cacheChan chan *cacheRequest
 
-	log *zap.Logger
+	log  *zap.Logger
+	pool *pond.WorkerPool
 }
 
 func NewProxy(config *config.Config) *Proxy {
@@ -136,18 +132,13 @@ func NewProxy(config *config.Config) *Proxy {
 	}
 
 	return &Proxy{
-		config:       config,
-		cacheChan:    make(chan *cacheRequest, 10000),
-		log:          devLog,
-		s3Indices:    map[string]desync.IndexWriteStore{},
-		localIndices: map[string]desync.IndexWriteStore{},
-		secretKeys:   map[string]signature.SecretKey{},
-		trustedKeys:  map[string][]signature.PublicKey{},
+		config:      config,
+		cacheChan:   make(chan *cacheRequest, 10000),
+		log:         devLog,
+		pool:        pond.New(10, 1000),
+		secretKeys:  map[string]signature.SecretKey{},
+		trustedKeys: map[string][]signature.PublicKey{},
 	}
-}
-
-func (p *Proxy) dbFile() string {
-	return filepath.Join(p.config.Dir, "index.sqlite")
 }
 
 var (
@@ -159,31 +150,21 @@ func (proxy *Proxy) Version() string {
 	return buildVersion + " (" + buildCommit + ")"
 }
 
-func (proxy *Proxy) setupDir(dir string) {
-	if _, err := os.Stat(dir); err != nil {
-		// proxy.log.Debug("Creating directory", zap.String("dir", dir))
-		if err := os.MkdirAll(dir, 0o755); err != nil {
-			proxy.log.Fatal("couldn't create directory", zap.String("dir", dir))
-		}
-	}
-}
-
 func (proxy *Proxy) setupS3() {
 	cfg := proxy.config
 	if cfg.S3BucketUrl == "" {
-		log.Println("No bucket url given, will not upload files")
-		return
+		proxy.log.Fatal("No bucket url given, will not upload files")
 	}
 
 	if cfg.S3BucketRegion == "" {
-		log.Println("No bucket region given, will not upload files")
-		return
+		proxy.log.Fatal("No bucket region given, will not upload files")
 	}
 
 	s3Url, err := url.Parse(cfg.S3BucketUrl)
 	if err != nil {
 		proxy.log.Fatal("couldn't parse bucket url", zap.Error(err), zap.String("url", cfg.S3BucketUrl))
 	}
+
 	creds := credentials.NewChainCredentials(
 		[]credentials.Provider{
 			&credentials.EnvMinio{},
@@ -191,14 +172,13 @@ func (proxy *Proxy) setupS3() {
 		},
 	)
 
-	store, err := desync.NewS3Store(s3Url, creds, cfg.S3BucketRegion,
-		desync.StoreOptions{
-			N:            1,
-			Timeout:      1 * time.Second,
-			ErrorRetry:   0,
-			Uncompressed: false,
-			SkipVerify:   false,
-		}, minio.BucketLookupAuto)
+	options := desync.StoreOptions{
+		N:          64,
+		Timeout:    1 * time.Second,
+		ErrorRetry: 1,
+	}
+
+	store, err := desync.NewS3Store(s3Url, creds, cfg.S3BucketRegion, options, minio.BucketLookupAuto)
 	if err != nil {
 		proxy.log.Fatal("failed creating s3 store",
 			zap.Error(err),
@@ -208,6 +188,17 @@ func (proxy *Proxy) setupS3() {
 	}
 
 	proxy.s3Store = store
+
+	index, err := desync.NewS3IndexStore(s3Url, creds, cfg.S3BucketRegion, options, minio.BucketLookupAuto)
+	if err != nil {
+		proxy.log.Fatal("failed creating s3 index store",
+			zap.Error(err),
+			zap.String("url", s3Url.String()),
+			zap.String("region", cfg.S3BucketRegion),
+		)
+	}
+
+	proxy.s3Index = index
 }
 
 func (proxy *Proxy) setupKeys() {
@@ -231,40 +222,31 @@ func (proxy *Proxy) setupKeys() {
 	}
 }
 
-var defaultStoreOptions = desync.StoreOptions{
-	N:            1,
-	Timeout:      1 * time.Second,
-	ErrorRetry:   0,
-	Uncompressed: false,
-	SkipVerify:   false,
-}
-
-func (proxy *Proxy) setupDesync() {
-	for namespace := range proxy.config.Namespaces {
-		indexDir := filepath.Join(proxy.config.Dir, "index", namespace)
-		proxy.setupDir(filepath.Join(indexDir, "nar"))
-		narIndex, err := desync.NewLocalIndexStore(indexDir)
-		if err != nil {
-			proxy.log.Fatal("failed creating local index", zap.Error(err), zap.String("dir", indexDir))
-		}
-
-		proxy.localIndices[namespace] = narIndex
-	}
-
-	storeDir := filepath.Join(proxy.config.Dir, "store")
-	proxy.setupDir(storeDir)
-	narStore, err := desync.NewLocalStore(storeDir, defaultStoreOptions)
-	if err != nil {
-		proxy.log.Fatal("failed creating local store", zap.Error(err), zap.String("dir", storeDir))
-	}
-	narStore.UpdateTimes = true
-	proxy.localStore = narStore
-}
-
 func (proxy *Proxy) setupLogger() {
 	if log, err := logger.SetupLogger(proxy.config.LogMode, proxy.config.LogLevel); err != nil {
 		panic(err)
 	} else {
 		proxy.log = log
+	}
+}
+
+// retrieve queued cache requests and cache them in our own store
+// this is done in a separate goroutine to not block the main request handler
+// for the time being, we only process one request at a time, and don't use the pool.
+func (proxy *Proxy) startCache() {
+	for req := range proxy.cacheChan {
+		proxy.log.Info("Caching", zap.String("location", req.location), zap.String("namespace", req.namespace), zap.String("url", req.url))
+
+		if response, err := http.Get(req.url); err != nil {
+			proxy.log.Error("failed downloading file", zap.Error(err), zap.String("url", req.url))
+		} else {
+			defer response.Body.Close()
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+
+			if err := proxy.insert(ctx, req.location, response.Body); err != nil {
+				proxy.log.Error("failed caching file", zap.Error(err), zap.String("url", req.url))
+			}
+		}
 	}
 }

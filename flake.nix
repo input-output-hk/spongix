@@ -30,6 +30,11 @@
           };
 
           default = self'.packages.spongix;
+
+          # just a derivation to test uploads
+          testing = pkgs.runCommand "testing" {} ''
+            echo testing > $out
+          '';
         };
 
         devShells.default = pkgs.mkShell {
@@ -39,6 +44,11 @@
             golangci-lint
             gotools
             gocode
+            gopls
+            nodejs
+            minio
+            minio-client
+            watchexec
           ];
         };
 

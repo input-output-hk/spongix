@@ -74,7 +74,7 @@ func (s fakeIndex) GetIndex(id string) (i desync.Index, e error) {
 	defer f.Close()
 	idx, err := desync.IndexFromReader(f)
 	if os.IsNotExist(err) {
-		err = errors.Errorf("Index file does not exist: %v", err)
+		err = errors.New("reading index: The specified key does not exist.")
 	}
 	return idx, err
 }
@@ -84,5 +84,5 @@ func (s fakeIndex) GetIndexReader(id string) (io.ReadCloser, error) {
 	if ok {
 		return io.NopCloser(bytes.NewBuffer(idx)), nil
 	}
-	return nil, os.ErrNotExist
+	return nil, errors.New("reading index: The specified key does not exist.")
 }

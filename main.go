@@ -53,8 +53,6 @@ func main() {
 	proxy.setupChunks()
 	proxy.setupIndices()
 
-	go proxy.startCache()
-
 	go func() {
 		t := time.Tick(5 * time.Second)
 		for range t {
@@ -119,10 +117,9 @@ type Proxy struct {
 	s3Store   desync.WriteStore
 	s3Indices map[string]desync.IndexWriteStore
 
-	cacheChan chan *cacheRequest
-
-	log  *zap.Logger
-	pool *pond.WorkerPool
+	log       *zap.Logger
+	headPool  *pond.WorkerPool
+	cachePool *pond.WorkerPool
 }
 
 func NewProxy(config *config.Config) *Proxy {
@@ -133,9 +130,9 @@ func NewProxy(config *config.Config) *Proxy {
 
 	return &Proxy{
 		config:      config,
-		cacheChan:   make(chan *cacheRequest, 10000),
 		log:         devLog,
-		pool:        pond.New(10, 1000),
+		headPool:    pond.New(10, 1000),
+		cachePool:   pond.New(10, 1000),
 		secretKeys:  map[string]signature.SecretKey{},
 		trustedKeys: map[string][]signature.PublicKey{},
 		s3Indices:   map[string]desync.IndexWriteStore{},
@@ -227,16 +224,6 @@ func (proxy *Proxy) setupLogger() {
 		panic(err)
 	} else {
 		proxy.log = log
-	}
-}
-
-// retrieve queued cache requests and cache them in our own store
-// this is done in a separate goroutine to not block the main request handler
-// for the time being, we only process one request at a time, and don't use the pool.
-func (proxy *Proxy) startCache() {
-	for req := range proxy.cacheChan {
-		proxy.log.Info("Caching", zap.String("location", req.location), zap.String("namespace", req.namespace), zap.String("url", req.url))
-		proxy.doCache(req)
 	}
 }
 

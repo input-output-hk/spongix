@@ -142,7 +142,7 @@ func (p *Proxy) redirectToUpstream(location string, w http.ResponseWriter, r *ht
 	} else if ns, ok := p.config.Namespaces[namespace]; !ok {
 		panic("namespace not found")
 	} else {
-		group := p.pool.Group()
+		group := p.headPool.Group()
 		first := make(chan string, len(ns.Substituters))
 
 		for _, substituter := range ns.Substituters {
@@ -175,13 +175,12 @@ func (p *Proxy) redirectToUpstream(location string, w http.ResponseWriter, r *ht
 
 		select {
 		case found := <-first:
-			p.cacheChan <- &cacheRequest{
-				namespace: namespace,
-				url:       found,
-				location:  location,
-			}
+			p.cachePool.TrySubmit(func() {
+				p.doCache(&cacheRequest{namespace: namespace, url: found, location: location})
+			})
+
 			http.Redirect(w, r, found, http.StatusFound)
-		case <-time.After(1 * time.Second):
+		case <-time.After(500 * time.Millisecond):
 			serveNotFound(w, r)
 		}
 	}

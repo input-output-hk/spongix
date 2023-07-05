@@ -157,7 +157,6 @@ func testProxy(t *testing.T) *Proxy {
 	// proxy.setupDesync()
 	proxy.s3Store = newFakeStore()
 	proxy.s3Indices = map[string]desync.IndexWriteStore{testNamespace: newFakeIndex()}
-	go proxy.startCache()
 
 	// proxy.setupKeys()
 

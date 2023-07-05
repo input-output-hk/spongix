@@ -10,6 +10,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/input-output-hk/spongix/pkg/compress"
+
 	"github.com/folbricht/desync"
 	"github.com/gorilla/handlers"
 	"github.com/gorilla/mux"
@@ -45,6 +47,7 @@ func (proxy *Proxy) router() *mux.Router {
 		withHTTPLogging(proxy.log),
 		handlers.RecoveryHandler(handlers.PrintRecoveryStack(true)),
 	)
+	r.Use(compress.CompressHandler)
 
 	r.HandleFunc("/metrics", metrics.ServeHTTP)
 
@@ -53,17 +56,17 @@ func (proxy *Proxy) router() *mux.Router {
 
 		namespace.HandleFunc("/nix-cache-info", proxy.nixCacheInfo).Methods("HEAD", "GET")
 
-		namespace.HandleFunc(matchNarinfo, proxy.commonHeadAndGet(narinfoPrefix, mimeNarinfo)).Methods("HEAD", "GET")
-		namespace.HandleFunc(matchNarinfo, proxy.commonPut(narinfoPrefix)).Methods("PUT")
+		namespace.HandleFunc(matchNarinfo, proxy.largeHeadAndGet(narinfoPrefix, mimeNarinfo)).Methods("HEAD", "GET")
+		namespace.HandleFunc(matchNarinfo, proxy.largePut(narinfoPrefix)).Methods("PUT")
 
-		namespace.HandleFunc(matchNar, proxy.commonHeadAndGet(narPrefix, mimeNar)).Methods("HEAD", "GET")
-		namespace.HandleFunc(matchNar, proxy.commonPut(narPrefix)).Methods("PUT")
+		namespace.HandleFunc(matchNar, proxy.largeHeadAndGet(narPrefix, mimeNar)).Methods("HEAD", "GET")
+		namespace.HandleFunc(matchNar, proxy.largePut(narPrefix)).Methods("PUT")
 
-		namespace.HandleFunc(matchRealisation, proxy.commonHeadAndGet(realisationPrefix, mimeJson)).Methods("HEAD", "GET")
-		namespace.HandleFunc(matchRealisation, proxy.commonPut(realisationPrefix)).Methods("PUT")
+		namespace.HandleFunc(matchRealisation, proxy.largeHeadAndGet(realisationPrefix, mimeJson)).Methods("HEAD", "GET")
+		namespace.HandleFunc(matchRealisation, proxy.largePut(realisationPrefix)).Methods("PUT")
 
-		namespace.HandleFunc(matchLog, proxy.commonHeadAndGet(logPrefix, mimeText)).Methods("HEAD", "GET")
-		namespace.HandleFunc(matchLog, proxy.commonPut(logPrefix)).Methods("PUT")
+		namespace.HandleFunc(matchLog, proxy.largeHeadAndGet(logPrefix, mimeText)).Methods("HEAD", "GET")
+		namespace.HandleFunc(matchLog, proxy.largePut(logPrefix)).Methods("PUT")
 	}
 
 	return r
@@ -71,12 +74,11 @@ func (proxy *Proxy) router() *mux.Router {
 
 func indexPathFor(kind string, r *http.Request) string {
 	vars := mux.Vars(r)
-	namespace := vars["namespace"]
 	hash := vars["hash"]
 	if len(hash) > 4 {
-		return filepath.Join("indices", namespace, kind, hash[0:4], hash)
+		return filepath.Join("indices", kind, hash[0:4], hash)
 	} else {
-		return filepath.Join("indices", namespace, kind, hash)
+		return filepath.Join("indices", kind, hash)
 	}
 }
 
@@ -185,10 +187,14 @@ func (p *Proxy) redirectToUpstream(location string, w http.ResponseWriter, r *ht
 	}
 }
 
-func (p *Proxy) commonHeadAndGet(prefix, mime string) func(w http.ResponseWriter, r *http.Request) {
+func (p *Proxy) largeHeadAndGet(prefix, mime string) func(w http.ResponseWriter, r *http.Request) {
 	return func(w http.ResponseWriter, r *http.Request) {
 		location := indexPathFor(prefix, r)
-		if index, err := p.s3Index.GetIndex(location); err != nil {
+		namespace := mux.Vars(r)["namespace"]
+
+		if indices, ok := p.s3Indices[namespace]; !ok {
+			serveNotFound(w, r)
+		} else if index, err := indices.GetIndex(location); err != nil {
 			if err.Error() == "reading index: The specified key does not exist." {
 				p.redirectToUpstream(location, w, r)
 			} else {
@@ -203,13 +209,14 @@ func (p *Proxy) commonHeadAndGet(prefix, mime string) func(w http.ResponseWriter
 	}
 }
 
-func (p *Proxy) commonPut(prefix string) func(w http.ResponseWriter, r *http.Request) {
+func (p *Proxy) largePut(prefix string) func(w http.ResponseWriter, r *http.Request) {
 	return func(w http.ResponseWriter, r *http.Request) {
+		namespace := mux.Vars(r)["namespace"]
 		location := indexPathFor(prefix, r)
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
 		defer cancel()
 
-		if err := p.insert(ctx, location, r.Body); err != nil {
+		if err := p.insert(ctx, namespace, location, r.Body); err != nil {
 			p.log.Error("inserting", zap.String("index", location), zap.Error(err))
 			answer(w, http.StatusInternalServerError, mimeText, err.Error())
 		} else {
@@ -219,12 +226,14 @@ func (p *Proxy) commonPut(prefix string) func(w http.ResponseWriter, r *http.Req
 	}
 }
 
-func (p *Proxy) insert(ctx context.Context, location string, body io.Reader) error {
-	if chunker, err := desync.NewChunker(body, chunkSizeMin(), chunkSizeAvg, chunkSizeMax()); err != nil {
+func (p *Proxy) insert(ctx context.Context, namespace, location string, body io.Reader) error {
+	if indices, ok := p.s3Indices[namespace]; !ok {
+		return errors.Errorf("namespace '%s' not found", namespace)
+	} else if chunker, err := desync.NewChunker(body, p.config.Chunks.MinSize, p.config.Chunks.AvgSize, p.config.Chunks.MaxSize); err != nil {
 		return errors.WithMessage(err, "failed creating chunker")
 	} else if index, err := desync.ChunkStream(ctx, chunker, p.s3Store, defaultThreads); err != nil {
 		return errors.WithMessage(err, "failed chunking")
-	} else if err := p.s3Index.StoreIndex(location, index); err != nil {
+	} else if err := indices.StoreIndex(location, index); err != nil {
 		return errors.WithMessage(err, "failed storing index")
 	} else {
 		p.log.Info("stored", zap.String("location", location), zap.Int("chunks", len(index.Chunks)))

@@ -18,11 +18,26 @@
 
   logModes = ["production" "development"];
 
+  mapS3 = prefix: name: value: {
+    url = value.url;
+    region = value.region;
+    profile = value.profile;
+    credentials_file = "$CREDENTIALS_DIRECTORY/${prefix}";
+    # value.credentialsFile
+  };
+
+  mapChunks = name: value: {
+    minimum_size = value.minimumSize;
+    average_size = value.averageSize;
+    maximum_size = value.maximumSize;
+    s3 = builtins.mapAttrs (mapS3 "chunks") value.s3;
+  };
+
   mapNamespace = name: value: {
     substituters = value.substituters;
-    secret_key_file = "__${name}__SECRET__KEY__";
     trusted_public_keys = value.trustedPublicKeys;
     cache_info_priority = value.cacheInfoPriority;
+    s3 = builtins.mapAttrs (mapS3 "namespace_${name}") value.s3;
   };
 
   configFile = pkgs.writeTextFile {
@@ -32,10 +47,43 @@
       listen = "${cfg.host}:${builtins.toString cfg.port}";
       log_level = cfg.logLevel;
       log_mode = cfg.logMode;
-      average_chunk_size = cfg.averageChunkSize;
-      s3_bucket_url = cfg.bucketURL;
-      s3_bucket_region = cfg.bucketRegion;
       namespaces = builtins.mapAttrs mapNamespace cfg.namespaces;
+      chunks = builtins.mapAttrs mapChunks cfg.chunks;
+    };
+  };
+
+  s3Type = lib.mkOption {
+    type = lib.types.submodule {
+      options = {
+        url = lib.mkOption {
+          type = lib.types.str;
+          description = ''
+            URL of the S3 Bucket.
+          '';
+        };
+
+        region = lib.mkOption {
+          type = lib.types.str;
+          description = ''
+            Region of the S3 bucket. (Also required for Minio)
+          '';
+        };
+
+        profile = lib.mkOption {
+          type = lib.types.str;
+          default = "default";
+          description = ''
+            Profile to use for the S3 bucket.
+          '';
+        };
+
+        credentialsFile = lib.mkOption {
+          type = lib.types.str;
+          description = ''
+            Path to a file containing the credentials for the S3 bucket.
+          '';
+        };
+      };
     };
   };
 in {
@@ -48,25 +96,38 @@ in {
         default = pkgs.spongix;
       };
 
-      bucketURL = lib.mkOption {
-        type = lib.types.nullOr lib.types.str;
-        default = null;
-        description = "URL of the S3 Bucket.";
-        example = "s3+http://127.0.0.1:7745/spongix";
-      };
+      chunks = lib.mkOption {
+        type = lib.types.submodule {
+          options = {
+            minimumSize = lib.mkOption {
+              type = lib.types.ints.between 48 4294967296;
+              default = (1024 * 64) / 4;
+              description = ''
+                Minimum chunk size
+              '';
+            };
 
-      bucketRegion = lib.mkOption {
-        type = lib.types.nullOr lib.types.str;
-        default = null;
-        description = "Region of the S3 bucket. (Also required for Minio)";
-      };
+            averageSize = lib.mkOption {
+              type = lib.types.ints.between 48 4294967296;
+              default = 1024 * 64;
+              description = ''
+                Average chunk size
+              '';
+            };
 
-      cacheDir = lib.mkOption {
-        type = lib.types.str;
-        default = "/var/lib/spongix";
-        description = ''
-          Keep all cache state in this directory.
-        '';
+            maximumSize = lib.mkOption {
+              type = lib.types.ints.between 48 4294967296;
+              default = (1024 * 64) * 4;
+              description = ''
+                Maximum chunk size
+              '';
+            };
+
+            s3 = lib.mkOption {
+              type = s3Type;
+            };
+          };
+        };
       };
 
       host = lib.mkOption {
@@ -82,14 +143,6 @@ in {
         default = 7745;
         description = ''
           Listen on this port.
-        '';
-      };
-
-      averageChunkSize = lib.mkOption {
-        type = lib.types.ints.between 48 4294967296;
-        default = 65536;
-        description = ''
-          Chunk size will be between /4 and *4 of this value
         '';
       };
 
@@ -110,17 +163,6 @@ in {
       namespaces = lib.mkOption {
         type = lib.types.attrsOf (lib.types.submodule ({name, ...}: {
           options = {
-            secretKeyFile = lib.mkOption {
-              type = lib.types.str;
-              default = null;
-              description = ''
-                Path to a file containing the private key used for signing narinfos.
-                They may be located anywhere and will be made available by systemd.
-                To generate a key, you can use
-                `nix key generate-secret --key-name foo > foo.private`
-              '';
-            };
-
             substituters = lib.mkOption {
               type = lib.types.listOf lib.types.str;
               default = ["https://cache.nixos.org"];
@@ -147,73 +189,77 @@ in {
                 Priority in /nix-cache-info
               '';
             };
+
+            s3 = lib.mkOption {
+              type = s3Type;
+            };
           };
         }));
         default = {};
       };
 
-      gc = lib.mkOption {
-        type = lib.types.submodule {
-          options = {
-            enable = lib.mkEnableOption "Spongix garbage collection";
+      # gc = lib.mkOption {
+      #   type = lib.types.submodule {
+      #     options = {
+      #       enable = lib.mkEnableOption "Spongix garbage collection";
 
-            cacheSize = lib.mkOption {
-              type = lib.types.ints.positive;
-              default = 10;
-              description = ''
-                Number of GB to keep in the local cache
-              '';
-            };
+      #       cacheSize = lib.mkOption {
+      #         type = lib.types.ints.positive;
+      #         default = 10;
+      #         description = ''
+      #           Number of GB to keep in the local cache
+      #         '';
+      #       };
 
-            interval = lib.mkOption {
-              type = lib.types.str;
-              default = "daily";
-              description = ''
-                Time between garbage collections of local store files (fast)
-              '';
-            };
+      #       interval = lib.mkOption {
+      #         type = lib.types.str;
+      #         default = "daily";
+      #         description = ''
+      #           Time between garbage collections of local store files (fast)
+      #         '';
+      #       };
 
-            cacheDir = lib.mkOption {
-              type = lib.types.str;
-              default = cfg.cacheDir;
-              description = ''
-                Keep all cache state in this directory.
-              '';
-            };
+      #       cacheDir = lib.mkOption {
+      #         type = lib.types.str;
+      #         default = cfg.cacheDir;
+      #         description = ''
+      #           Keep all cache state in this directory.
+      #         '';
+      #       };
 
-            host = lib.mkOption {
-              type = lib.types.str;
-              default = cfg.host;
-              description = ''
-                Listen on this host. Will be 0.0.0.0 if empty.
-              '';
-            };
+      #       host = lib.mkOption {
+      #         type = lib.types.str;
+      #         default = cfg.host;
+      #         description = ''
+      #           Listen on this host. Will be 0.0.0.0 if empty.
+      #         '';
+      #       };
 
-            port = lib.mkOption {
-              type = lib.types.port;
-              default = 7746;
-              description = ''
-                Listen on this port.
-              '';
-            };
+      #       port = lib.mkOption {
+      #         type = lib.types.port;
+      #         default = 7746;
+      #         description = ''
+      #           Listen on this port.
+      #         '';
+      #       };
 
-            logLevel = lib.mkOption {
-              type = lib.types.enum logLevels;
-              default = "info";
-            };
+      #       logLevel = lib.mkOption {
+      #         type = lib.types.enum logLevels;
+      #         default = "info";
+      #       };
 
-            logMode = lib.mkOption {
-              type = lib.types.enum logModes;
-              default = "production";
-              description = ''
-                production mode uses JSON formatting, while development mode is more
-                human readable.
-              '';
-            };
-          };
-        };
-        default = {};
-      };
+      #       logMode = lib.mkOption {
+      #         type = lib.types.enum logModes;
+      #         default = "production";
+      #         description = ''
+      #           production mode uses JSON formatting, while development mode is more
+      #           human readable.
+      #         '';
+      #       };
+      #     };
+      #   };
+      #   default = {};
+      # };
 
       configFile = lib.mkOption {
         type = lib.types.path;
@@ -231,15 +277,11 @@ in {
       wantedBy = ["multi-user.target"];
 
       serviceConfig = let
-        mapJqArg = name: value: ''--arg ${name} "$CREDENTIALS_DIRECTORY/${name}"'';
-        args = builtins.concatStringsSep " | " (lib.mapAttrsToList mapJqArg cfg.namespaces);
-        mapJqQuery = name: value: ''.namespaces["${name}"].secret_key_file = ''$${name}'';
-        jqQuery = builtins.concatStringsSep " | " (lib.mapAttrsToList mapJqQuery cfg.namespaces);
         execStart = pkgs.writeShellApplication {
           name = "spongix-wrapper";
           runtimeInputs = [pkgs.jq];
           text = ''
-            jq < ${cfg.configFile} ${args} '${jqQuery}' > config.json
+            jq < ${cfg.configFile} > config.json
             exec ${cfg.package}/bin/spongix
           '';
         };
@@ -251,8 +293,9 @@ in {
         StateDirectory = "spongix";
         WorkingDirectory = cfg.cacheDir;
         LoadCredential =
-          lib.mapAttrsToList (name: value: "${name}:${value.secretKeyFile}")
-          cfg.namespaces;
+          ["chunks:${cfg.chunks.s3.credentialsFile}"]
+          ++ (lib.mapAttrsToList (name: value: "${name}:${value.credentialsFile}")
+            cfg.namespaces);
         ReadWritePaths = cfg.cacheDir;
         Restart = "on-failure";
         RestartSec = 5;
@@ -262,40 +305,40 @@ in {
       };
     };
 
-    systemd.timers.spongix-gc = lib.mkIf cfg.gc.enable {
-      wantedBy = ["timers.target"];
-      timerConfig = {
-        Persistent = true;
-        Unit = "spongix-gc.service";
-      };
-    };
+    # systemd.timers.spongix-gc = lib.mkIf cfg.gc.enable {
+    #   wantedBy = ["timers.target"];
+    #   timerConfig = {
+    #     Persistent = true;
+    #     Unit = "spongix-gc.service";
+    #   };
+    # };
 
-    systemd.services.spongix-gc = lib.mkIf cfg.gc.enable {
-      wantedBy = ["multi-user.target"];
+    # systemd.services.spongix-gc = lib.mkIf cfg.gc.enable {
+    #   wantedBy = ["multi-user.target"];
 
-      environment = {
-        CACHE_DIR = cfg.gc.cacheDir;
-        LISTEN_ADDR = "${cfg.gc.host}:${toString cfg.gc.port}";
-        CACHE_SIZE = toString cfg.gc.cacheSize;
-        GC_INTERVAL = cfg.gc.interval;
-        LOG_LEVEL = cfg.gc.logLevel;
-        LOG_MODE = cfg.gc.logMode;
-      };
+    #   environment = {
+    #     CACHE_DIR = cfg.gc.cacheDir;
+    #     LISTEN_ADDR = "${cfg.gc.host}:${toString cfg.gc.port}";
+    #     CACHE_SIZE = toString cfg.gc.cacheSize;
+    #     GC_INTERVAL = cfg.gc.interval;
+    #     LOG_LEVEL = cfg.gc.logLevel;
+    #     LOG_MODE = cfg.gc.logMode;
+    #   };
 
-      startAt = cfg.gc.interval;
-      serviceConfig = {
-        ExecStart = "${cfg.package}/bin/gc";
-        Type = "oneshot";
-        User = "spongix";
-        Group = "spongix";
-        DynamicUser = true;
-        RemainAfterExit = true;
-        StateDirectory = "spongix";
-        WorkingDirectory = cfg.gc.cacheDir;
-        ReadWritePaths = cfg.gc.cacheDir;
-        Restart = "on-failure";
-        RestartSec = "60s";
-      };
-    };
+    #   startAt = cfg.gc.interval;
+    #   serviceConfig = {
+    #     ExecStart = "${cfg.package}/bin/gc";
+    #     Type = "oneshot";
+    #     User = "spongix";
+    #     Group = "spongix";
+    #     DynamicUser = true;
+    #     RemainAfterExit = true;
+    #     StateDirectory = "spongix";
+    #     WorkingDirectory = cfg.gc.cacheDir;
+    #     ReadWritePaths = cfg.gc.cacheDir;
+    #     Restart = "on-failure";
+    #     RestartSec = "60s";
+    #   };
+    # };
   };
 }

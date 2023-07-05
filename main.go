@@ -25,11 +25,6 @@ const (
 	defaultThreads = 2
 )
 
-var chunkSizeAvg uint64 = 65536
-
-func chunkSizeMin() uint64 { return chunkSizeAvg / 4 }
-func chunkSizeMax() uint64 { return chunkSizeAvg * 4 }
-
 func main() {
 	// cpuprofile := "spongix.pprof"
 	// f, err := os.Create(cpuprofile)
@@ -39,19 +34,24 @@ func main() {
 	// pprof.StartCPUProfile(f)
 	// defer pprof.StopCPUProfile()
 
-	c, err := config.LoadFile("config.json")
+	cli := &config.CLI{}
+	arg.MustParse(cli)
+	cli.File = os.ExpandEnv(cli.File)
+
+	c, err := config.LoadFile(cli.File)
 	if err != nil {
 		panic(err)
 	}
 
 	proxy := NewProxy(c)
 
-	arg.MustParse(proxy)
-	chunkSizeAvg = proxy.config.AverageChunkSize
+	if err := proxy.config.Prepare(); err != nil {
+		log.Fatal(err)
+	}
 
 	proxy.setupLogger()
-	proxy.setupKeys()
-	proxy.setupS3()
+	proxy.setupChunks()
+	proxy.setupIndices()
 
 	go proxy.startCache()
 
@@ -116,8 +116,8 @@ type Proxy struct {
 	secretKeys  map[string]signature.SecretKey
 	trustedKeys map[string][]signature.PublicKey
 
-	s3Store desync.WriteStore
-	s3Index desync.IndexWriteStore
+	s3Store   desync.WriteStore
+	s3Indices map[string]desync.IndexWriteStore
 
 	cacheChan chan *cacheRequest
 
@@ -138,6 +138,7 @@ func NewProxy(config *config.Config) *Proxy {
 		pool:        pond.New(10, 1000),
 		secretKeys:  map[string]signature.SecretKey{},
 		trustedKeys: map[string][]signature.PublicKey{},
+		s3Indices:   map[string]desync.IndexWriteStore{},
 	}
 }
 
@@ -150,75 +151,74 @@ func (proxy *Proxy) Version() string {
 	return buildVersion + " (" + buildCommit + ")"
 }
 
-func (proxy *Proxy) setupS3() {
-	cfg := proxy.config
-	if cfg.S3BucketUrl == "" {
-		proxy.log.Fatal("No bucket url given, will not upload files")
+func (proxy *Proxy) setupChunks() {
+	s3 := proxy.config.Chunks.S3
+	if s3.Url == "" {
+		proxy.log.Fatal("No S3 URL given, will not upload files")
 	}
 
-	if cfg.S3BucketRegion == "" {
-		proxy.log.Fatal("No bucket region given, will not upload files")
+	if s3.Region == "" {
+		proxy.log.Fatal("No S3 region given, will not upload files")
 	}
 
-	s3Url, err := url.Parse(cfg.S3BucketUrl)
+	s3Url, err := url.Parse(s3.Url)
 	if err != nil {
-		proxy.log.Fatal("couldn't parse bucket url", zap.Error(err), zap.String("url", cfg.S3BucketUrl))
+		proxy.log.Fatal("couldn't parse S3 URL", zap.Error(err), zap.String("url", s3.Url))
 	}
 
-	creds := credentials.NewChainCredentials(
-		[]credentials.Provider{
-			&credentials.EnvMinio{},
-			&credentials.EnvAWS{},
-		},
-	)
-
-	options := desync.StoreOptions{
-		N:          64,
-		Timeout:    1 * time.Second,
-		ErrorRetry: 1,
-	}
-
-	store, err := desync.NewS3Store(s3Url, creds, cfg.S3BucketRegion, options, minio.BucketLookupAuto)
+	store, err := desync.NewS3Store(
+		s3Url,
+		mkCredentials(s3),
+		s3.Region,
+		defaultStoreOptions(),
+		minio.BucketLookupAuto)
 	if err != nil {
 		proxy.log.Fatal("failed creating s3 store",
 			zap.Error(err),
 			zap.String("url", s3Url.String()),
-			zap.String("region", cfg.S3BucketRegion),
+			zap.String("region", s3.Region),
 		)
 	}
 
 	proxy.s3Store = store
-
-	index, err := desync.NewS3IndexStore(s3Url, creds, cfg.S3BucketRegion, options, minio.BucketLookupAuto)
-	if err != nil {
-		proxy.log.Fatal("failed creating s3 index store",
-			zap.Error(err),
-			zap.String("url", s3Url.String()),
-			zap.String("region", cfg.S3BucketRegion),
-		)
-	}
-
-	proxy.s3Index = index
 }
 
-func (proxy *Proxy) setupKeys() {
+func (proxy *Proxy) setupIndices() {
 	for namespace, ns := range proxy.config.Namespaces {
-		if content, err := os.ReadFile(ns.SecretKeyFile); err != nil {
-			proxy.log.Fatal("failed reading private key file", zap.Error(err), zap.String("file", ns.SecretKeyFile))
-		} else if secretKey, err := signature.LoadSecretKey(string(content)); err != nil {
-			proxy.log.Fatal("failed loading private keys", zap.Error(err), zap.String("file", ns.SecretKeyFile))
-		} else {
-			proxy.secretKeys[namespace] = secretKey
+		s3 := ns.S3
+		s3Url, err := url.Parse(s3.Url)
+		if err != nil {
+			proxy.log.Fatal("couldn't parse S3 URL", zap.Error(err), zap.String("namespace", namespace), zap.String("url", s3.Url))
 		}
 
-		proxy.trustedKeys[namespace] = make([]signature.PublicKey, len(ns.TrustedPublicKeys))
-		for _, trustedKeySource := range ns.TrustedPublicKeys {
-			trustedKey, err := signature.ParsePublicKey(trustedKeySource)
-			if err != nil {
-				proxy.log.Fatal("failed loading trusted key", zap.Error(err), zap.String("key", trustedKeySource))
-			}
-			proxy.trustedKeys[namespace] = append(proxy.trustedKeys[namespace], trustedKey)
+		index, err := desync.NewS3IndexStore(
+			s3Url,
+			mkCredentials(s3),
+			s3.Region,
+			defaultStoreOptions(),
+			minio.BucketLookupAuto,
+		)
+		if err != nil {
+			proxy.log.Fatal("failed creating s3 index store",
+				zap.Error(err),
+				zap.String("url", s3.Url),
+				zap.String("region", s3.Region),
+			)
 		}
+
+		proxy.s3Indices[namespace] = index
+	}
+}
+
+func mkCredentials(s3 *config.S3) *credentials.Credentials {
+	return credentials.NewFileAWSCredentials(s3.CredentialsFile, s3.Profile)
+}
+
+func defaultStoreOptions() desync.StoreOptions {
+	return desync.StoreOptions{
+		N:          64,
+		Timeout:    1 * time.Second,
+		ErrorRetry: 1,
 	}
 }
 
@@ -248,7 +248,7 @@ func (proxy *Proxy) doCache(req *cacheRequest) {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 
-		if err := proxy.insert(ctx, req.location, response.Body); err != nil {
+		if err := proxy.insert(ctx, req.namespace, req.location, response.Body); err != nil {
 			proxy.log.Error("failed caching file", zap.Error(err), zap.String("url", req.url))
 		}
 	}

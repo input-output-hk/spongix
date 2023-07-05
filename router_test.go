@@ -7,8 +7,10 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/folbricht/desync"
 	"github.com/input-output-hk/spongix/pkg/config"
 	"github.com/pkg/errors"
+	"github.com/smarty/assertions"
 	"github.com/steinfletcher/apitest"
 	"gotest.tools/assert"
 )
@@ -137,19 +139,24 @@ func mockGet(url string, status int) *apitest.MockResponse {
 
 func testProxy(t *testing.T) *Proxy {
 	proxy := NewProxy(&config.Config{
-		Dir: t.TempDir(),
-		Namespaces: map[string]config.Namespace{
+		Chunks: &config.Chunks{
+			S3: &config.S3{},
+		},
+		Namespaces: map[string]*config.Namespace{
 			testNamespace: {
 				Substituters:      []string{upstream},
-				TrustedPublicKeys: []string{"cache.nixos.org-1:6NCHdD59X431o0gWypbMrAURkbJ16ZPMQFGspcDShjY="},
 				CacheInfoPriority: 50,
+				S3:                &config.S3{},
 			},
 		},
 	})
 
+	a := assertions.New(t)
+	a.So(proxy.config.Prepare(), assertions.ShouldBeNil)
+
 	// proxy.setupDesync()
 	proxy.s3Store = newFakeStore()
-	proxy.s3Index = newFakeIndex()
+	proxy.s3Indices = map[string]desync.IndexWriteStore{testNamespace: newFakeIndex()}
 	go proxy.startCache()
 
 	// proxy.setupKeys()

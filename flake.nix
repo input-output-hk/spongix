@@ -40,6 +40,7 @@
         devShells.default = pkgs.mkShell {
           nativeBuildInputs = with pkgs; [
             config.treefmt.package
+            alejandra
             go
             golangci-lint
             gotools

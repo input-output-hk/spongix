@@ -6,6 +6,7 @@ require (
 	github.com/alexflint/go-arg v1.4.3
 	github.com/alitto/pond v1.8.3
 	github.com/andybalholm/brotli v1.0.5
+	github.com/felixge/httpsnoop v1.0.1
 	github.com/folbricht/desync v0.9.3
 	github.com/gorilla/handlers v1.5.1
 	github.com/gorilla/mux v1.8.0
@@ -30,7 +31,6 @@ require (
 	github.com/boljen/go-bitmap v0.0.0-20151001105940-23cd2fb0ce7d // indirect
 	github.com/davecgh/go-spew v1.1.1 // indirect
 	github.com/dchest/siphash v1.2.2 // indirect
-	github.com/felixge/httpsnoop v1.0.1 // indirect
 	github.com/folbricht/tempfile v0.0.1 // indirect
 	github.com/golang/groupcache v0.0.0-20200121045136-8c9f03a8e57e // indirect
 	github.com/golang/protobuf v1.4.3 // indirect

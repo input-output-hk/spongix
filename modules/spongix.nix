@@ -18,41 +18,34 @@
 
   logModes = ["production" "development"];
 
-  mapS3 = prefix: name: value: {
+  mapS3 = prefix: value: {
     url = value.url;
     region = value.region;
     profile = value.profile;
     credentials_file = "$CREDENTIALS_DIRECTORY/${prefix}";
-    # value.credentialsFile
-  };
-
-  mapChunks = name: value: {
-    minimum_size = value.minimumSize;
-    average_size = value.averageSize;
-    maximum_size = value.maximumSize;
-    s3 = builtins.mapAttrs (mapS3 "chunks") value.s3;
   };
 
   mapNamespace = name: value: {
     substituters = value.substituters;
     trusted_public_keys = value.trustedPublicKeys;
     cache_info_priority = value.cacheInfoPriority;
-    s3 = builtins.mapAttrs (mapS3 "namespace_${name}") value.s3;
+    s3 = mapS3 "namespace_${name}" value.s3;
   };
 
-  configFile = pkgs.writeTextFile {
-    name = "spongix.json";
-    text = builtins.toJSON {
-      dir = cfg.cacheDir;
-      listen = "${cfg.host}:${builtins.toString cfg.port}";
-      log_level = cfg.logLevel;
-      log_mode = cfg.logMode;
-      namespaces = builtins.mapAttrs mapNamespace cfg.namespaces;
-      chunks = builtins.mapAttrs mapChunks cfg.chunks;
+  configFile = builtins.toFile "spongix.json" (builtins.toJSON {
+    listen = "${cfg.host}:${builtins.toString cfg.port}";
+    log_level = cfg.logLevel;
+    log_mode = cfg.logMode;
+    namespaces = builtins.mapAttrs mapNamespace cfg.namespaces;
+    chunks = {
+      minimum_size = cfg.chunks.minimumSize;
+      average_size = cfg.chunks.averageSize;
+      maximum_size = cfg.chunks.maximumSize;
+      s3 = mapS3 "chunks" cfg.chunks.s3;
     };
-  };
+  });
 
-  s3Type = lib.mkOption {
+  s3Option = lib.mkOption {
     type = lib.types.submodule {
       options = {
         url = lib.mkOption {
@@ -100,7 +93,7 @@ in {
         type = lib.types.submodule {
           options = {
             minimumSize = lib.mkOption {
-              type = lib.types.ints.between 48 4294967296;
+              type = lib.types.ints.unsigned;
               default = (1024 * 64) / 4;
               description = ''
                 Minimum chunk size
@@ -108,7 +101,7 @@ in {
             };
 
             averageSize = lib.mkOption {
-              type = lib.types.ints.between 48 4294967296;
+              type = lib.types.ints.unsigned;
               default = 1024 * 64;
               description = ''
                 Average chunk size
@@ -116,16 +109,14 @@ in {
             };
 
             maximumSize = lib.mkOption {
-              type = lib.types.ints.between 48 4294967296;
+              type = lib.types.ints.unsigned;
               default = (1024 * 64) * 4;
               description = ''
                 Maximum chunk size
               '';
             };
 
-            s3 = lib.mkOption {
-              type = s3Type;
-            };
+            s3 = s3Option;
           };
         };
       };
@@ -190,76 +181,11 @@ in {
               '';
             };
 
-            s3 = lib.mkOption {
-              type = s3Type;
-            };
+            s3 = s3Option;
           };
         }));
         default = {};
       };
-
-      # gc = lib.mkOption {
-      #   type = lib.types.submodule {
-      #     options = {
-      #       enable = lib.mkEnableOption "Spongix garbage collection";
-
-      #       cacheSize = lib.mkOption {
-      #         type = lib.types.ints.positive;
-      #         default = 10;
-      #         description = ''
-      #           Number of GB to keep in the local cache
-      #         '';
-      #       };
-
-      #       interval = lib.mkOption {
-      #         type = lib.types.str;
-      #         default = "daily";
-      #         description = ''
-      #           Time between garbage collections of local store files (fast)
-      #         '';
-      #       };
-
-      #       cacheDir = lib.mkOption {
-      #         type = lib.types.str;
-      #         default = cfg.cacheDir;
-      #         description = ''
-      #           Keep all cache state in this directory.
-      #         '';
-      #       };
-
-      #       host = lib.mkOption {
-      #         type = lib.types.str;
-      #         default = cfg.host;
-      #         description = ''
-      #           Listen on this host. Will be 0.0.0.0 if empty.
-      #         '';
-      #       };
-
-      #       port = lib.mkOption {
-      #         type = lib.types.port;
-      #         default = 7746;
-      #         description = ''
-      #           Listen on this port.
-      #         '';
-      #       };
-
-      #       logLevel = lib.mkOption {
-      #         type = lib.types.enum logLevels;
-      #         default = "info";
-      #       };
-
-      #       logMode = lib.mkOption {
-      #         type = lib.types.enum logModes;
-      #         default = "production";
-      #         description = ''
-      #           production mode uses JSON formatting, while development mode is more
-      #           human readable.
-      #         '';
-      #       };
-      #     };
-      #   };
-      #   default = {};
-      # };
 
       configFile = lib.mkOption {
         type = lib.types.path;
@@ -276,27 +202,16 @@ in {
     systemd.services.spongix = {
       wantedBy = ["multi-user.target"];
 
-      serviceConfig = let
-        execStart = pkgs.writeShellApplication {
-          name = "spongix-wrapper";
-          runtimeInputs = [pkgs.jq];
-          text = ''
-            jq < ${cfg.configFile} > config.json
-            exec ${cfg.package}/bin/spongix
-          '';
-        };
-      in {
-        ExecStart = "${execStart}/bin/spongix-wrapper";
+      serviceConfig = {
+        ExecStart = "${cfg.package}/bin/spongix --config ${cfg.configFile}";
         User = "spongix";
         Group = "spongix";
         DynamicUser = true;
         StateDirectory = "spongix";
-        WorkingDirectory = cfg.cacheDir;
         LoadCredential =
           ["chunks:${cfg.chunks.s3.credentialsFile}"]
-          ++ (lib.mapAttrsToList (name: value: "${name}:${value.credentialsFile}")
+          ++ (lib.mapAttrsToList (name: value: "namespace_${name}:${value.s3.credentialsFile}")
             cfg.namespaces);
-        ReadWritePaths = cfg.cacheDir;
         Restart = "on-failure";
         RestartSec = 5;
         OOMScoreAdjust = 1000;
@@ -304,41 +219,5 @@ in {
         MemoryMax = "70%";
       };
     };
-
-    # systemd.timers.spongix-gc = lib.mkIf cfg.gc.enable {
-    #   wantedBy = ["timers.target"];
-    #   timerConfig = {
-    #     Persistent = true;
-    #     Unit = "spongix-gc.service";
-    #   };
-    # };
-
-    # systemd.services.spongix-gc = lib.mkIf cfg.gc.enable {
-    #   wantedBy = ["multi-user.target"];
-
-    #   environment = {
-    #     CACHE_DIR = cfg.gc.cacheDir;
-    #     LISTEN_ADDR = "${cfg.gc.host}:${toString cfg.gc.port}";
-    #     CACHE_SIZE = toString cfg.gc.cacheSize;
-    #     GC_INTERVAL = cfg.gc.interval;
-    #     LOG_LEVEL = cfg.gc.logLevel;
-    #     LOG_MODE = cfg.gc.logMode;
-    #   };
-
-    #   startAt = cfg.gc.interval;
-    #   serviceConfig = {
-    #     ExecStart = "${cfg.package}/bin/gc";
-    #     Type = "oneshot";
-    #     User = "spongix";
-    #     Group = "spongix";
-    #     DynamicUser = true;
-    #     RemainAfterExit = true;
-    #     StateDirectory = "spongix";
-    #     WorkingDirectory = cfg.gc.cacheDir;
-    #     ReadWritePaths = cfg.gc.cacheDir;
-    #     Restart = "on-failure";
-    #     RestartSec = "60s";
-    #   };
-    # };
   };
 }

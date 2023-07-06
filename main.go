@@ -17,7 +17,6 @@ import (
 	"github.com/input-output-hk/spongix/pkg/logger"
 	"github.com/minio/minio-go/v6"
 	"github.com/minio/minio-go/v6/pkg/credentials"
-	"github.com/nix-community/go-nix/pkg/narinfo/signature"
 	"go.uber.org/zap"
 )
 
@@ -110,10 +109,6 @@ func main() {
 type Proxy struct {
 	config *config.Config
 
-	// derived from the above
-	secretKeys  map[string]signature.SecretKey
-	trustedKeys map[string][]signature.PublicKey
-
 	s3Store   desync.WriteStore
 	s3Indices map[string]desync.IndexWriteStore
 
@@ -129,13 +124,11 @@ func NewProxy(config *config.Config) *Proxy {
 	}
 
 	return &Proxy{
-		config:      config,
-		log:         devLog,
-		headPool:    pond.New(10, 1000),
-		cachePool:   pond.New(10, 1000),
-		secretKeys:  map[string]signature.SecretKey{},
-		trustedKeys: map[string][]signature.PublicKey{},
-		s3Indices:   map[string]desync.IndexWriteStore{},
+		config:    config,
+		log:       devLog,
+		headPool:  pond.New(10, 1000),
+		cachePool: pond.New(10, 1000),
+		s3Indices: map[string]desync.IndexWriteStore{},
 	}
 }
 

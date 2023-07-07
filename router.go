@@ -123,9 +123,11 @@ func answer(w http.ResponseWriter, status int, mime, msg string) {
 
 func (p *Proxy) nixCacheInfo(w http.ResponseWriter, r *http.Request) {
 	if namespace, ok := mux.Vars(r)["namespace"]; !ok {
-		panic("namespace not given")
+		p.log.Warn("namespace not given", zap.String("url", r.URL.String()))
+		serveNotFound(w, r)
 	} else if ns, ok := p.config.Namespaces[namespace]; !ok {
-		panic("namespace not found")
+		p.log.Warn("namespace not found", zap.String("namespace", namespace))
+		serveNotFound(w, r)
 	} else if r.Method == http.MethodHead {
 		w.Header().Set(headerContentType, mimeNixCacheInfo)
 		w.WriteHeader(http.StatusOK)
@@ -138,18 +140,20 @@ Priority: `+strconv.FormatUint(ns.CacheInfoPriority, 10))
 
 func (p *Proxy) redirectToUpstream(location string, w http.ResponseWriter, r *http.Request) {
 	if namespace, ok := mux.Vars(r)["namespace"]; !ok {
-		panic("namespace not given")
+		p.log.Warn("namespace not given", zap.String("url", r.URL.String()))
+		serveNotFound(w, r)
 	} else if ns, ok := p.config.Namespaces[namespace]; !ok {
-		panic("namespace not found")
+		p.log.Warn("namespace not found", zap.String("namespace", namespace))
+		serveNotFound(w, r)
 	} else {
 		group := p.headPool.Group()
 		first := make(chan string, len(ns.Substituters))
 
 		for _, substituter := range ns.Substituters {
-			pp(substituter)
 			substituterUrl, err := url.ParseRequestURI(substituter)
 			if err != nil {
-				panic(err)
+				p.log.Error("parsing substituterUrl", zap.String("substituter", substituter), zap.Error(err))
+				continue
 			}
 
 			client := http.Client{}

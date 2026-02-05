@@ -115,6 +115,9 @@ type Proxy struct {
 	log       *zap.Logger
 	headPool  *pond.WorkerPool
 	cachePool *pond.WorkerPool
+
+	httpHeadClient *http.Client
+	httpGetClient  *http.Client
 }
 
 func NewProxy(config *config.Config) *Proxy {
@@ -123,12 +126,20 @@ func NewProxy(config *config.Config) *Proxy {
 		panic(err)
 	}
 
+	httpHeadClient := &http.Client{}
+	httpHeadClient.Timeout = 1 * time.Second
+
+	httpGetClient := &http.Client{}
+	httpGetClient.Timeout = 30 * time.Minute
+
 	return &Proxy{
-		config:    config,
-		log:       devLog,
-		headPool:  pond.New(10, 1000),
-		cachePool: pond.New(10, 1000),
-		s3Indices: map[string]desync.IndexWriteStore{},
+		config:         config,
+		log:            devLog,
+		headPool:       pond.New(10, 1000),
+		cachePool:      pond.New(10, 1000),
+		s3Indices:      map[string]desync.IndexWriteStore{},
+		httpHeadClient: httpHeadClient,
+		httpGetClient:  httpGetClient,
 	}
 }
 
@@ -160,7 +171,7 @@ func (proxy *Proxy) setupChunks() {
 		s3Url,
 		mkCredentials(s3),
 		s3.Region,
-		defaultStoreOptions(),
+		proxy.defaultStoreOptions(),
 		minio.BucketLookupAuto)
 	if err != nil {
 		proxy.log.Fatal("failed creating s3 store",
@@ -185,7 +196,7 @@ func (proxy *Proxy) setupIndices() {
 			s3Url,
 			mkCredentials(s3),
 			s3.Region,
-			defaultStoreOptions(),
+			proxy.defaultStoreOptions(),
 			minio.BucketLookupAuto,
 		)
 		if err != nil {
@@ -204,10 +215,10 @@ func mkCredentials(s3 *config.S3) *credentials.Credentials {
 	return credentials.NewFileAWSCredentials(s3.CredentialsFile, s3.Profile)
 }
 
-func defaultStoreOptions() desync.StoreOptions {
+func (proxy *Proxy) defaultStoreOptions() desync.StoreOptions {
 	return desync.StoreOptions{
 		N:          64,
-		Timeout:    1 * time.Second,
+		Timeout:    30 * time.Second,
 		ErrorRetry: 1,
 	}
 }
@@ -221,15 +232,23 @@ func (proxy *Proxy) setupLogger() {
 }
 
 func (proxy *Proxy) doCache(req *cacheRequest) {
-	if response, err := http.Get(req.url); err != nil {
-		proxy.log.Error("failed downloading file", zap.Error(err), zap.String("url", req.url))
-	} else {
-		defer response.Body.Close()
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer cancel()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
 
-		if err := proxy.insert(ctx, req.namespace, req.location, response.Body); err != nil {
-			proxy.log.Error("failed caching file", zap.Error(err), zap.String("url", req.url))
-		}
+	httpReq, err := http.NewRequestWithContext(ctx, "GET", req.url, nil)
+	if err != nil {
+		proxy.log.Error("failed creating request", zap.Error(err), zap.String("url", req.url))
+		return
+	}
+
+	response, err := proxy.httpGetClient.Do(httpReq)
+	if err != nil {
+		proxy.log.Error("failed downloading file", zap.Error(err), zap.String("url", req.url))
+		return
+	}
+	defer response.Body.Close()
+
+	if err := proxy.insert(ctx, req.namespace, req.location, response.Body); err != nil {
+		proxy.log.Error("failed caching file", zap.Error(err), zap.String("url", req.url))
 	}
 }

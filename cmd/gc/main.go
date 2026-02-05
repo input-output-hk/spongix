@@ -65,9 +65,9 @@ type GC struct {
 	CacheSize  uint64 `arg:"--cache-size,env:CACHE_SIZE" help:"Number of gigabytes to keep in the disk cache"`
 	LogLevel   string `arg:"--log-level,env:LOG_LEVEL" help:"One of debug, info, warn, error, dpanic, panic, fatal"`
 	LogMode    string `arg:"--log-mode,env:LOG_MODE" help:"development or production"`
-	log        *zap.Logger
-	localStore desync.LocalStore
-	localIndex desync.LocalIndexStore
+	log          *zap.Logger
+	localStore   desync.LocalStore
+	localIndices []desync.LocalIndexStore
 }
 
 func newGC() *GC {
@@ -107,7 +107,7 @@ func (gc *GC) setupDesync() {
 	}
 
 	gc.localStore = localStore
-	gc.localIndex = localIndex
+	gc.localIndices = []desync.LocalIndexStore{localIndex}
 }
 
 func measure(metric *metrics.Counter, f func()) {
@@ -245,7 +245,6 @@ func (gc *GC) gcOnce(cacheStat map[string]*chunkStat) {
 	log := gc.log.Named("gc")
 	maxCacheSize := (uint64(math.Pow(2, 30)) * gc.CacheSize) - maxCacheDirPortion
 	store := gc.localStore
-	indices := gc.localIndex
 	lru := NewLRU(maxCacheSize)
 	walkStoreStart := time.Now()
 	chunkDirs := int64(0)
@@ -358,48 +357,55 @@ func (gc *GC) gcOnce(cacheStat map[string]*chunkStat) {
 		}(i)
 	}
 
-	walkIndicesErr := filepath.Walk(indices.Path, func(path string, info fs.FileInfo, err error) error {
-		if err != nil || info.IsDir() {
-			return err
-		}
+	var walkIndicesErr error
+	for _, indices := range gc.localIndices {
+		err := filepath.Walk(indices.Path, func(path string, info fs.FileInfo, err error) error {
+			if err != nil || info.IsDir() {
+				return err
+			}
 
-		isOld := info.ModTime().Before(ignoreBeforeTime)
+			isOld := info.ModTime().Before(ignoreBeforeTime)
 
-		ext := filepath.Ext(path)
-		isNar := ext == ".nar"
-		isNarinfo := ext == ".narinfo"
+			ext := filepath.Ext(path)
+			isNar := ext == ".nar"
+			isNarinfo := ext == ".narinfo"
 
-		if !(isNar || isNarinfo || isOld) {
-			return nil
-		}
+			if !(isNar || isNarinfo || isOld) {
+				return nil
+			}
 
-		name := path[len(indices.Path):]
+			name := path[len(indices.Path):]
 
-		index, err := indices.GetIndex(name)
-		if err != nil {
-			return errors.WithMessagef(err, "while getting index %s", name)
-		}
+			index, err := indices.GetIndex(name)
+			if err != nil {
+				return errors.WithMessagef(err, "while getting index %s", name)
+			}
 
-		integrity <- integrityCheck{path: path, index: index}
+			integrity <- integrityCheck{path: path, index: index}
 
-		inflatedSize += index.Length()
-		indicesCount++
+			inflatedSize += index.Length()
+			indicesCount++
 
-		if len(index.Chunks) == 0 {
-			log.Debug("index chunks are empty", zap.String("path", path))
-			deadIndices.Store(path, yes)
-		} else {
-			for _, indexChunk := range index.Chunks {
-				if lru.IsDead(indexChunk.ID) {
-					log.Debug("some chunks are dead", zap.String("path", path))
-					deadIndices.Store(path, yes)
-					break
+			if len(index.Chunks) == 0 {
+				log.Debug("index chunks are empty", zap.String("path", path))
+				deadIndices.Store(path, yes)
+			} else {
+				for _, indexChunk := range index.Chunks {
+					if lru.IsDead(indexChunk.ID) {
+						log.Debug("some chunks are dead", zap.String("path", path))
+						deadIndices.Store(path, yes)
+						break
+					}
 				}
 			}
-		}
 
-		return nil
-	})
+			return nil
+		})
+		if err != nil {
+			walkIndicesErr = err
+			break
+		}
+	}
 
 	integrity <- integrityCheck{path: "", index: desync.Index{}}
 	wg.Wait()
@@ -418,7 +424,9 @@ func (gc *GC) gcOnce(cacheStat map[string]*chunkStat) {
 	deadIndices.Range(func(key, value interface{}) bool {
 		path := key.(string)
 		log.Info("deleting index", zap.String("path", path))
-		_ = os.Remove(path)
+		if err := os.Remove(path); err != nil {
+			log.Error("failed deleting index", zap.Error(err), zap.String("path", path))
+		}
 		deadIndexCount++
 		return true
 	})

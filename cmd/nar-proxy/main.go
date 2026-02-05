@@ -94,7 +94,12 @@ func (np *NarProxy) narHandler(w http.ResponseWriter, r *http.Request) {
 	np.log.Debug("serving", zap.String("url", r.URL.EscapedPath()))
 
 	narinfoResponse, err := http.Get(np.CacheUrl + hash + ".narinfo")
-	if err != nil || narinfoResponse.StatusCode != 200 {
+	if err != nil {
+		w.WriteHeader(http.StatusBadGateway)
+		_, _ = io.WriteString(w, err.Error())
+		return
+	}
+	if narinfoResponse.StatusCode != 200 {
 		w.WriteHeader(narinfoResponse.StatusCode)
 		_, _ = io.Copy(w, narinfoResponse.Body)
 		return
@@ -108,9 +113,14 @@ func (np *NarProxy) narHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	narResponse, err := http.Get(np.CacheUrl + narinfo.URL)
-	if err != nil || narResponse.StatusCode != 200 {
-		w.WriteHeader(narinfoResponse.StatusCode)
-		_, _ = io.Copy(w, narinfoResponse.Body)
+	if err != nil {
+		w.WriteHeader(http.StatusBadGateway)
+		_, _ = io.WriteString(w, err.Error())
+		return
+	}
+	if narResponse.StatusCode != 200 {
+		w.WriteHeader(narResponse.StatusCode)
+		_, _ = io.Copy(w, narResponse.Body)
 		return
 	}
 

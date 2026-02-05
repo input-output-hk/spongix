@@ -2,14 +2,18 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
+	"net/http/httptest"
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/alitto/pond"
 	"github.com/folbricht/desync"
 	"github.com/input-output-hk/spongix/pkg/config"
-	"github.com/pkg/errors"
+	pkgerrors "github.com/pkg/errors"
 	"github.com/smarty/assertions"
 	"github.com/steinfletcher/apitest"
 	"gotest.tools/assert"
@@ -497,17 +501,168 @@ func realisationMatches(t *testing.T, expectedBody []byte) func(*http.Response, 
 	return func(w *http.Response, r *http.Request) error {
 		expected := Realisation{}
 		if err := json.Unmarshal(expectedBody, &expected); err != nil {
-			return errors.WithMessage(err, "decoding expected")
+			return pkgerrors.WithMessage(err, "decoding expected")
 		}
 
 		actual := Realisation{}
 		dec := json.NewDecoder(w.Body)
 		if err := dec.Decode(&actual); err != nil {
-			return errors.WithMessage(err, "decoding actual")
+			return pkgerrors.WithMessage(err, "decoding actual")
 		}
 
 		assert.Equal(t, reflect.DeepEqual(expected, actual), true)
 
 		return nil
+	}
+}
+
+func TestS3ErrorsMaskedAs404(t *testing.T) {
+	proxy := testProxy(t)
+	// Replace the index for test namespace with an errorFakeIndex that returns "connection refused"
+	proxy.s3Indices[testNamespace] = &errorFakeIndex{
+		fakeIndex: newFakeIndex(),
+		getError:  errors.New("connection refused"),
+	}
+
+	// GET a narinfo — a "connection refused" error from S3 should result in 500,
+	// not 404. The bug at router.go:197 does string matching on the error and
+	// treats all non-"key not found" errors as 404.
+	apitest.New().
+		Handler(proxy.router()).
+		Method(http.MethodGet).
+		URL(nsNarinfo).
+		Expect(t).
+		Status(http.StatusInternalServerError). // correct: S3 connection error → 500
+		End()
+}
+
+func TestDoCacheTimeoutMismatch(t *testing.T) {
+	proxy := testProxy(t)
+	fakeIdx := newFakeIndex()
+	proxy.s3Indices[testNamespace] = fakeIdx
+
+	// Serve 1MB body slowly: write in chunks with delays, so the full read
+	// takes ~12s — within the 30min HTTP client timeout but exceeding the 10s
+	// context.WithTimeout in doCache at main.go:239.
+	body := make([]byte, 1024*1024)
+	for i := range body {
+		body[i] = byte(i % 256)
+	}
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(200)
+		chunkSize := len(body) / 4
+		for i := 0; i < 4; i++ {
+			start := i * chunkSize
+			end := start + chunkSize
+			if end > len(body) {
+				end = len(body)
+			}
+			w.Write(body[start:end])
+			if f, ok := w.(http.Flusher); ok {
+				f.Flush()
+			}
+			if i < 3 {
+				time.Sleep(4 * time.Second) // 3 sleeps × 4s = 12s total
+			}
+		}
+	}))
+	defer ts.Close()
+
+	location := "indices/narinfo/test/test"
+	start := time.Now()
+	proxy.doCache(&cacheRequest{namespace: testNamespace, url: ts.URL, location: location})
+	elapsed := time.Since(start)
+
+	// doCache sets a 10s context.WithTimeout (main.go:239) that should bound
+	// the insert operation. If working correctly, doCache should return in ~10s
+	// (cancelled by context). But the timeout is ineffective because the I/O
+	// on response.Body is governed by the 30min HTTP client timeout, not the
+	// context — so the full 12s download completes, bypassing the deadline.
+	if elapsed > 11*time.Second {
+		t.Errorf("doCache took %v but should have been bounded by 10s context timeout "+
+			"(BUG: context.WithTimeout at main.go:239 is ineffective — the 30min HTTP "+
+			"client timeout at main.go:233 governs the actual I/O, bypassing the 10s "+
+			"deadline)", elapsed)
+	}
+}
+
+func TestTrySubmitDropsJobsUnderLoad(t *testing.T) {
+	// Use a real test server so doCache can actually download the narinfo
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, ".narinfo") {
+			w.Header().Set("Content-Type", mimeNarinfo)
+			w.WriteHeader(http.StatusOK)
+			w.Write([]byte(fixtureNarinfoNone))
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer ts.Close()
+
+	proxy := testProxy(t)
+	proxy.config.Namespaces[testNamespace].Substituters = []string{ts.URL}
+	proxy.cachePool = pond.New(1, 1)
+
+	fakeIdx := newFakeIndex()
+	proxy.s3Indices[testNamespace] = fakeIdx
+
+	// Fill the pool completely
+	blocker := make(chan struct{})
+	proxy.cachePool.Submit(func() { <-blocker }) // blocks the only worker
+	proxy.cachePool.TrySubmit(func() { <-blocker }) // fills the queue
+
+	// HEAD request triggers redirect + background cache job submission.
+	// With the fix (go Submit instead of TrySubmit), the job blocks until
+	// pool capacity is available rather than being silently dropped.
+	req, _ := http.NewRequest(http.MethodHead, nsNarinfo, nil)
+	rr := httptest.NewRecorder()
+	proxy.router().ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusFound {
+		t.Fatalf("expected 302, got %d", rr.Code)
+	}
+
+	// Unblock pool workers, then wait for the cache job to complete
+	close(blocker)
+	time.Sleep(100 * time.Millisecond) // allow background goroutine to submit
+	proxy.cachePool.StopAndWait()
+
+	_, err := fakeIdx.GetIndex("indices/narinfo/hyhr/hyhrnrnpsz9fw5p9dk85a58y31ink18c")
+	if err != nil {
+		t.Errorf("expected cache job to store the index, but it was lost: %v", err)
+	}
+}
+
+func TestRedirectToUpstreamGroupWaitBlocking(t *testing.T) {
+	// Start a test server that sleeps 800ms then returns 404
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		time.Sleep(800 * time.Millisecond)
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer ts.Close()
+
+	proxy := testProxy(t)
+	// Replace substituters with 3 copies of the slow upstream
+	proxy.config.Namespaces[testNamespace].Substituters = []string{
+		ts.URL, ts.URL, ts.URL,
+	}
+
+	start := time.Now()
+	apitest.New().
+		Handler(proxy.router()).
+		Method(http.MethodHead).
+		URL(nsNarinfo).
+		Expect(t).
+		Status(http.StatusNotFound).
+		End()
+	elapsed := time.Since(start)
+
+	// The 500ms timeout at router.go:172 should cap the total wait. But because
+	// group.Wait() runs BEFORE the select (not concurrently), the timeout is
+	// additive: ~800ms for group.Wait + 500ms select = ~1300ms total.
+	if elapsed > 600*time.Millisecond {
+		t.Errorf("HEAD request took %v, but should complete within 600ms "+
+			"(BUG: group.Wait() at router.go:172 blocks before the select timeout, "+
+			"making the 500ms timeout additive not concurrent)", elapsed)
 	}
 }

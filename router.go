@@ -156,15 +156,11 @@ func (p *Proxy) redirectToUpstream(location string, w http.ResponseWriter, r *ht
 				continue
 			}
 
-			client := http.Client{}
-			client.Timeout = 1 * time.Second
-
 			group.Submit(func() {
 				substituterUrl.Path = filepath.Join(substituterUrl.Path, strings.TrimPrefix(r.URL.Path, "/"+namespace))
 				substituterUrlString := substituterUrl.String()
-				p.log.Info("URL", zap.String("url", substituterUrlString))
 
-				if response, err := client.Head(substituterUrlString); err == nil {
+				if response, err := p.httpHeadClient.Head(substituterUrlString); err == nil {
 					defer response.Body.Close()
 					if response.StatusCode == http.StatusOK {
 						first <- substituterUrlString
@@ -173,17 +169,28 @@ func (p *Proxy) redirectToUpstream(location string, w http.ResponseWriter, r *ht
 			})
 		}
 
-		group.Wait()
-
-		// p.pool.GroupContext
+		done := make(chan struct{})
+		go func() {
+			group.Wait()
+			close(done)
+		}()
 
 		select {
 		case found := <-first:
-			p.cachePool.TrySubmit(func() {
-				p.doCache(&cacheRequest{namespace: namespace, url: found, location: location})
-			})
+			go func() {
+				defer func() {
+					if r := recover(); r != nil {
+						p.log.Warn("cache pool closed, dropping cache job", zap.String("url", found))
+					}
+				}()
+				p.cachePool.Submit(func() {
+					p.doCache(&cacheRequest{namespace: namespace, url: found, location: location})
+				})
+			}()
 
 			http.Redirect(w, r, found, http.StatusFound)
+		case <-done:
+			serveNotFound(w, r)
 		case <-time.After(500 * time.Millisecond):
 			serveNotFound(w, r)
 		}
@@ -201,8 +208,8 @@ func (p *Proxy) largeHeadAndGet(prefix, mime string) func(w http.ResponseWriter,
 			if err.Error() == "reading index: The specified key does not exist." {
 				p.redirectToUpstream(location, w, r)
 			} else {
-				// p.log.Error("getting index", zap.String("index", location), zap.Error(err))
-				serveNotFound(w, r)
+				p.log.Error("getting index", zap.String("index", location), zap.Error(err))
+				answer(w, http.StatusInternalServerError, mimeText, err.Error())
 			}
 		} else {
 			w.Header().Set("Content-Type", mime)

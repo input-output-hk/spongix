@@ -1,11 +1,13 @@
 package store
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"strings"
 
 	"github.com/folbricht/desync"
+	minio "github.com/minio/minio-go/v6"
 )
 
 // S3IndexStoreWrapper wraps a desync.S3IndexStore to normalize errors.
@@ -49,7 +51,13 @@ func (w *S3IndexStoreWrapper) String() string {
 }
 
 // isS3NotFound checks if an error is an S3 "key not found" error.
-// S3 index stores from desync return errors containing "does not exist".
+// It uses type-based detection via minio.ErrorResponse, with a string
+// fallback for wrapped errors that lose the type.
 func isS3NotFound(err error) bool {
+	var resp minio.ErrorResponse
+	if errors.As(err, &resp) {
+		return resp.Code == "NoSuchKey" || resp.StatusCode == 404
+	}
+	// Fallback for wrapped errors that lose the type
 	return strings.Contains(err.Error(), "does not exist")
 }

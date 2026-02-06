@@ -6,6 +6,8 @@ import (
 	"testing"
 
 	"github.com/folbricht/desync"
+	minio "github.com/minio/minio-go/v6"
+	pkgerrors "github.com/pkg/errors"
 )
 
 // mockS3IndexStore simulates a desync.S3IndexStore that returns S3-style errors.
@@ -67,3 +69,34 @@ func (m *mockErrorStore) GetIndexReader(name string) (io.ReadCloser, error) {
 func (m *mockErrorStore) StoreIndex(name string, idx desync.Index) error { return nil }
 func (m *mockErrorStore) Close() error                                   { return nil }
 func (m *mockErrorStore) String() string                                 { return "mock-error" }
+
+func TestS3WrapperMinioErrorResponse(t *testing.T) {
+	// Real minio.ErrorResponse wrapped through pkg/errors (as desync does)
+	minioErr := minio.ErrorResponse{Code: "NoSuchKey", StatusCode: 404}
+	wrappedErr := pkgerrors.Wrap(minioErr, "reading index")
+
+	s := &mockErrorStore{err: wrappedErr}
+	wrapped := WrapS3IndexStore(s)
+
+	_, err := wrapped.GetIndex("missing")
+	if !errors.Is(err, ErrIndexNotFound) {
+		t.Fatalf("expected ErrIndexNotFound for NoSuchKey, got %v", err)
+	}
+}
+
+func TestS3WrapperMinioAccessDeniedNotMapped(t *testing.T) {
+	// AccessDenied should NOT be treated as not-found
+	minioErr := minio.ErrorResponse{Code: "AccessDenied", StatusCode: 403}
+	wrappedErr := pkgerrors.Wrap(minioErr, "reading index")
+
+	s := &mockErrorStore{err: wrappedErr}
+	wrapped := WrapS3IndexStore(s)
+
+	_, err := wrapped.GetIndex("forbidden")
+	if errors.Is(err, ErrIndexNotFound) {
+		t.Fatal("AccessDenied should not be mapped to ErrIndexNotFound")
+	}
+	if err == nil {
+		t.Fatal("expected an error")
+	}
+}

@@ -13,6 +13,7 @@ const exampleConfig = `
   "log_level": "debug",
   "log_mode": "production",
 	"chunks": {
+		"store_type": "s3",
 		"minimum_size": 16384,
 		"average_size": 65536,
 		"s3": {
@@ -23,6 +24,7 @@ const exampleConfig = `
 	},
   "namespaces": {
     "public": {
+			"store_type": "s3",
 			"s3": {
 				"url": "s3+http://127.0.0.1:9000/public/indices",
 				"region": "auto",
@@ -35,6 +37,25 @@ const exampleConfig = `
   }
 }
 `
+
+func TestConfigPebbleDefaults(t *testing.T) {
+	a := assertions.New(t)
+
+	c, err := LoadBytes([]byte(`{
+		"listen": "0.0.0.0:7745",
+		"chunks": {},
+		"namespaces": {
+			"default": {
+				"substituters": ["https://cache.nixos.org"]
+			}
+		}
+	}`))
+	a.So(err, assertions.ShouldBeNil)
+	a.So(c.Prepare(), assertions.ShouldBeNil)
+	a.So(c.Chunks.StoreType, assertions.ShouldEqual, "pebble")
+	a.So(c.Chunks.PebbleDir, assertions.ShouldEqual, "./data")
+	a.So(c.Namespaces["default"].StoreType, assertions.ShouldEqual, "pebble")
+}
 
 func TestConfig(t *testing.T) {
 	a := assertions.New(t)

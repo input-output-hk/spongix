@@ -37,7 +37,7 @@ type Namespace struct {
 	Substituters      []string `json:"substituters"`
 	CacheInfoPriority uint64   `json:"cache_info_priority"`
 	S3                *S3      `json:"s3"`
-	// StoreType selects the index storage backend: "s3" (default) or "pebble".
+	// StoreType selects the index storage backend: "pebble" (default) or "s3".
 	StoreType string `json:"store_type"`
 }
 
@@ -47,7 +47,7 @@ func (n *Namespace) Prepare() error {
 	}
 
 	if n.StoreType == "" {
-		n.StoreType = "s3"
+		n.StoreType = "pebble"
 	}
 
 	switch n.StoreType {
@@ -77,7 +77,7 @@ type Chunks struct {
 	AvgSize uint64 `json:"average_size"`
 	MaxSize uint64 `json:"maximum_size"`
 	S3      *S3    `json:"s3"`
-	// StoreType selects the chunk storage backend: "s3" (default) or "pebble".
+	// StoreType selects the chunk storage backend: "pebble" (default) or "s3".
 	StoreType string `json:"store_type"`
 	// PebbleDir is the directory for the Pebble chunk database (used when StoreType is "pebble").
 	PebbleDir string `json:"pebble_dir"`
@@ -109,7 +109,7 @@ func (c *Chunks) Prepare() error {
 	}
 
 	if c.StoreType == "" {
-		c.StoreType = "s3"
+		c.StoreType = "pebble"
 	}
 
 	switch c.StoreType {
@@ -120,7 +120,7 @@ func (c *Chunks) Prepare() error {
 		c.S3.CredentialsFile = os.ExpandEnv(c.S3.CredentialsFile)
 	case "pebble":
 		if c.PebbleDir == "" {
-			return errors.New("pebble_dir is required when store_type is \"pebble\"")
+			c.PebbleDir = "./data"
 		}
 		c.PebbleDir = os.ExpandEnv(c.PebbleDir)
 	default:

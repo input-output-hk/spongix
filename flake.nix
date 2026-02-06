@@ -2,8 +2,7 @@
   description = "Flake for spongix";
 
   inputs = {
-    inclusive.url = "github:input-output-hk/nix-inclusive";
-    nixpkgs.url = "github:nixos/nixpkgs/nixos-23.05";
+    nixpkgs.url = "github:nixos/nixpkgs/nixos-25.11";
     treefmt-nix.url = "github:numtide/treefmt-nix";
     flake-parts.url = "github:hercules-ci/flake-parts";
   };
@@ -20,12 +19,12 @@
       perSystem = {
         self',
         pkgs,
+        lib,
         config,
         ...
       }: {
         packages = {
           spongix = pkgs.callPackage ./package.nix {
-            inherit (inputs.inclusive.lib) inclusive;
             rev = inputs.self.rev or "dirty";
           };
 
@@ -44,7 +43,6 @@
             go
             golangci-lint
             gotools
-            gocode
             gopls
             nodejs
             minio
@@ -57,6 +55,13 @@
           programs.alejandra.enable = true;
           programs.gofmt.enable = true;
           projectRootFile = "flake.nix";
+        };
+
+        checks = lib.optionalAttrs pkgs.stdenv.isLinux {
+          e2e = import ./e2e-test.nix {
+            inherit pkgs;
+            spongix = self'.packages.spongix;
+          };
         };
       };
 

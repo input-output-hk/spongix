@@ -17,6 +17,7 @@ import (
 	"github.com/folbricht/desync"
 	"github.com/input-output-hk/spongix/pkg/assembler"
 	"github.com/input-output-hk/spongix/pkg/logger"
+	"github.com/input-output-hk/spongix/pkg/store"
 	"github.com/nix-community/go-nix/pkg/nar"
 	"github.com/pascaldekloe/metrics"
 	"github.com/pkg/errors"
@@ -26,12 +27,18 @@ import (
 func main() {
 	gc := newGC()
 	arg.MustParse(gc)
-	gc.setupDesync()
 	gc.setupLogger()
-	if gc.Verify {
-		gc.verify()
+
+	switch gc.StoreType {
+	case "pebble":
+		gc.gcPebble()
+	default:
+		gc.setupDesync()
+		if gc.Verify {
+			gc.verify()
+		}
+		gc.gc()
 	}
-	gc.gc()
 }
 
 var (
@@ -63,11 +70,14 @@ var (
 var yes = struct{}{}
 
 type GC struct {
-	Dir        string `arg:"--dir,env:CACHE_DIR" help:"directory for the cache"`
-	CacheSize  uint64 `arg:"--cache-size,env:CACHE_SIZE" help:"Number of gigabytes to keep in the disk cache"`
-	Verify     bool   `arg:"--verify" help:"Run store integrity verification before GC"`
-	LogLevel   string `arg:"--log-level,env:LOG_LEVEL" help:"One of debug, info, warn, error, dpanic, panic, fatal"`
-	LogMode    string `arg:"--log-mode,env:LOG_MODE" help:"development or production"`
+	Dir          string `arg:"--dir,env:CACHE_DIR" help:"directory for the cache"`
+	CacheSize    uint64 `arg:"--cache-size,env:CACHE_SIZE" help:"Number of gigabytes to keep in the disk cache"`
+	Verify       bool   `arg:"--verify" help:"Run store integrity verification before GC"`
+	DryRun       bool   `arg:"--dry-run" help:"Only report what would be deleted (pebble mode)"`
+	StoreType    string `arg:"--store-type,env:STORE_TYPE" help:"Storage backend: filesystem (default) or pebble"`
+	PebbleDir    string `arg:"--pebble-dir,env:PEBBLE_DIR" help:"Pebble database directory (required for pebble store type)"`
+	LogLevel     string `arg:"--log-level,env:LOG_LEVEL" help:"One of debug, info, warn, error, dpanic, panic, fatal"`
+	LogMode      string `arg:"--log-mode,env:LOG_MODE" help:"development or production"`
 	log          *zap.Logger
 	localStore   desync.LocalStore
 	localIndices []desync.LocalIndexStore
@@ -80,10 +90,11 @@ func newGC() *GC {
 	}
 
 	return &GC{
-		Dir:      "./cache",
-		LogLevel: "debug",
-		LogMode:  "production",
-		log:      devLog,
+		Dir:       "./cache",
+		StoreType: "filesystem",
+		LogLevel:  "debug",
+		LogMode:   "production",
+		log:       devLog,
 	}
 }
 
@@ -93,6 +104,41 @@ func (gc *GC) setupLogger() {
 	} else {
 		gc.log = log
 	}
+}
+
+func (gc *GC) gcPebble() {
+	if gc.PebbleDir == "" {
+		gc.log.Fatal("--pebble-dir is required for pebble store type")
+	}
+
+	db, err := store.Open(gc.PebbleDir)
+	if err != nil {
+		gc.log.Fatal("failed opening pebble db", zap.Error(err), zap.String("dir", gc.PebbleDir))
+	}
+	defer func() { _ = db.Close() }()
+
+	cfg := store.GCConfig{
+		DryRun: gc.DryRun,
+	}
+
+	start := time.Now()
+	stats, err := store.GC(db, cfg)
+	elapsed := time.Since(start)
+
+	if err != nil {
+		gc.log.Fatal("GC failed", zap.Error(err))
+	}
+
+	gc.log.Info("pebble GC complete",
+		zap.Duration("duration", elapsed),
+		zap.Int("reachable_narinfos", stats.ReachableNarinfos),
+		zap.Int("unreachable_narinfos", stats.UnreachableNarinfos),
+		zap.Int("deleted_indices", stats.DeletedIndices),
+		zap.Int("orphan_chunks", stats.OrphanChunks),
+		zap.Int("deleted_chunks", stats.DeletedChunks),
+		zap.Uint64("deleted_bytes", stats.DeletedBytes),
+		zap.Bool("dry_run", gc.DryRun),
+	)
 }
 
 func (gc *GC) setupDesync() {
@@ -386,7 +432,7 @@ func (gc *GC) gcOnce() {
 			isNar := kind == "nar"
 			isNarinfo := kind == "narinfo"
 
-			if !(isNar || isNarinfo || isOld) {
+			if !isNar && !isNarinfo && !isOld {
 				return nil
 			}
 

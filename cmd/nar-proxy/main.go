@@ -15,11 +15,11 @@ import (
 	"github.com/gorilla/handlers"
 	"github.com/gorilla/mux"
 	"github.com/input-output-hk/spongix/pkg/logger"
-	"github.com/jamespfennell/xz"
 	"github.com/klauspost/compress/zstd"
 	"github.com/nix-community/go-nix/pkg/nar"
 	"github.com/nix-community/go-nix/pkg/narinfo"
 	"github.com/pkg/errors"
+	"github.com/ulikunitz/xz"
 	"go.uber.org/zap"
 )
 
@@ -133,7 +133,12 @@ func (np *NarProxy) narHandler(w http.ResponseWriter, r *http.Request) {
 	case "none":
 		rd = narResponse.Body
 	case "xz":
-		rd = xz.NewReader(narResponse.Body)
+		rd, err = xz.NewReader(narResponse.Body)
+		if err != nil {
+			w.WriteHeader(http.StatusInternalServerError)
+			_, _ = io.WriteString(w, errors.WithMessage(err, "creating xz reader").Error())
+			return
+		}
 	case "zstd":
 		rd, err = zstd.NewReader(narResponse.Body)
 		if err != nil {
@@ -207,7 +212,7 @@ func (np *NarProxy) narHandler(w http.ResponseWriter, r *http.Request) {
 
 				for _, entry := range entries {
 					eurl := np.Prefix + hash + name + "/" + entry.Path
-					fmt.Fprintf(w, `<tr><td>%s</td><td><a href="%s">%s</a></td><td>%d</td></tr>`, entry.Type, eurl, eurl, entry.Size)
+					_, _ = fmt.Fprintf(w, `<tr><td>%s</td><td><a href="%s">%s</a></td><td>%d</td></tr>`, entry.Type, eurl, eurl, entry.Size)
 				}
 
 				_, _ = io.WriteString(w, strings.TrimSpace(`

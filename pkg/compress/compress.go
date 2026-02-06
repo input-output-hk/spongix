@@ -44,7 +44,7 @@ type flusher interface {
 func (w *compressResponseWriter) Flush() {
 	// Flush compressed data if compressor supports it.
 	if f, ok := w.compressor.(flusher); ok {
-		f.Flush()
+		_ = f.Flush()
 	}
 	// Flush HTTP response.
 	if f, ok := w.w.(http.Flusher); ok {
@@ -105,16 +105,18 @@ func CompressHandlerLevel(h http.Handler, level int) http.Handler {
 		}
 
 		// wrap the ResponseWriter with the writer for the chosen encoding
+		// wrap the ResponseWriter with the writer for the chosen encoding
 		var encWriter io.WriteCloser
-		if encoding == gzipEncoding {
+		switch encoding {
+		case gzipEncoding:
 			encWriter, _ = gzip.NewWriterLevel(w, level)
-		} else if encoding == flateEncoding {
+		case flateEncoding:
 			encWriter, _ = flate.NewWriter(w, level)
-		} else if encoding == zstdEncoding {
+		case zstdEncoding:
 			encWriter, _ = zstd.NewWriter(w)
 		}
 
-		defer encWriter.Close()
+		defer func() { _ = encWriter.Close() }()
 
 		w.Header().Set("Content-Encoding", encoding)
 		r.Header.Del(acceptEncoding)

@@ -3,11 +3,9 @@ package main
 import (
 	"bytes"
 	"io"
-	"os"
-	"time"
 
 	"github.com/folbricht/desync"
-	"github.com/pkg/errors"
+	"github.com/input-output-hk/spongix/pkg/store"
 )
 
 // fakeStore
@@ -72,12 +70,8 @@ func (s fakeIndex) GetIndex(id string) (i desync.Index, e error) {
 	if err != nil {
 		return i, err
 	}
-	defer f.Close()
-	idx, err := desync.IndexFromReader(f)
-	if os.IsNotExist(err) {
-		err = errors.New("reading index: The specified key does not exist.")
-	}
-	return idx, err
+	defer func() { _ = f.Close() }()
+	return desync.IndexFromReader(f)
 }
 
 func (s fakeIndex) GetIndexReader(id string) (io.ReadCloser, error) {
@@ -85,22 +79,8 @@ func (s fakeIndex) GetIndexReader(id string) (io.ReadCloser, error) {
 	if ok {
 		return io.NopCloser(bytes.NewBuffer(idx)), nil
 	}
-	return nil, errors.New("reading index: The specified key does not exist.")
+	return nil, store.ErrIndexNotFound
 }
-
-// slowFakeStore wraps fakeStore with a configurable delay per StoreChunk call.
-type slowFakeStore struct {
-	*fakeStore
-	chunkDelay time.Duration
-}
-
-func (s *slowFakeStore) StoreChunk(chunk *desync.Chunk) error {
-	time.Sleep(s.chunkDelay)
-	return s.fakeStore.StoreChunk(chunk)
-}
-
-func (s *slowFakeStore) Close() error   { return s.fakeStore.Close() }
-func (s *slowFakeStore) String() string { return s.fakeStore.String() }
 
 // errorFakeIndex wraps fakeIndex, forcing GetIndex/GetIndexReader to return a custom error.
 type errorFakeIndex struct {

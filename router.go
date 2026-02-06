@@ -1,7 +1,10 @@
 package main
 
 import (
+	"bufio"
+	"bytes"
 	"context"
+	stderrors "errors"
 	"io"
 	"net/http"
 	"net/url"
@@ -11,6 +14,7 @@ import (
 	"time"
 
 	"github.com/input-output-hk/spongix/pkg/compress"
+	"github.com/input-output-hk/spongix/pkg/store"
 
 	"github.com/folbricht/desync"
 	"github.com/gorilla/handlers"
@@ -96,7 +100,7 @@ type Chunk struct {
 type notAllowed struct{}
 
 func (n notAllowed) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	pp("*** 405", r.Method, r.URL.Path, mux.Vars(r))
+	w.WriteHeader(http.StatusMethodNotAllowed)
 }
 
 type notFound struct{}
@@ -106,7 +110,6 @@ func (n notFound) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 func serveNotFound(w http.ResponseWriter, r *http.Request) {
-	pp("*** 404", r.Method, r.URL.Path, mux.Vars(r))
 	w.Header().Set(headerContentType, mimeText)
 	w.Header().Set(headerCache, headerCacheMiss)
 	w.WriteHeader(http.StatusNotFound)
@@ -161,7 +164,7 @@ func (p *Proxy) redirectToUpstream(location string, w http.ResponseWriter, r *ht
 				substituterUrlString := substituterUrl.String()
 
 				if response, err := p.httpHeadClient.Head(substituterUrlString); err == nil {
-					defer response.Body.Close()
+					defer func() { _ = response.Body.Close() }()
 					if response.StatusCode == http.StatusOK {
 						first <- substituterUrlString
 					}
@@ -205,7 +208,7 @@ func (p *Proxy) largeHeadAndGet(prefix, mime string) func(w http.ResponseWriter,
 		if indices, ok := p.s3Indices[namespace]; !ok {
 			serveNotFound(w, r)
 		} else if index, err := indices.GetIndex(location); err != nil {
-			if err.Error() == "reading index: The specified key does not exist." {
+			if stderrors.Is(err, store.ErrIndexNotFound) {
 				p.redirectToUpstream(location, w, r)
 			} else {
 				p.log.Error("getting index", zap.String("index", location), zap.Error(err))
@@ -237,16 +240,71 @@ func (p *Proxy) largePut(prefix string) func(w http.ResponseWriter, r *http.Requ
 }
 
 func (p *Proxy) insert(ctx context.Context, namespace, location string, body io.Reader) error {
-	if indices, ok := p.s3Indices[namespace]; !ok {
+	indices, ok := p.s3Indices[namespace]
+	if !ok {
 		return errors.Errorf("namespace '%s' not found", namespace)
-	} else if chunker, err := desync.NewChunker(body, p.config.Chunks.MinSize, p.config.Chunks.AvgSize, p.config.Chunks.MaxSize); err != nil {
-		return errors.WithMessage(err, "failed creating chunker")
-	} else if index, err := desync.ChunkStream(ctx, chunker, p.s3Store, defaultThreads); err != nil {
-		return errors.WithMessage(err, "failed chunking")
-	} else if err := indices.StoreIndex(location, index); err != nil {
-		return errors.WithMessage(err, "failed storing index")
-	} else {
-		p.log.Info("stored", zap.String("location", location), zap.Int("chunks", len(index.Chunks)))
-		return nil
 	}
+
+	// For narinfos, buffer the body to parse References for reference tracking.
+	var narRefs []string
+	isNarinfo := strings.HasPrefix(location, "indices/narinfo/")
+	if isNarinfo {
+		bodyBytes, err := io.ReadAll(body)
+		if err != nil {
+			return errors.WithMessage(err, "failed reading narinfo body")
+		}
+		narRefs = parseNarinfoReferences(bodyBytes)
+		body = bytes.NewReader(bodyBytes)
+	}
+
+	chunker, err := desync.NewChunker(body, p.config.Chunks.MinSize, p.config.Chunks.AvgSize, p.config.Chunks.MaxSize)
+	if err != nil {
+		return errors.WithMessage(err, "failed creating chunker")
+	}
+
+	index, err := desync.ChunkStream(ctx, chunker, p.s3Store, defaultThreads)
+	if err != nil {
+		return errors.WithMessage(err, "failed chunking")
+	}
+
+	// Use StoreIndexWithRefs for stores that support reference tracking.
+	if rtis, ok := indices.(store.RefTrackingIndexStore); ok {
+		if err := rtis.StoreIndexWithRefs(location, index, narRefs); err != nil {
+			return errors.WithMessage(err, "failed storing index")
+		}
+	} else {
+		if err := indices.StoreIndex(location, index); err != nil {
+			return errors.WithMessage(err, "failed storing index")
+		}
+	}
+
+	p.log.Info("stored", zap.String("location", location), zap.Int("chunks", len(index.Chunks)))
+	return nil
+}
+
+// parseNarinfoReferences extracts store path hashes from a narinfo's References field.
+// References is a space-separated list of store paths like "hash1-name1 hash2-name2".
+// Returns the hash portion (first 32 chars) of each reference.
+func parseNarinfoReferences(body []byte) []string {
+	scanner := bufio.NewScanner(bytes.NewReader(body))
+	for scanner.Scan() {
+		line := scanner.Text()
+		if strings.HasPrefix(line, "References:") {
+			refsStr := strings.TrimPrefix(line, "References:")
+			refsStr = strings.TrimSpace(refsStr)
+			if refsStr == "" {
+				return nil
+			}
+			parts := strings.Fields(refsStr)
+			refs := make([]string, 0, len(parts))
+			for _, part := range parts {
+				// Store paths look like "hash-name", extract the hash (before first '-')
+				if idx := strings.IndexByte(part, '-'); idx > 0 {
+					refs = append(refs, part[:idx])
+				}
+			}
+			return refs
+		}
+	}
+	return nil
 }

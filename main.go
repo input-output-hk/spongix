@@ -15,6 +15,7 @@ import (
 	"github.com/folbricht/desync"
 	"github.com/input-output-hk/spongix/pkg/config"
 	"github.com/input-output-hk/spongix/pkg/logger"
+	"github.com/input-output-hk/spongix/pkg/store"
 	"github.com/minio/minio-go/v6"
 	"github.com/minio/minio-go/v6/pkg/credentials"
 	"go.uber.org/zap"
@@ -103,6 +104,19 @@ func main() {
 		proxy.log.Fatal("server shutdown failed", zap.Error(err))
 	}
 
+	// Drain worker pools before closing stores.
+	// cachePool first (it writes to stores), then headPool (read-only).
+	proxy.log.Info("draining worker pools")
+	proxy.cachePool.StopAndWait()
+	proxy.headPool.StopAndWait()
+
+	// Close Pebble DB if any
+	if proxy.pebbleDB != nil {
+		if err := proxy.pebbleDB.Close(); err != nil {
+			proxy.log.Error("closing pebble db", zap.Error(err))
+		}
+	}
+
 	proxy.log.Info("server shutdown gracefully")
 }
 
@@ -118,6 +132,9 @@ type Proxy struct {
 
 	httpHeadClient *http.Client
 	httpGetClient  *http.Client
+
+	// pebbleDB is the shared Pebble database for chunks and indices.
+	pebbleDB *store.DB
 }
 
 func NewProxy(config *config.Config) *Proxy {
@@ -153,61 +170,86 @@ func (proxy *Proxy) Version() string {
 }
 
 func (proxy *Proxy) setupChunks() {
-	s3 := proxy.config.Chunks.S3
-	if s3.Url == "" {
-		proxy.log.Fatal("No S3 URL given, will not upload files")
-	}
-
-	if s3.Region == "" {
-		proxy.log.Fatal("No S3 region given, will not upload files")
-	}
-
-	s3Url, err := url.Parse(s3.Url)
-	if err != nil {
-		proxy.log.Fatal("couldn't parse S3 URL", zap.Error(err), zap.String("url", s3.Url))
-	}
-
-	store, err := desync.NewS3Store(
-		s3Url,
-		mkCredentials(s3),
-		s3.Region,
-		proxy.defaultStoreOptions(),
-		minio.BucketLookupAuto)
-	if err != nil {
-		proxy.log.Fatal("failed creating s3 store",
-			zap.Error(err),
-			zap.String("url", s3Url.String()),
-			zap.String("region", s3.Region),
-		)
-	}
-
-	proxy.s3Store = store
-}
-
-func (proxy *Proxy) setupIndices() {
-	for namespace, ns := range proxy.config.Namespaces {
-		s3 := ns.S3
-		s3Url, err := url.Parse(s3.Url)
-		if err != nil {
-			proxy.log.Fatal("couldn't parse S3 URL", zap.Error(err), zap.String("namespace", namespace), zap.String("url", s3.Url))
+	switch proxy.config.Chunks.StoreType {
+	case "s3":
+		s3 := proxy.config.Chunks.S3
+		if s3.Url == "" {
+			proxy.log.Fatal("No S3 URL given, will not upload files")
 		}
 
-		index, err := desync.NewS3IndexStore(
+		if s3.Region == "" {
+			proxy.log.Fatal("No S3 region given, will not upload files")
+		}
+
+		s3Url, err := url.Parse(s3.Url)
+		if err != nil {
+			proxy.log.Fatal("couldn't parse S3 URL", zap.Error(err), zap.String("url", s3.Url))
+		}
+
+		s3Store, err := desync.NewS3Store(
 			s3Url,
 			mkCredentials(s3),
 			s3.Region,
 			proxy.defaultStoreOptions(),
-			minio.BucketLookupAuto,
-		)
+			minio.BucketLookupAuto)
 		if err != nil {
-			proxy.log.Fatal("failed creating s3 index store",
+			proxy.log.Fatal("failed creating s3 store",
 				zap.Error(err),
-				zap.String("url", s3.Url),
+				zap.String("url", s3Url.String()),
 				zap.String("region", s3.Region),
 			)
 		}
 
-		proxy.s3Indices[namespace] = index
+		proxy.s3Store = s3Store
+
+	case "pebble":
+		db, err := store.Open(proxy.config.Chunks.PebbleDir)
+		if err != nil {
+			proxy.log.Fatal("failed opening pebble db",
+				zap.Error(err),
+				zap.String("dir", proxy.config.Chunks.PebbleDir),
+			)
+		}
+		proxy.pebbleDB = db
+		proxy.s3Store = store.NewChunkStore(db)
+	}
+}
+
+func (proxy *Proxy) setupIndices() {
+	for namespace, ns := range proxy.config.Namespaces {
+		switch ns.StoreType {
+		case "s3":
+			s3 := ns.S3
+			s3Url, err := url.Parse(s3.Url)
+			if err != nil {
+				proxy.log.Fatal("couldn't parse S3 URL", zap.Error(err), zap.String("namespace", namespace), zap.String("url", s3.Url))
+			}
+
+			index, err := desync.NewS3IndexStore(
+				s3Url,
+				mkCredentials(s3),
+				s3.Region,
+				proxy.defaultStoreOptions(),
+				minio.BucketLookupAuto,
+			)
+			if err != nil {
+				proxy.log.Fatal("failed creating s3 index store",
+					zap.Error(err),
+					zap.String("url", s3.Url),
+					zap.String("region", s3.Region),
+				)
+			}
+
+			proxy.s3Indices[namespace] = store.WrapS3IndexStore(index)
+
+		case "pebble":
+			if proxy.pebbleDB == nil {
+				proxy.log.Fatal("namespace uses pebble store_type but chunks store_type is not pebble",
+					zap.String("namespace", namespace),
+				)
+			}
+			proxy.s3Indices[namespace] = store.NewIndexStore(proxy.pebbleDB, namespace)
+		}
 	}
 }
 
@@ -246,7 +288,7 @@ func (proxy *Proxy) doCache(req *cacheRequest) {
 		proxy.log.Error("failed downloading file", zap.Error(err), zap.String("url", req.url))
 		return
 	}
-	defer response.Body.Close()
+	defer func() { _ = response.Body.Close() }()
 
 	if err := proxy.insert(ctx, req.namespace, req.location, response.Body); err != nil {
 		proxy.log.Error("failed caching file", zap.Error(err), zap.String("url", req.url))

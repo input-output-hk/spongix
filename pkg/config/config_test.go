@@ -39,8 +39,8 @@ const exampleConfig = `
 func TestConfig(t *testing.T) {
 	a := assertions.New(t)
 
-	os.Setenv("CHUNKS_CREDENTIALS_FILE", "/tmp/chunks-credentials")
-	os.Setenv("PUBLIC_CREDENTIALS_FILE", "/tmp/public-credentials")
+	_ = os.Setenv("CHUNKS_CREDENTIALS_FILE", "/tmp/chunks-credentials")
+	_ = os.Setenv("PUBLIC_CREDENTIALS_FILE", "/tmp/public-credentials")
 
 	c, err := LoadBytes([]byte(exampleConfig))
 	a.So(c.Prepare(), assertions.ShouldBeNil)
@@ -55,9 +55,10 @@ func TestConfig(t *testing.T) {
 				Region:          "auto",
 				CredentialsFile: "/tmp/chunks-credentials",
 			},
-			MinSize: 16384,
-			AvgSize: 65536,
-			MaxSize: 262144,
+			StoreType: "s3",
+			MinSize:   16384,
+			AvgSize:   65536,
+			MaxSize:   262144,
 		},
 		Namespaces: map[string]*Namespace{
 			"public": {
@@ -66,6 +67,7 @@ func TestConfig(t *testing.T) {
 					Region:          "auto",
 					CredentialsFile: "/tmp/public-credentials",
 				},
+				StoreType:         "s3",
 				Substituters:      []string{"https://cache.nixos.org"},
 				CacheInfoPriority: 50,
 			},

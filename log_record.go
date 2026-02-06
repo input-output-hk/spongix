@@ -50,7 +50,7 @@ func withHTTPLogging(log *zap.Logger) func(http.Handler) http.Handler {
 				level = log.Error
 			}
 
-			if !(isMetric && record.status == 200) {
+			if !isMetric || record.status != 200 {
 				level("RES",
 					zap.String("ident", r.Host),
 					zap.String("method", r.Method),

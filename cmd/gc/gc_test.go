@@ -75,7 +75,7 @@ func TestLRUFinalizeSortOrder(t *testing.T) {
 
 // TestLRUFinalizeEviction verifies that Finalize evicts oldest chunks when over budget.
 func TestLRUFinalizeEviction(t *testing.T) {
-	lru := NewLRU(250) // budget of 250 bytes
+	lru := NewLRU(250)                                                // budget of 250 bytes
 	lru.Add(chunkStat{id: makeChunkID(1), size: 100, mtimeNano: 100}) // oldest
 	lru.Add(chunkStat{id: makeChunkID(2), size: 100, mtimeNano: 200})
 	lru.Add(chunkStat{id: makeChunkID(3), size: 100, mtimeNano: 300}) // newest
@@ -289,7 +289,6 @@ func TestGCOnceEvictsOldChunks(t *testing.T) {
 	}
 
 	// Create enough data to exceed a tiny cache
-	var indices []desync.Index
 	for i := 0; i < 5; i++ {
 		data := bytes.Repeat([]byte(fmt.Sprintf("DATA%04d", i)), 128*1024/8)
 		chunker, err := desync.NewChunker(bytes.NewReader(data), 16384, 65536, 262144)
@@ -303,7 +302,7 @@ func TestGCOnceEvictsOldChunks(t *testing.T) {
 		hash := fmt.Sprintf("hash%028d", i)
 		indexPath := filepath.Join("indices", "narinfo", hash[0:4], hash)
 		storeIndex(t, idx, indexPath, index)
-		indices = append(indices, index)
+		_ = index
 		// Small delay so timestamps differ
 		time.Sleep(10 * time.Millisecond)
 	}
@@ -421,7 +420,7 @@ func TestGCIndexDeletionSilencesErrors(t *testing.T) {
 	if err := os.Chmod(dir, 0555); err != nil {
 		t.Fatal(err)
 	}
-	defer os.Chmod(dir, 0755)
+	defer func() { _ = os.Chmod(dir, 0755) }()
 
 	err := os.Remove(filePath)
 	if err == nil {

@@ -1,3 +1,26 @@
 /cache
 /.fake-credentials
 /.sequence
+/.claude/
+CLAUDE.md
+
+# Build artifacts
+/gc
+/nar-proxy
+*.nar
+cover.out
+
+# Local configs with secrets
+config.json
+garage.dev.toml
+secret.key
+public.key
+
+# Test/debug data
+narinfos
+nix-cache-info
+unsigned
+sig.rb
+
+# Temp files
+_tmp*

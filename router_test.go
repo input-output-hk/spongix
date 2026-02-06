@@ -557,7 +557,7 @@ func TestDoCacheTimeoutMismatch(t *testing.T) {
 			if end > len(body) {
 				end = len(body)
 			}
-			w.Write(body[start:end])
+			_, _ = w.Write(body[start:end])
 			if f, ok := w.(http.Flusher); ok {
 				f.Flush()
 			}
@@ -592,7 +592,7 @@ func TestTrySubmitDropsJobsUnderLoad(t *testing.T) {
 		if strings.HasSuffix(r.URL.Path, ".narinfo") {
 			w.Header().Set("Content-Type", mimeNarinfo)
 			w.WriteHeader(http.StatusOK)
-			w.Write([]byte(fixtureNarinfoNone))
+			_, _ = w.Write([]byte(fixtureNarinfoNone))
 			return
 		}
 		w.WriteHeader(http.StatusNotFound)
@@ -608,7 +608,7 @@ func TestTrySubmitDropsJobsUnderLoad(t *testing.T) {
 
 	// Fill the pool completely
 	blocker := make(chan struct{})
-	proxy.cachePool.Submit(func() { <-blocker }) // blocks the only worker
+	proxy.cachePool.Submit(func() { <-blocker })    // blocks the only worker
 	proxy.cachePool.TrySubmit(func() { <-blocker }) // fills the queue
 
 	// HEAD request triggers redirect + background cache job submission.

@@ -60,7 +60,7 @@ NarSize: 0`
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if strings.HasSuffix(r.URL.Path, ".narinfo") {
 			w.WriteHeader(http.StatusOK)
-			w.Write([]byte(narinfo))
+			_, _ = w.Write([]byte(narinfo))
 			return
 		}
 		// NAR fetch returns 500

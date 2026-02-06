@@ -37,6 +37,8 @@ type Namespace struct {
 	Substituters      []string `json:"substituters"`
 	CacheInfoPriority uint64   `json:"cache_info_priority"`
 	S3                *S3      `json:"s3"`
+	// StoreType selects the index storage backend: "s3" (default) or "pebble".
+	StoreType string `json:"store_type"`
 }
 
 func (n *Namespace) Prepare() error {
@@ -44,11 +46,21 @@ func (n *Namespace) Prepare() error {
 		return errors.New("namespace configuration is missing")
 	}
 
-	if n.S3 == nil {
-		return errors.Errorf("namespace S3 configuration is missing")
+	if n.StoreType == "" {
+		n.StoreType = "s3"
 	}
 
-	n.S3.CredentialsFile = os.ExpandEnv(n.S3.CredentialsFile)
+	switch n.StoreType {
+	case "s3":
+		if n.S3 == nil {
+			return errors.Errorf("namespace S3 configuration is missing")
+		}
+		n.S3.CredentialsFile = os.ExpandEnv(n.S3.CredentialsFile)
+	case "pebble":
+		// Indices share the chunk store's Pebble DB; no per-namespace dir needed.
+	default:
+		return errors.Errorf("unknown store_type %q (expected \"s3\" or \"pebble\")", n.StoreType)
+	}
 
 	return nil
 }
@@ -65,6 +77,10 @@ type Chunks struct {
 	AvgSize uint64 `json:"average_size"`
 	MaxSize uint64 `json:"maximum_size"`
 	S3      *S3    `json:"s3"`
+	// StoreType selects the chunk storage backend: "s3" (default) or "pebble".
+	StoreType string `json:"store_type"`
+	// PebbleDir is the directory for the Pebble chunk database (used when StoreType is "pebble").
+	PebbleDir string `json:"pebble_dir"`
 }
 
 func (c *Chunks) Prepare() error {
@@ -92,11 +108,24 @@ func (c *Chunks) Prepare() error {
 		return errors.New("maximum chunk size must be larger than average chunk size")
 	}
 
-	if c.S3 == nil {
-		return errors.New("chunks S3 configuration is missing")
+	if c.StoreType == "" {
+		c.StoreType = "s3"
 	}
 
-	c.S3.CredentialsFile = os.ExpandEnv(c.S3.CredentialsFile)
+	switch c.StoreType {
+	case "s3":
+		if c.S3 == nil {
+			return errors.New("chunks S3 configuration is missing")
+		}
+		c.S3.CredentialsFile = os.ExpandEnv(c.S3.CredentialsFile)
+	case "pebble":
+		if c.PebbleDir == "" {
+			return errors.New("pebble_dir is required when store_type is \"pebble\"")
+		}
+		c.PebbleDir = os.ExpandEnv(c.PebbleDir)
+	default:
+		return errors.Errorf("unknown store_type %q (expected \"s3\" or \"pebble\")", c.StoreType)
+	}
 
 	return nil
 }
@@ -107,13 +136,15 @@ func LoadBytes(input []byte) (*Config, error) {
 }
 
 func LoadFile(path string) (*Config, error) {
-	config := &Config{}
-
-	if fd, err := os.Open(path); err != nil {
+	fd, err := os.Open(path)
+	if err != nil {
 		return nil, errors.WithMessagef(err, "while opening file %s", path)
-	} else if err := json.NewDecoder(fd).Decode(&config); err != nil {
-		return nil, errors.WithMessagef(err, "while decoding file %s", path)
-	} else {
-		return config, nil
 	}
+	defer func() { _ = fd.Close() }()
+
+	config := &Config{}
+	if err := json.NewDecoder(fd).Decode(&config); err != nil {
+		return nil, errors.WithMessagef(err, "while decoding file %s", path)
+	}
+	return config, nil
 }

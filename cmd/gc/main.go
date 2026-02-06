@@ -28,7 +28,9 @@ func main() {
 	arg.MustParse(gc)
 	gc.setupDesync()
 	gc.setupLogger()
-	gc.verify()
+	if gc.Verify {
+		gc.verify()
+	}
 	gc.gc()
 }
 
@@ -63,6 +65,7 @@ var yes = struct{}{}
 type GC struct {
 	Dir        string `arg:"--dir,env:CACHE_DIR" help:"directory for the cache"`
 	CacheSize  uint64 `arg:"--cache-size,env:CACHE_SIZE" help:"Number of gigabytes to keep in the disk cache"`
+	Verify     bool   `arg:"--verify" help:"Run store integrity verification before GC"`
 	LogLevel   string `arg:"--log-level,env:LOG_LEVEL" help:"One of debug, info, warn, error, dpanic, panic, fatal"`
 	LogMode    string `arg:"--log-mode,env:LOG_MODE" help:"development or production"`
 	log          *zap.Logger
@@ -117,8 +120,7 @@ func measure(metric *metrics.Counter, f func()) {
 }
 
 func (gc *GC) gc() {
-	cacheStat := map[string]*chunkStat{}
-	measure(metricGcTime, func() { gc.gcOnce(cacheStat) })
+	measure(metricGcTime, func() { gc.gcOnce() })
 }
 
 func (gc *GC) verify() {
@@ -138,13 +140,13 @@ func (gc *GC) verifyOnce() {
 }
 
 type chunkStat struct {
-	id    desync.ChunkID
-	size  int64
-	mtime time.Time
+	id        desync.ChunkID // [32]byte, no pointers
+	size      int64
+	mtimeNano int64 // UnixNano, avoids time.Time's *Location pointer
 }
 
 type chunkLRU struct {
-	live        []*chunkStat
+	live        []chunkStat
 	liveSize    uint64
 	liveSizeMax uint64
 	dead        map[desync.ChunkID]struct{}
@@ -152,38 +154,36 @@ type chunkLRU struct {
 }
 
 func NewLRU(liveSizeMax uint64) *chunkLRU {
+	// Estimate chunk count from cache size assuming avg 64KB chunks.
+	estimatedChunks := int(liveSizeMax / 65536)
 	return &chunkLRU{
-		live:        []*chunkStat{},
+		live:        make([]chunkStat, 0, estimatedChunks),
 		liveSizeMax: liveSizeMax,
 		dead:        map[desync.ChunkID]struct{}{},
 	}
 }
 
-func (l *chunkLRU) AddDead(stat *chunkStat) {
+func (l *chunkLRU) AddDead(stat chunkStat) {
 	l.dead[stat.id] = yes
 	l.deadSize += uint64(stat.size)
 }
 
-func (l *chunkLRU) Add(stat *chunkStat) {
-	isOlder := func(i int) bool { return l.live[i].mtime.Before(stat.mtime) }
-	i := sort.Search(len(l.live), isOlder)
-	l.insertAt(i, stat)
+func (l *chunkLRU) Add(stat chunkStat) {
+	l.live = append(l.live, stat)
 	l.liveSize += uint64(stat.size)
-	for l.liveSize > l.liveSizeMax {
-		die := l.live[len(l.live)-1]
-		l.dead[die.id] = yes
-		l.live = l.live[:len(l.live)-1]
-		l.deadSize += uint64(die.size)
-		l.liveSize -= uint64(die.size)
-	}
 }
 
-func (l *chunkLRU) insertAt(i int, v *chunkStat) {
-	if i == len(l.live) {
-		l.live = append(l.live, v)
-	} else {
-		l.live = append(l.live[:i+1], l.live[i:]...)
-		l.live[i] = v
+// Finalize sorts by newest-first and evicts oldest chunks until under budget.
+func (l *chunkLRU) Finalize() {
+	sort.Slice(l.live, func(i, j int) bool {
+		return l.live[i].mtimeNano > l.live[j].mtimeNano
+	})
+	for l.liveSize > l.liveSizeMax && len(l.live) > 0 {
+		last := l.live[len(l.live)-1]
+		l.dead[last.id] = yes
+		l.deadSize += uint64(last.size)
+		l.liveSize -= uint64(last.size)
+		l.live = l.live[:len(l.live)-1]
 	}
 }
 
@@ -204,6 +204,19 @@ const maxCacheDirPortion = 0xffff * 4096
 type integrityCheck struct {
 	path  string
 	index desync.Index
+}
+
+// kindFromPath extracts the index kind (narinfo, nar, realisations, log)
+// from the path. Index files are stored as indices/{kind}/{hash[0:4]}/{hash}
+// with no file extension.
+func kindFromPath(path string) string {
+	parts := strings.Split(path, string(filepath.Separator))
+	for i, part := range parts {
+		if part == "indices" && i+1 < len(parts) {
+			return parts[i+1]
+		}
+	}
+	return ""
 }
 
 func checkNarContents(store desync.Store, idx desync.Index) error {
@@ -241,7 +254,7 @@ Local GC strategies:
 	  If index is missing, delete it.
 		If last access is too old, delete it.
 */
-func (gc *GC) gcOnce(cacheStat map[string]*chunkStat) {
+func (gc *GC) gcOnce() {
 	log := gc.log.Named("gc")
 	maxCacheSize := (uint64(math.Pow(2, 30)) * gc.CacheSize) - maxCacheDirPortion
 	store := gc.localStore
@@ -252,22 +265,20 @@ func (gc *GC) gcOnce(cacheStat map[string]*chunkStat) {
 	metricMaxSize.Set(int64(maxCacheSize))
 	log.Info("GC started", zap.Uint64("maxSize", maxCacheSize))
 
-	// filepath.Walk is faster for our usecase because we need the stat result anyway.
-	walkStoreErr := filepath.Walk(store.Base, func(path string, info fs.FileInfo, err error) error {
+	walkStoreErr := filepath.WalkDir(store.Base, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			if err == os.ErrNotExist {
 				return nil
-			} else {
-				return err
 			}
+			return err
 		}
 
-		if info.IsDir() {
+		if d.IsDir() {
 			chunkDirs++
 			return nil
 		}
 
-		name := info.Name()
+		name := d.Name()
 		if strings.HasPrefix(name, ".tmp") {
 			return nil
 		}
@@ -284,14 +295,14 @@ func (gc *GC) gcOnce(cacheStat map[string]*chunkStat) {
 			return err
 		}
 
-		stat := &chunkStat{id: id, size: info.Size(), mtime: info.ModTime()}
-
-		if _, err := store.GetChunk(id); err != nil {
-			log.Error("getting chunk", zap.Error(err), zap.String("chunk", id.String()))
-			lru.AddDead(stat)
-		} else {
-			lru.Add(stat)
+		// Only stat files we actually need (WalkDir avoids lstat for filtered-out files).
+		info, err := d.Info()
+		if err != nil {
+			return err
 		}
+
+		stat := chunkStat{id: id, size: info.Size(), mtimeNano: info.ModTime().UnixNano()}
+		lru.Add(stat)
 
 		return nil
 	})
@@ -304,6 +315,8 @@ func (gc *GC) gcOnce(cacheStat map[string]*chunkStat) {
 		log.Error("While walking store", zap.Error(walkStoreErr))
 		return
 	}
+
+	lru.Finalize()
 
 	metricChunkCount.Set(int64(len(lru.live)))
 	metricChunkGcCount.Add(uint64(len(lru.dead)))
@@ -318,57 +331,60 @@ func (gc *GC) gcOnce(cacheStat map[string]*chunkStat) {
 		zap.Int("dead chunks", len(lru.dead)),
 	)
 
-	deadIndices := &sync.Map{}
+	var deadMu sync.Mutex
+	deadIndices := map[string]struct{}{}
 	walkIndicesStart := time.Now()
 	indicesCount := int64(0)
 	inflatedSize := int64(0)
-	ignoreBeforeTime := time.Now().Add(10 * time.Minute)
+	ignoreBeforeTime := time.Now().Add(-10 * time.Minute)
 
-	integrity := make(chan integrityCheck)
-	wg := &sync.WaitGroup{}
+	integrity := make(chan integrityCheck, 64)
+	var wg sync.WaitGroup
 
 	for i := 0; i < 3; i++ {
 		wg.Add(1)
 
-		go func(n int) {
+		go func() {
 			defer wg.Done()
 
-			for {
-				select {
-				case <-time.After(5 * time.Minute):
-					return
-				case check := <-integrity:
-					switch filepath.Ext(check.path) {
-					case "":
-						return
-					case ".nar":
-						if err := checkNarContents(store, check.index); err != nil {
-							log.Error("checking NAR contents", zap.Error(err), zap.String("path", check.path))
-							deadIndices.Store(check.path, yes)
-						}
-					case ".narinfo":
-						if _, err := assembler.AssembleNarinfo(store, check.index); err != nil {
-							log.Error("checking narinfo", zap.Error(err), zap.String("path", check.path))
-							deadIndices.Store(check.path, yes)
-						}
+			for check := range integrity {
+				kind := kindFromPath(check.path)
+				switch kind {
+				case "nar":
+					if err := checkNarContents(store, check.index); err != nil {
+						log.Error("checking NAR contents", zap.Error(err), zap.String("path", check.path))
+						deadMu.Lock()
+						deadIndices[check.path] = yes
+						deadMu.Unlock()
+					}
+				case "narinfo":
+					if _, err := assembler.AssembleNarinfo(store, check.index); err != nil {
+						log.Error("checking narinfo", zap.Error(err), zap.String("path", check.path))
+						deadMu.Lock()
+						deadIndices[check.path] = yes
+						deadMu.Unlock()
 					}
 				}
 			}
-		}(i)
+		}()
 	}
 
 	var walkIndicesErr error
 	for _, indices := range gc.localIndices {
-		err := filepath.Walk(indices.Path, func(path string, info fs.FileInfo, err error) error {
-			if err != nil || info.IsDir() {
+		err := filepath.WalkDir(indices.Path, func(path string, d fs.DirEntry, err error) error {
+			if err != nil || d.IsDir() {
 				return err
 			}
 
+			info, err := d.Info()
+			if err != nil {
+				return err
+			}
 			isOld := info.ModTime().Before(ignoreBeforeTime)
 
-			ext := filepath.Ext(path)
-			isNar := ext == ".nar"
-			isNarinfo := ext == ".narinfo"
+			kind := kindFromPath(path)
+			isNar := kind == "nar"
+			isNarinfo := kind == "narinfo"
 
 			if !(isNar || isNarinfo || isOld) {
 				return nil
@@ -388,12 +404,16 @@ func (gc *GC) gcOnce(cacheStat map[string]*chunkStat) {
 
 			if len(index.Chunks) == 0 {
 				log.Debug("index chunks are empty", zap.String("path", path))
-				deadIndices.Store(path, yes)
+				deadMu.Lock()
+				deadIndices[path] = yes
+				deadMu.Unlock()
 			} else {
 				for _, indexChunk := range index.Chunks {
 					if lru.IsDead(indexChunk.ID) {
 						log.Debug("some chunks are dead", zap.String("path", path))
-						deadIndices.Store(path, yes)
+						deadMu.Lock()
+						deadIndices[path] = yes
+						deadMu.Unlock()
 						break
 					}
 				}
@@ -407,9 +427,8 @@ func (gc *GC) gcOnce(cacheStat map[string]*chunkStat) {
 		}
 	}
 
-	integrity <- integrityCheck{path: "", index: desync.Index{}}
-	wg.Wait()
 	close(integrity)
+	wg.Wait()
 
 	metricIndexCount.Set(indicesCount)
 	metricIndexWalk.Add(uint64(time.Since(walkIndicesStart).Milliseconds()))
@@ -420,16 +439,13 @@ func (gc *GC) gcOnce(cacheStat map[string]*chunkStat) {
 		return
 	}
 	deadIndexCount := uint64(0)
-	// time.Sleep(10 * time.Minute)
-	deadIndices.Range(func(key, value interface{}) bool {
-		path := key.(string)
+	for path := range deadIndices {
 		log.Info("deleting index", zap.String("path", path))
 		if err := os.Remove(path); err != nil {
 			log.Error("failed deleting index", zap.Error(err), zap.String("path", path))
 		}
 		deadIndexCount++
-		return true
-	})
+	}
 
 	metricIndexGcCount.Add(deadIndexCount)
 

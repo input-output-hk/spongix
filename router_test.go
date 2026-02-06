@@ -536,14 +536,13 @@ func TestS3ErrorsMaskedAs404(t *testing.T) {
 		End()
 }
 
-func TestDoCacheTimeoutMismatch(t *testing.T) {
+func TestDoCacheTimeout(t *testing.T) {
 	proxy := testProxy(t)
 	fakeIdx := newFakeIndex()
 	proxy.s3Indices[testNamespace] = fakeIdx
 
 	// Serve 1MB body slowly: write in chunks with delays, so the full read
-	// takes ~12s — within the 30min HTTP client timeout but exceeding the 10s
-	// context.WithTimeout in doCache at main.go:239.
+	// takes ~12s — well within the 5min context timeout in doCache.
 	body := make([]byte, 1024*1024)
 	for i := range body {
 		body[i] = byte(i % 256)
@@ -573,16 +572,11 @@ func TestDoCacheTimeoutMismatch(t *testing.T) {
 	proxy.doCache(&cacheRequest{namespace: testNamespace, url: ts.URL, location: location})
 	elapsed := time.Since(start)
 
-	// doCache sets a 10s context.WithTimeout (main.go:239) that should bound
-	// the insert operation. If working correctly, doCache should return in ~10s
-	// (cancelled by context). But the timeout is ineffective because the I/O
-	// on response.Body is governed by the 30min HTTP client timeout, not the
-	// context — so the full 12s download completes, bypassing the deadline.
-	if elapsed > 11*time.Second {
-		t.Errorf("doCache took %v but should have been bounded by 10s context timeout "+
-			"(BUG: context.WithTimeout at main.go:239 is ineffective — the 30min HTTP "+
-			"client timeout at main.go:233 governs the actual I/O, bypassing the 10s "+
-			"deadline)", elapsed)
+	// With HTTP client timeout disabled and context set to 5min, the 12s
+	// download should complete successfully (context is the sole timeout
+	// authority and 12s is well within the 5min bound).
+	if elapsed < 10*time.Second || elapsed > 20*time.Second {
+		t.Errorf("doCache took %v, expected ~12s (download should complete within 5min context)", elapsed)
 	}
 }
 

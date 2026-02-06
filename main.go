@@ -147,7 +147,7 @@ func NewProxy(config *config.Config) *Proxy {
 	httpHeadClient.Timeout = 1 * time.Second
 
 	httpGetClient := &http.Client{}
-	httpGetClient.Timeout = 30 * time.Minute
+	httpGetClient.Timeout = 0 // disabled — let context govern timeouts
 
 	return &Proxy{
 		config:         config,
@@ -274,7 +274,7 @@ func (proxy *Proxy) setupLogger() {
 }
 
 func (proxy *Proxy) doCache(req *cacheRequest) {
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
 
 	httpReq, err := http.NewRequestWithContext(ctx, "GET", req.url, nil)

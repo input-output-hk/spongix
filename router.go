@@ -3,8 +3,10 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"compress/bzip2"
 	"context"
 	stderrors "errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/url"
@@ -13,15 +15,19 @@ import (
 	"strings"
 	"time"
 
-	"github.com/input-output-hk/spongix/pkg/compress"
-	"github.com/input-output-hk/spongix/pkg/store"
-
+	"github.com/andybalholm/brotli"
 	"github.com/folbricht/desync"
 	"github.com/gorilla/handlers"
 	"github.com/gorilla/mux"
+	"github.com/input-output-hk/spongix/pkg/compress"
+	"github.com/input-output-hk/spongix/pkg/store"
+	"github.com/klauspost/compress/zstd"
 	"github.com/nix-community/go-nix/pkg/nar"
+	"github.com/nix-community/go-nix/pkg/narinfo"
+	"github.com/nix-community/go-nix/pkg/narinfo/signature"
 	"github.com/pascaldekloe/metrics"
 	"github.com/pkg/errors"
+	"github.com/ulikunitz/xz"
 	"go.uber.org/zap"
 )
 
@@ -33,7 +39,7 @@ const (
 	mimeJson         = "application/json"
 
 	matchNarinfo     = "/{hash:[0-9a-df-np-sv-z]{32}}.narinfo"
-	matchNar         = "/nar/{hash:[0-9a-df-np-sv-z]{52}}.nar{ext:.?[a-z]*}"
+	matchNar         = "/nar/{hash:[0-9a-df-np-sv-z]{52}}.nar{ext:(?:\\.[a-z][a-z0-9]*)?}"
 	matchRealisation = "/realisations/sha256:{hash:[0-9a-f]{64}![^.]+}.doi"
 	matchLog         = "/log/{hash:[0-9a-df-np-sv-z]{32}-[^.]+}.drv"
 
@@ -124,6 +130,35 @@ func answer(w http.ResponseWriter, status int, mime, msg string) {
 	}
 }
 
+type zstdReadCloser struct{ *zstd.Decoder }
+
+func (z *zstdReadCloser) Close() error { z.Decoder.Close(); return nil }
+
+func decompressReader(ext string, body io.Reader) (io.ReadCloser, error) {
+	switch ext {
+	case "":
+		return io.NopCloser(body), nil
+	case ".xz":
+		r, err := xz.NewReader(body)
+		if err != nil {
+			return nil, fmt.Errorf("creating xz reader: %w", err)
+		}
+		return io.NopCloser(r), nil
+	case ".zst":
+		r, err := zstd.NewReader(body)
+		if err != nil {
+			return nil, fmt.Errorf("creating zstd reader: %w", err)
+		}
+		return &zstdReadCloser{r}, nil
+	case ".bz2":
+		return io.NopCloser(bzip2.NewReader(body)), nil
+	case ".br":
+		return io.NopCloser(brotli.NewReader(body)), nil
+	default:
+		return nil, fmt.Errorf("unsupported compression extension: %q", ext)
+	}
+}
+
 func (p *Proxy) nixCacheInfo(w http.ResponseWriter, r *http.Request) {
 	if namespace, ok := mux.Vars(r)["namespace"]; !ok {
 		p.log.Warn("namespace not given", zap.String("url", r.URL.String()))
@@ -187,7 +222,7 @@ func (p *Proxy) redirectToUpstream(location string, w http.ResponseWriter, r *ht
 					}
 				}()
 				p.cachePool.Submit(func() {
-					p.doCache(&cacheRequest{namespace: namespace, url: found, location: location})
+					p.doCache(&cacheRequest{namespace: namespace, url: found, location: location, ext: mux.Vars(r)["ext"]})
 				})
 			}()
 
@@ -236,7 +271,24 @@ func (p *Proxy) largePut(prefix string) func(w http.ResponseWriter, r *http.Requ
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
 		defer cancel()
 
-		if err := p.insert(ctx, namespace, location, r.Body); err != nil {
+		var body io.Reader = r.Body
+		if prefix == narPrefix {
+			ext := mux.Vars(r)["ext"]
+			rc, err := decompressReader(ext, r.Body)
+			if err != nil {
+				metricRequests(namespace, prefix, "error").Add(1)
+				answer(w, http.StatusBadRequest, mimeText, err.Error())
+				return
+			}
+			defer func() {
+				if err := rc.Close(); err != nil {
+					p.log.Warn("closing decompressor", zap.Error(err))
+				}
+			}()
+			body = rc
+		}
+
+		if err := p.insert(ctx, namespace, location, body); err != nil {
 			metricRequests(namespace, prefix, "error").Add(1)
 			p.log.Error("inserting", zap.String("index", location), zap.Error(err))
 			answer(w, http.StatusInternalServerError, mimeText, err.Error())
@@ -261,6 +313,10 @@ func (p *Proxy) insert(ctx context.Context, namespace, location string, body io.
 		bodyBytes, err := io.ReadAll(body)
 		if err != nil {
 			return errors.WithMessage(err, "failed reading narinfo body")
+		}
+		bodyBytes, err = p.rewriteNarinfo(bodyBytes)
+		if err != nil {
+			return errors.WithMessage(err, "failed rewriting narinfo")
 		}
 		narRefs = parseNarinfoReferences(bodyBytes)
 		body = bytes.NewReader(bodyBytes)
@@ -289,6 +345,61 @@ func (p *Proxy) insert(ctx context.Context, namespace, location string, body io.
 
 	p.log.Info("stored", zap.String("location", location), zap.Int("chunks", len(index.Chunks)))
 	return nil
+}
+
+// rewriteNarinfo rewrites a narinfo to reflect that the NAR is stored uncompressed.
+// If the narinfo already indicates no compression, it is returned unchanged.
+// Otherwise, it sets Compression to "none", adjusts FileHash/FileSize to match
+// NarHash/NarSize, strips the compression extension from URL, clears old signatures,
+// and re-signs with the proxy's signing key if configured.
+func (p *Proxy) rewriteNarinfo(body []byte) ([]byte, error) {
+	// Quick scan: if Compression is "none" or absent, return unchanged.
+	scanner := bufio.NewScanner(bytes.NewReader(body))
+	foundCompression := false
+	for scanner.Scan() {
+		line := scanner.Text()
+		if strings.HasPrefix(line, "Compression:") {
+			value := strings.TrimSpace(strings.TrimPrefix(line, "Compression:"))
+			if value == "none" {
+				return body, nil
+			}
+			foundCompression = true
+			break
+		}
+	}
+	if !foundCompression {
+		return body, nil
+	}
+
+	info, err := narinfo.Parse(bytes.NewReader(body))
+	if err != nil {
+		return nil, fmt.Errorf("parsing narinfo: %w", err)
+	}
+
+	info.Compression = "none"
+	info.FileHash = info.NarHash
+	info.FileSize = info.NarSize
+
+	// Strip compression extension from URL.
+	for _, ext := range []string{".xz", ".zst", ".bz2", ".br"} {
+		if strings.HasSuffix(info.URL, ext) {
+			info.URL = strings.TrimSuffix(info.URL, ext)
+			break
+		}
+	}
+
+	// Clear old signatures and re-sign if a signing key is configured.
+	info.Signatures = nil
+	if p.signingKey != nil {
+		fingerprint := info.Fingerprint()
+		sig, err := p.signingKey.Sign(nil, fingerprint)
+		if err != nil {
+			return nil, fmt.Errorf("signing narinfo: %w", err)
+		}
+		info.Signatures = []signature.Signature{sig}
+	}
+
+	return []byte(info.String()), nil
 }
 
 // parseNarinfoReferences extracts store path hashes from a narinfo's References field.

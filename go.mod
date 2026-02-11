@@ -12,7 +12,6 @@ require (
 	github.com/gorilla/handlers v1.5.1
 	github.com/gorilla/mux v1.8.0
 	github.com/klauspost/compress v1.16.6
-	github.com/kr/pretty v0.3.1
 	github.com/minio/minio-go/v6 v6.0.57
 	github.com/nix-community/go-nix v0.0.0-20230226174119-1f9567c0a1e5
 	github.com/pascaldekloe/metrics v1.5.1
@@ -57,6 +56,7 @@ require (
 	github.com/klauspost/cpuid v1.2.3 // indirect
 	github.com/klauspost/cpuid/v2 v2.0.9 // indirect
 	github.com/kr/fs v0.1.0 // indirect
+	github.com/kr/pretty v0.3.1 // indirect
 	github.com/kr/text v0.2.0 // indirect
 	github.com/mattn/go-runewidth v0.0.9 // indirect
 	github.com/matttproud/golang_protobuf_extensions v1.0.4 // indirect

@@ -433,6 +433,8 @@ func TestRouterNarPut(t *testing.T) {
 			Body("").
 			End()
 
+		// After decompression-on-ingest, GET via .nar should return
+		// uncompressed content, not the original xz bytes.
 		apitest.New().
 			Handler(proxy.router()).
 			Method(http.MethodGet).
@@ -440,7 +442,7 @@ func TestRouterNarPut(t *testing.T) {
 			Expect(tt).
 			Status(http.StatusOK).
 			Header(headerContentType, mimeNar).
-			Body(string(fixtureNarXz)).
+			Body(string(fixtureNar)).
 			End()
 	})
 }

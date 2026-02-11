@@ -12,7 +12,7 @@ const (
 )
 
 type cacheRequest struct {
-	namespace, url, location string
+	namespace, url, location, ext string
 }
 
 type Realisation struct {

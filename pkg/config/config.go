@@ -12,14 +12,17 @@ type CLI struct {
 }
 
 type Config struct {
-	Listen     string                `json:"listen"`
-	LogLevel   string                `json:"log_level"`
-	LogMode    string                `json:"log_mode"`
-	Chunks     *Chunks               `json:"chunks"`
-	Namespaces map[string]*Namespace `json:"namespaces"`
+	Listen         string                `json:"listen"`
+	LogLevel       string                `json:"log_level"`
+	LogMode        string                `json:"log_mode"`
+	SigningKeyFile string                `json:"signing_key_file"`
+	Chunks         *Chunks               `json:"chunks"`
+	Namespaces     map[string]*Namespace `json:"namespaces"`
 }
 
 func (c *Config) Prepare() error {
+	c.SigningKeyFile = os.ExpandEnv(c.SigningKeyFile)
+
 	if err := c.Chunks.Prepare(); err != nil {
 		return err
 	}

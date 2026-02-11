@@ -37,25 +37,28 @@
       s3 = mapS3 "namespace_${name}" value.s3;
     };
 
-  configFile = builtins.toFile "spongix.json" (builtins.toJSON {
-    listen = "${cfg.host}:${builtins.toString cfg.port}";
-    log_level = cfg.logLevel;
-    log_mode = cfg.logMode;
-    namespaces = builtins.mapAttrs mapNamespace cfg.namespaces;
-    chunks =
-      {
-        minimum_size = cfg.chunks.minimumSize;
-        average_size = cfg.chunks.averageSize;
-        maximum_size = cfg.chunks.maximumSize;
-        store_type = cfg.chunks.storeType;
-      }
-      // lib.optionalAttrs (cfg.chunks.storeType == "s3") {
-        s3 = mapS3 "chunks" cfg.chunks.s3;
-      }
-      // lib.optionalAttrs (cfg.chunks.storeType == "pebble") {
-        pebble_dir = cfg.chunks.pebbleDir;
-      };
-  });
+  configFile = builtins.toFile "spongix.json" (builtins.toJSON ({
+      listen = "${cfg.host}:${builtins.toString cfg.port}";
+      log_level = cfg.logLevel;
+      log_mode = cfg.logMode;
+      namespaces = builtins.mapAttrs mapNamespace cfg.namespaces;
+      chunks =
+        {
+          minimum_size = cfg.chunks.minimumSize;
+          average_size = cfg.chunks.averageSize;
+          maximum_size = cfg.chunks.maximumSize;
+          store_type = cfg.chunks.storeType;
+        }
+        // lib.optionalAttrs (cfg.chunks.storeType == "s3") {
+          s3 = mapS3 "chunks" cfg.chunks.s3;
+        }
+        // lib.optionalAttrs (cfg.chunks.storeType == "pebble") {
+          pebble_dir = cfg.chunks.pebbleDir;
+        };
+    }
+    // lib.optionalAttrs (cfg.signingKeyFile != null) {
+      signing_key_file = "$CREDENTIALS_DIRECTORY/signing-key";
+    }));
 
   s3Option = lib.mkOption {
     type = lib.types.nullOr (lib.types.submodule {
@@ -97,7 +100,8 @@
   s3Credentials =
     lib.optional (cfg.chunks.storeType == "s3") "chunks:${cfg.chunks.s3.credentialsFile}"
     ++ lib.mapAttrsToList (name: value: "namespace_${name}:${value.s3.credentialsFile}")
-    (lib.filterAttrs (_: ns: ns.storeType == "s3") cfg.namespaces);
+    (lib.filterAttrs (_: ns: ns.storeType == "s3") cfg.namespaces)
+    ++ lib.optional (cfg.signingKeyFile != null) "signing-key:${cfg.signingKeyFile}";
 in {
   options = {
     services.spongix = {
@@ -109,6 +113,7 @@ in {
       };
 
       chunks = lib.mkOption {
+        default = {};
         type = lib.types.submodule {
           options = {
             minimumSize = lib.mkOption {
@@ -217,6 +222,15 @@ in {
           };
         }));
         default = {};
+      };
+
+      signingKeyFile = lib.mkOption {
+        type = lib.types.nullOr lib.types.str;
+        default = null;
+        description = ''
+          Path to the Nix signing secret key file.
+          Loaded via systemd LoadCredential for security.
+        '';
       };
 
       configFile = lib.mkOption {

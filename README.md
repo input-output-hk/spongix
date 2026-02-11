@@ -76,6 +76,86 @@ Set a `post-build-hook` in your nix configuration to a script like this:
 - [ ] Upload to S3 compatible storage as well as the local store
 - [ ] Verify existing signatures
 
+## Pebble Storage Tuning
+
+When using Pebble as the chunk store backend (`store_type: "pebble"`), performance
+on HDDs is highly sensitive to three configuration knobs. The benchmarks below were
+run on a ZFS raidz1 array with 100MB NARs and 64KB average chunk size.
+
+### Configuration options
+
+| JSON key | NixOS option | Default | Description |
+|---|---|---|---|
+| `pebble_memtable_size` | `chunks.pebbleMemTableSize` | 67108864 (64MB) | Pebble memtable size in bytes |
+| `pebble_l0_compaction_threshold` | `chunks.pebbleL0CompactionThreshold` | 4 | L0 file count before compaction triggers |
+| `pebble_wal_dir` | `chunks.pebbleWALDir` | same as data dir | Separate directory for the write-ahead log |
+| `batch_max_bytes` | `chunks.batchMaxBytes` | 268435456 (256MB) | Max bytes to buffer before flushing to Pebble |
+
+### Recommendations
+
+**Move the WAL to fast storage.** This is the single biggest win. Placing the WAL
+on tmpfs or an SSD nearly doubles throughput compared to WAL-on-HDD at every
+configuration. On a production server with spinning disks, set `pebble_wal_dir` to
+a path on tmpfs (e.g. `/run/spongix/wal`) or an SSD partition.
+
+Note: WAL on tmpfs means uncommitted writes are lost on power failure. This is
+acceptable for a cache proxy since data can be re-fetched from upstream.
+
+**Increase the memtable size to 256MB.** The default 64MB memtable forces frequent
+flushes during large NAR ingestion (~1,536 chunks per 100MB NAR). Increasing to
+256MB keeps most inserts in memory until the final atomic batch commit.
+
+**L0 compaction threshold has minimal impact.** Values of 4, 8, or 12 produce
+nearly identical throughput (<5% variance). The default of 4 is fine; 8 is a
+reasonable middle ground if you want fewer compactions.
+
+### Benchmark results (100MB NARs, HDD)
+
+| MemTable | L0 | WAL | Throughput | Latency |
+|---|---|---|---|---|
+| 256MB | 8 | tmpfs | 194 MB/s | 541ms |
+| 256MB | 4 | tmpfs | 194 MB/s | 541ms |
+| 256MB | 12 | tmpfs | 196 MB/s | 536ms |
+| 128MB | 4 | tmpfs | 189 MB/s | 554ms |
+| 128MB | 8 | tmpfs | 188 MB/s | 559ms |
+| 256MB | 8 | HDD | 158 MB/s | 664ms |
+| 256MB | 4 | HDD | 155 MB/s | 677ms |
+| 128MB | 8 | HDD | 148 MB/s | 710ms |
+| 64MB | 4 | tmpfs | 71 MB/s | 1.48s |
+| 64MB | 4 | HDD | 42 MB/s | 2.50s |
+
+For comparison, the baseline (64MB memtable, WAL on HDD, no batching) achieved
+19.6 MB/s. The recommended config (256MB memtable, WAL on tmpfs) achieves
+194 MB/s -- a **10x improvement**.
+
+### Example config (JSON)
+
+```json
+{
+  "chunks": {
+    "store_type": "pebble",
+    "pebble_dir": "/big/spongix/pebble",
+    "pebble_wal_dir": "/run/spongix/wal",
+    "pebble_memtable_size": 268435456,
+    "pebble_l0_compaction_threshold": 8,
+    "batch_max_bytes": 268435456
+  }
+}
+```
+
+### Example NixOS config
+
+```nix
+services.spongix.chunks = {
+  storeType = "pebble";
+  pebbleDir = "/big/spongix/pebble";
+  pebbleWALDir = "/run/spongix/wal";
+  pebbleMemTableSize = 256 * 1024 * 1024;  # 256MB
+  pebbleL0CompactionThreshold = 8;
+  batchMaxBytes = 256 * 1024 * 1024;  # 256MB
+};
+```
+
 ## Storage
 
 R2:

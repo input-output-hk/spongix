@@ -88,7 +88,7 @@ func benchProxyPebble(b *testing.B) *Proxy {
 	if err := cfg.Prepare(); err != nil {
 		b.Fatal(err)
 	}
-	db, err := store.Open(dir)
+	db, err := store.Open(dir, nil)
 	if err != nil {
 		b.Fatal(err)
 	}
@@ -248,7 +248,7 @@ func BenchmarkInsertPebbleThreads(b *testing.B) {
 			if err := cfg.Prepare(); err != nil {
 				b.Fatal(err)
 			}
-			db, err := store.Open(dir)
+			db, err := store.Open(dir, nil)
 			if err != nil {
 				b.Fatal(err)
 			}
@@ -288,6 +288,120 @@ func BenchmarkHTTPPut(b *testing.B) {
 		router.ServeHTTP(rr, req)
 		if rr.Code != http.StatusCreated {
 			b.Fatalf("expected 201, got %d: %s", rr.Code, rr.Body.String())
+		}
+	}
+}
+
+// BenchmarkInsertPebbleBatching measures insert throughput with batching on Pebble.
+func BenchmarkInsertPebbleBatching(b *testing.B) {
+	for _, size := range []int{1 << 20, 10 << 20, 100 << 20} {
+		name := fmt.Sprintf("%dMB", size>>20)
+		b.Run(name, func(b *testing.B) {
+			data := makeNARData(size)
+			dir := pebbleDir(b)
+			cfg := &config.Config{
+				Chunks: &config.Chunks{
+					StoreType: "pebble",
+					PebbleDir: dir,
+				},
+				Namespaces: map[string]*config.Namespace{benchNamespace: {StoreType: "pebble"}},
+			}
+			if err := cfg.Prepare(); err != nil {
+				b.Fatal(err)
+			}
+			db, err := store.Open(dir, nil)
+			if err != nil {
+				b.Fatal(err)
+			}
+			b.Cleanup(func() { db.Close() })
+			proxy := NewProxy(cfg)
+			proxy.pebbleDB = db
+			proxy.s3Store = store.NewChunkStore(db)
+			proxy.s3Indices = map[string]desync.IndexWriteStore{benchNamespace: store.NewIndexStore(db, benchNamespace)}
+			proxy.log = zap.NewNop()
+			b.SetBytes(int64(size))
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				uniqueData(data, i)
+				if err := proxy.insert(context.Background(), benchNamespace, benchLocation(i), bytes.NewReader(data)); err != nil {
+					b.Fatal(err)
+				}
+			}
+		})
+	}
+}
+
+var walDir = flag.String("waldir", "", "directory for Pebble WAL (e.g. tmpfs); empty = same as data dir")
+
+// BenchmarkPebbleTuning sweeps MemTableSize, L0CompactionThreshold, and WAL
+// placement to find the best configuration for HDD-backed Pebble.
+// Run with: go test -bench=BenchmarkPebbleTuning -benchtime=3s -benchmem -run='^$' -benchdir=/big/bench-pebble -waldir=/tmp/bench-wal
+func BenchmarkPebbleTuning(b *testing.B) {
+	const size = 100 << 20
+	data := makeNARData(size)
+
+	memSizes := []uint64{64 << 20, 128 << 20, 256 << 20}
+	l0Thresholds := []int{4, 8, 12}
+	walOptions := []struct {
+		name string
+		dir  string
+	}{
+		{"wal=data", ""},
+		{"wal=tmpfs", *walDir},
+	}
+
+	for _, mem := range memSizes {
+		for _, l0 := range l0Thresholds {
+			for _, wal := range walOptions {
+				if wal.dir == "" && wal.name == "wal=tmpfs" {
+					continue // skip tmpfs WAL if -waldir not set
+				}
+				name := fmt.Sprintf("mem=%dMB/l0=%d/%s", mem>>20, l0, wal.name)
+				b.Run(name, func(b *testing.B) {
+					dir := pebbleDir(b)
+					walPath := wal.dir
+					if walPath != "" {
+						walPath = filepath.Join(walPath, b.Name())
+						if err := os.MkdirAll(walPath, 0o755); err != nil {
+							b.Fatal(err)
+						}
+						b.Cleanup(func() { os.RemoveAll(walPath) })
+					}
+					opts := &store.PebbleOptions{
+						MemTableSize:       mem,
+						L0CompactionThresh: l0,
+						WALDir:             walPath,
+					}
+					cfg := &config.Config{
+						Chunks: &config.Chunks{
+							StoreType: "pebble",
+							PebbleDir: dir,
+						},
+						Namespaces: map[string]*config.Namespace{benchNamespace: {StoreType: "pebble"}},
+					}
+					if err := cfg.Prepare(); err != nil {
+						b.Fatal(err)
+					}
+					db, err := store.Open(dir, opts)
+					if err != nil {
+						b.Fatal(err)
+					}
+					b.Cleanup(func() { db.Close() })
+					proxy := NewProxy(cfg)
+					proxy.pebbleDB = db
+					proxy.s3Store = store.NewChunkStore(db)
+					proxy.s3Indices = map[string]desync.IndexWriteStore{benchNamespace: store.NewIndexStore(db, benchNamespace)}
+					proxy.log = zap.NewNop()
+					b.SetBytes(size)
+					b.ResetTimer()
+					for i := 0; i < b.N; i++ {
+						uniqueData(data, i)
+						if err := proxy.insert(context.Background(), benchNamespace, benchLocation(i), bytes.NewReader(data)); err != nil {
+							b.Fatal(err)
+						}
+					}
+				})
+			}
 		}
 	}
 }

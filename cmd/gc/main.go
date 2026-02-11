@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"io"
 	"io/fs"
 	"math"
@@ -20,7 +22,6 @@ import (
 	"github.com/input-output-hk/spongix/pkg/store"
 	"github.com/nix-community/go-nix/pkg/nar"
 	"github.com/pascaldekloe/metrics"
-	"github.com/pkg/errors"
 	"go.uber.org/zap"
 )
 
@@ -440,7 +441,7 @@ func (gc *GC) gcOnce() {
 
 			index, err := indices.GetIndex(name)
 			if err != nil {
-				return errors.WithMessagef(err, "while getting index %s", name)
+				return fmt.Errorf("while getting index %s: %w", name, err)
 			}
 
 			integrity <- integrityCheck{path: path, index: index}

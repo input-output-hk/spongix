@@ -2,11 +2,12 @@ package assembler
 
 import (
 	"bytes"
+	"errors"
+	"fmt"
 	"io"
 
 	"github.com/folbricht/desync"
 	"github.com/nix-community/go-nix/pkg/narinfo"
-	"github.com/pkg/errors"
 )
 
 type Assembler struct {
@@ -68,7 +69,7 @@ func AssembleNarinfo(store desync.Store, index desync.Index) (*narinfo.NarInfo, 
 
 	info, err := narinfo.Parse(buf)
 	if err != nil {
-		return info, errors.WithMessage(err, "while unmarshaling narinfo")
+		return info, fmt.Errorf("while unmarshaling narinfo: %w", err)
 	}
 
 	return info, nil

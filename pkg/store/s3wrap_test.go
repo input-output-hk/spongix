@@ -2,12 +2,12 @@ package store
 
 import (
 	"errors"
+	"fmt"
 	"io"
 	"testing"
 
 	"github.com/folbricht/desync"
 	minio "github.com/minio/minio-go/v6"
-	pkgerrors "github.com/pkg/errors"
 )
 
 // mockS3IndexStore simulates a desync.S3IndexStore that returns S3-style errors.
@@ -73,7 +73,7 @@ func (m *mockErrorStore) String() string                                 { retur
 func TestS3WrapperMinioErrorResponse(t *testing.T) {
 	// Real minio.ErrorResponse wrapped through pkg/errors (as desync does)
 	minioErr := minio.ErrorResponse{Code: "NoSuchKey", StatusCode: 404}
-	wrappedErr := pkgerrors.Wrap(minioErr, "reading index")
+	wrappedErr := fmt.Errorf("reading index: %w", minioErr)
 
 	s := &mockErrorStore{err: wrappedErr}
 	wrapped := WrapS3IndexStore(s)
@@ -87,7 +87,7 @@ func TestS3WrapperMinioErrorResponse(t *testing.T) {
 func TestS3WrapperMinioAccessDeniedNotMapped(t *testing.T) {
 	// AccessDenied should NOT be treated as not-found
 	minioErr := minio.ErrorResponse{Code: "AccessDenied", StatusCode: 403}
-	wrappedErr := pkgerrors.Wrap(minioErr, "reading index")
+	wrappedErr := fmt.Errorf("reading index: %w", minioErr)
 
 	s := &mockErrorStore{err: wrappedErr}
 	wrapped := WrapS3IndexStore(s)

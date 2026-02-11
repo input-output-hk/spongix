@@ -12,7 +12,7 @@ import (
 	"github.com/klauspost/compress/zstd"
 	"github.com/steinfletcher/apitest"
 	"github.com/ulikunitz/xz"
-	"gotest.tools/assert"
+	"gotest.tools/v3/assert"
 )
 
 // Test helpers for compression fixtures.

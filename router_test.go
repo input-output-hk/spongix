@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
@@ -13,10 +14,9 @@ import (
 	"github.com/alitto/pond"
 	"github.com/folbricht/desync"
 	"github.com/input-output-hk/spongix/pkg/config"
-	pkgerrors "github.com/pkg/errors"
 	"github.com/smarty/assertions"
 	"github.com/steinfletcher/apitest"
-	"gotest.tools/assert"
+	"gotest.tools/v3/assert"
 )
 
 var (
@@ -503,13 +503,13 @@ func realisationMatches(t *testing.T, expectedBody []byte) func(*http.Response, 
 	return func(w *http.Response, r *http.Request) error {
 		expected := Realisation{}
 		if err := json.Unmarshal(expectedBody, &expected); err != nil {
-			return pkgerrors.WithMessage(err, "decoding expected")
+			return fmt.Errorf("decoding expected: %w", err)
 		}
 
 		actual := Realisation{}
 		dec := json.NewDecoder(w.Body)
 		if err := dec.Decode(&actual); err != nil {
-			return pkgerrors.WithMessage(err, "decoding actual")
+			return fmt.Errorf("decoding actual: %w", err)
 		}
 
 		assert.Equal(t, reflect.DeepEqual(expected, actual), true)

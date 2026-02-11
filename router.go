@@ -5,7 +5,7 @@ import (
 	"bytes"
 	"compress/bzip2"
 	"context"
-	stderrors "errors"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -26,7 +26,6 @@ import (
 	"github.com/nix-community/go-nix/pkg/narinfo"
 	"github.com/nix-community/go-nix/pkg/narinfo/signature"
 	"github.com/pascaldekloe/metrics"
-	"github.com/pkg/errors"
 	"github.com/ulikunitz/xz"
 	"go.uber.org/zap"
 )
@@ -245,7 +244,7 @@ func (p *Proxy) largeHeadAndGet(prefix, mime string) func(w http.ResponseWriter,
 		if indices, ok := p.s3Indices[namespace]; !ok {
 			serveNotFound(w, r)
 		} else if index, err := indices.GetIndex(location); err != nil {
-			if stderrors.Is(err, store.ErrIndexNotFound) {
+			if errors.Is(err, store.ErrIndexNotFound) {
 				metricRequests(namespace, prefix, "miss").Add(1)
 				p.redirectToUpstream(location, w, r)
 			} else {
@@ -303,7 +302,7 @@ func (p *Proxy) largePut(prefix string) func(w http.ResponseWriter, r *http.Requ
 func (p *Proxy) insert(ctx context.Context, namespace, location string, body io.Reader) error {
 	indices, ok := p.s3Indices[namespace]
 	if !ok {
-		return errors.Errorf("namespace '%s' not found", namespace)
+		return fmt.Errorf("namespace '%s' not found", namespace)
 	}
 
 	// For narinfos, buffer the body to parse References for reference tracking.
@@ -312,11 +311,11 @@ func (p *Proxy) insert(ctx context.Context, namespace, location string, body io.
 	if isNarinfo {
 		bodyBytes, err := io.ReadAll(body)
 		if err != nil {
-			return errors.WithMessage(err, "failed reading narinfo body")
+			return fmt.Errorf("failed reading narinfo body: %w", err)
 		}
 		bodyBytes, err = p.rewriteNarinfo(bodyBytes)
 		if err != nil {
-			return errors.WithMessage(err, "failed rewriting narinfo")
+			return fmt.Errorf("failed rewriting narinfo: %w", err)
 		}
 		narRefs = parseNarinfoReferences(bodyBytes)
 		body = bytes.NewReader(bodyBytes)
@@ -324,17 +323,17 @@ func (p *Proxy) insert(ctx context.Context, namespace, location string, body io.
 
 	chunker, err := desync.NewChunker(body, p.config.Chunks.MinSize, p.config.Chunks.AvgSize, p.config.Chunks.MaxSize)
 	if err != nil {
-		return errors.WithMessage(err, "failed creating chunker")
+		return fmt.Errorf("failed creating chunker: %w", err)
 	}
 
 	if p.pebbleDB != nil {
 		batcher := store.NewBatchingChunkStore(p.pebbleDB, p.config.Chunks.BatchMaxBytes)
 		index, err := desync.ChunkStream(ctx, chunker, batcher, p.config.Chunks.Threads)
 		if err != nil {
-			return errors.WithMessage(err, "failed chunking")
+			return fmt.Errorf("failed chunking: %w", err)
 		}
 		if err := batcher.CommitWithIndex(location, index, narRefs); err != nil {
-			return errors.WithMessage(err, "failed committing batch")
+			return fmt.Errorf("failed committing batch: %w", err)
 		}
 		p.log.Info("stored", zap.String("location", location), zap.Int("chunks", len(index.Chunks)))
 		return nil
@@ -343,17 +342,17 @@ func (p *Proxy) insert(ctx context.Context, namespace, location string, body io.
 	// S3 path: unchanged
 	index, err := desync.ChunkStream(ctx, chunker, p.s3Store, p.config.Chunks.Threads)
 	if err != nil {
-		return errors.WithMessage(err, "failed chunking")
+		return fmt.Errorf("failed chunking: %w", err)
 	}
 
 	// Use StoreIndexWithRefs for stores that support reference tracking.
 	if rtis, ok := indices.(store.RefTrackingIndexStore); ok {
 		if err := rtis.StoreIndexWithRefs(location, index, narRefs); err != nil {
-			return errors.WithMessage(err, "failed storing index")
+			return fmt.Errorf("failed storing index: %w", err)
 		}
 	} else {
 		if err := indices.StoreIndex(location, index); err != nil {
-			return errors.WithMessage(err, "failed storing index")
+			return fmt.Errorf("failed storing index: %w", err)
 		}
 	}
 

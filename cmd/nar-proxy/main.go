@@ -18,7 +18,6 @@ import (
 	"github.com/klauspost/compress/zstd"
 	"github.com/nix-community/go-nix/pkg/nar"
 	"github.com/nix-community/go-nix/pkg/narinfo"
-	"github.com/pkg/errors"
 	"github.com/ulikunitz/xz"
 	"go.uber.org/zap"
 )
@@ -108,7 +107,7 @@ func (np *NarProxy) narHandler(w http.ResponseWriter, r *http.Request) {
 	narinfo, err := narinfo.Parse(narinfoResponse.Body)
 	if err != nil {
 		w.WriteHeader(http.StatusInternalServerError)
-		_, _ = io.WriteString(w, errors.WithMessage(err, "parsing narinfo").Error())
+		_, _ = io.WriteString(w, fmt.Errorf("parsing narinfo: %w", err).Error())
 		return
 	}
 
@@ -136,14 +135,14 @@ func (np *NarProxy) narHandler(w http.ResponseWriter, r *http.Request) {
 		rd, err = xz.NewReader(narResponse.Body)
 		if err != nil {
 			w.WriteHeader(http.StatusInternalServerError)
-			_, _ = io.WriteString(w, errors.WithMessage(err, "creating xz reader").Error())
+			_, _ = io.WriteString(w, fmt.Errorf("creating xz reader: %w", err).Error())
 			return
 		}
 	case "zstd":
 		rd, err = zstd.NewReader(narResponse.Body)
 		if err != nil {
 			w.WriteHeader(http.StatusInternalServerError)
-			_, _ = io.WriteString(w, errors.WithMessage(err, "creating zstd reader").Error())
+			_, _ = io.WriteString(w, fmt.Errorf("creating zstd reader: %w", err).Error())
 			return
 		}
 	default:
@@ -166,7 +165,7 @@ func (np *NarProxy) narHandler(w http.ResponseWriter, r *http.Request) {
 				break
 			}
 			w.WriteHeader(http.StatusInternalServerError)
-			_, _ = io.WriteString(w, errors.WithMessage(err, "iterating NAR").Error())
+			_, _ = io.WriteString(w, fmt.Errorf("iterating NAR: %w", err).Error())
 			return
 		}
 
@@ -206,7 +205,7 @@ func (np *NarProxy) narHandler(w http.ResponseWriter, r *http.Request) {
 				entries, err := listDir(nrd, x.Path)
 				if err != nil {
 					w.WriteHeader(http.StatusInternalServerError)
-					_, _ = io.WriteString(w, errors.WithMessage(err, "listing dir").Error())
+					_, _ = io.WriteString(w, fmt.Errorf("listing dir: %w", err).Error())
 					return
 				}
 
@@ -249,7 +248,7 @@ func listDir(n *nar.Reader, root string) ([]*nar.Header, error) {
 			if err == io.EOF {
 				break
 			}
-			return nil, errors.WithMessage(err, "getting next NAR header")
+			return nil, fmt.Errorf("getting next NAR header: %w", err)
 		}
 
 		if filepath.Dir(x.Path) == root {

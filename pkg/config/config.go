@@ -2,10 +2,10 @@ package config
 
 import (
 	"encoding/json"
+	"errors"
+	"fmt"
 	"os"
 	"runtime"
-
-	"github.com/pkg/errors"
 )
 
 type CLI struct {
@@ -30,7 +30,7 @@ func (c *Config) Prepare() error {
 
 	for namespace, ns := range c.Namespaces {
 		if err := ns.Prepare(); err != nil {
-			return errors.WithMessagef(err, "while preparing namespace '%s'", namespace)
+			return fmt.Errorf("while preparing namespace '%s': %w", namespace, err)
 		}
 	}
 
@@ -57,13 +57,13 @@ func (n *Namespace) Prepare() error {
 	switch n.StoreType {
 	case "s3":
 		if n.S3 == nil {
-			return errors.Errorf("namespace S3 configuration is missing")
+			return fmt.Errorf("namespace S3 configuration is missing")
 		}
 		n.S3.CredentialsFile = os.ExpandEnv(n.S3.CredentialsFile)
 	case "pebble":
 		// Indices share the chunk store's Pebble DB; no per-namespace dir needed.
 	default:
-		return errors.Errorf("unknown store_type %q (expected \"s3\" or \"pebble\")", n.StoreType)
+		return fmt.Errorf("unknown store_type %q (expected \"s3\" or \"pebble\")", n.StoreType)
 	}
 
 	return nil
@@ -145,7 +145,7 @@ func (c *Chunks) Prepare() error {
 			c.BatchMaxBytes = 256 << 20
 		}
 	default:
-		return errors.Errorf("unknown store_type %q (expected \"s3\" or \"pebble\")", c.StoreType)
+		return fmt.Errorf("unknown store_type %q (expected \"s3\" or \"pebble\")", c.StoreType)
 	}
 
 	return nil
@@ -159,13 +159,13 @@ func LoadBytes(input []byte) (*Config, error) {
 func LoadFile(path string) (*Config, error) {
 	fd, err := os.Open(path)
 	if err != nil {
-		return nil, errors.WithMessagef(err, "while opening file %s", path)
+		return nil, fmt.Errorf("while opening file %s: %w", path, err)
 	}
 	defer func() { _ = fd.Close() }()
 
 	config := &Config{}
 	if err := json.NewDecoder(fd).Decode(&config); err != nil {
-		return nil, errors.WithMessagef(err, "while decoding file %s", path)
+		return nil, fmt.Errorf("while decoding file %s: %w", path, err)
 	}
 	return config, nil
 }

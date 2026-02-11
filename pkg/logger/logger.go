@@ -1,14 +1,15 @@
 package logger
 
 import (
-	"github.com/pkg/errors"
+	"fmt"
+
 	"go.uber.org/zap"
 )
 
 func SetupLogger(logMode, logLevel string) (*zap.Logger, error) {
 	lvl := zap.NewAtomicLevel()
 	if err := lvl.UnmarshalText([]byte(logLevel)); err != nil {
-		return nil, errors.WithMessage(err, "parsing loglevel")
+		return nil, fmt.Errorf("parsing loglevel: %w", err)
 	}
 	development := logMode == "development"
 	encoding := "json"
@@ -31,7 +32,7 @@ func SetupLogger(logMode, logLevel string) (*zap.Logger, error) {
 	}
 
 	if log, err := l.Build(); err != nil {
-		return nil, errors.WithMessage(err, "building logger")
+		return nil, fmt.Errorf("building logger: %w", err)
 	} else {
 		return log, nil
 	}

@@ -249,7 +249,7 @@ func TestBatchingMidStreamTransition(t *testing.T) {
 	// Set maxBytes so first chunk fits but second doesn't.
 	batcher := NewBatchingChunkStore(db, 30)
 
-	data1 := []byte("first chunk fits in buffer")  // 26 bytes
+	data1 := []byte("first chunk fits in buffer")   // 26 bytes
 	data2 := []byte("second chunk causes a flush!") // 28 bytes - total > 30
 
 	chunk1 := desync.NewChunk(data1)

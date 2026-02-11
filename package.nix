@@ -4,7 +4,7 @@
   rev,
 }: let
   # TODO: split into multiple packages for each command.
-  final = package "sha256-zB08rlFT8hxAtMf4Ikif2aXe2cZWlZu93YKQw6CNwik=";
+  final = package "sha256-DNmG0Zhkr/NDye5IP52FbYwDyepXLvrivg2kcVFxehQ=";
   package = vendorHash:
     buildGoModule rec {
       pname = "spongix";
@@ -27,6 +27,7 @@
           ./fake.go
           ./log_record.go
           ./main.go
+          ./metrics.go
           ./router.go
           ./router_test.go
         ];

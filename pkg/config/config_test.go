@@ -2,6 +2,7 @@ package config
 
 import (
 	"os"
+	"runtime"
 	"testing"
 
 	"github.com/smarty/assertions"
@@ -79,6 +80,7 @@ func TestConfig(t *testing.T) {
 			MinSize:   16384,
 			AvgSize:   65536,
 			MaxSize:   262144,
+			Threads:   runtime.NumCPU(),
 		},
 		Namespaces: map[string]*Namespace{
 			"public": {

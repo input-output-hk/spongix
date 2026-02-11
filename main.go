@@ -28,10 +28,6 @@ import (
 	"go.uber.org/zap"
 )
 
-const (
-	defaultThreads = 2
-)
-
 func main() {
 	// cpuprofile := "spongix.pprof"
 	// f, err := os.Create(cpuprofile)

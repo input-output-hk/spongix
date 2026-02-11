@@ -327,7 +327,7 @@ func (p *Proxy) insert(ctx context.Context, namespace, location string, body io.
 		return errors.WithMessage(err, "failed creating chunker")
 	}
 
-	index, err := desync.ChunkStream(ctx, chunker, p.s3Store, defaultThreads)
+	index, err := desync.ChunkStream(ctx, chunker, p.s3Store, p.config.Chunks.Threads)
 	if err != nil {
 		return errors.WithMessage(err, "failed chunking")
 	}

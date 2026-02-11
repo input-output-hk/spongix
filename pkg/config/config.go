@@ -3,6 +3,7 @@ package config
 import (
 	"encoding/json"
 	"os"
+	"runtime"
 
 	"github.com/pkg/errors"
 )
@@ -79,6 +80,7 @@ type Chunks struct {
 	MinSize uint64 `json:"minimum_size"`
 	AvgSize uint64 `json:"average_size"`
 	MaxSize uint64 `json:"maximum_size"`
+	Threads int    `json:"threads"`
 	S3      *S3    `json:"s3"`
 	// StoreType selects the chunk storage backend: "pebble" (default) or "s3".
 	StoreType string `json:"store_type"`
@@ -109,6 +111,10 @@ func (c *Chunks) Prepare() error {
 
 	if c.MaxSize <= c.AvgSize {
 		return errors.New("maximum chunk size must be larger than average chunk size")
+	}
+
+	if c.Threads == 0 {
+		c.Threads = runtime.NumCPU()
 	}
 
 	if c.StoreType == "" {

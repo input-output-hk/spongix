@@ -47,6 +47,7 @@
           minimum_size = cfg.chunks.minimumSize;
           average_size = cfg.chunks.averageSize;
           maximum_size = cfg.chunks.maximumSize;
+          threads = cfg.chunks.threads;
           store_type = cfg.chunks.storeType;
         }
         // lib.optionalAttrs (cfg.chunks.storeType == "s3") {
@@ -153,6 +154,15 @@ in {
               default = "/var/lib/spongix/db";
               description = ''
                 Directory for the Pebble chunk database. Only used when storeType is "pebble".
+              '';
+            };
+
+            threads = lib.mkOption {
+              type = lib.types.ints.unsigned;
+              default = 0;
+              description = ''
+                Number of goroutines for chunk hashing/compression during uploads.
+                0 means use all available CPUs (runtime.NumCPU()).
               '';
             };
 

@@ -274,23 +274,31 @@ func (proxy *Proxy) setupLogger() {
 }
 
 func (proxy *Proxy) doCache(req *cacheRequest) {
+	metricCacheJobsActive.Add(1)
+	defer metricCacheJobsActive.Add(-1)
+
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
 
 	httpReq, err := http.NewRequestWithContext(ctx, "GET", req.url, nil)
 	if err != nil {
+		metricCacheJobs("error").Add(1)
 		proxy.log.Error("failed creating request", zap.Error(err), zap.String("url", req.url))
 		return
 	}
 
 	response, err := proxy.httpGetClient.Do(httpReq)
 	if err != nil {
+		metricCacheJobs("error").Add(1)
 		proxy.log.Error("failed downloading file", zap.Error(err), zap.String("url", req.url))
 		return
 	}
 	defer func() { _ = response.Body.Close() }()
 
 	if err := proxy.insert(ctx, req.namespace, req.location, response.Body); err != nil {
+		metricCacheJobs("error").Add(1)
 		proxy.log.Error("failed caching file", zap.Error(err), zap.String("url", req.url))
+	} else {
+		metricCacheJobs("success").Add(1)
 	}
 }

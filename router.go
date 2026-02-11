@@ -202,19 +202,24 @@ func (p *Proxy) redirectToUpstream(location string, w http.ResponseWriter, r *ht
 
 func (p *Proxy) largeHeadAndGet(prefix, mime string) func(w http.ResponseWriter, r *http.Request) {
 	return func(w http.ResponseWriter, r *http.Request) {
+		start := time.Now()
 		location := indexPathFor(prefix, r)
 		namespace := mux.Vars(r)["namespace"]
+		defer metricRequestDuration(namespace, prefix).AddSince(start)
 
 		if indices, ok := p.s3Indices[namespace]; !ok {
 			serveNotFound(w, r)
 		} else if index, err := indices.GetIndex(location); err != nil {
 			if stderrors.Is(err, store.ErrIndexNotFound) {
+				metricRequests(namespace, prefix, "miss").Add(1)
 				p.redirectToUpstream(location, w, r)
 			} else {
+				metricRequests(namespace, prefix, "error").Add(1)
 				p.log.Error("getting index", zap.String("index", location), zap.Error(err))
 				answer(w, http.StatusInternalServerError, mimeText, err.Error())
 			}
 		} else {
+			metricRequests(namespace, prefix, "hit").Add(1)
 			w.Header().Set("Content-Type", mime)
 			rd := desync.NewIndexReadSeeker(index, p.s3Store)
 			http.ServeContent(w, r, r.URL.Path, time.Now(), rd)
@@ -224,15 +229,19 @@ func (p *Proxy) largeHeadAndGet(prefix, mime string) func(w http.ResponseWriter,
 
 func (p *Proxy) largePut(prefix string) func(w http.ResponseWriter, r *http.Request) {
 	return func(w http.ResponseWriter, r *http.Request) {
+		start := time.Now()
 		namespace := mux.Vars(r)["namespace"]
 		location := indexPathFor(prefix, r)
+		defer metricRequestDuration(namespace, prefix).AddSince(start)
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
 		defer cancel()
 
 		if err := p.insert(ctx, namespace, location, r.Body); err != nil {
+			metricRequests(namespace, prefix, "error").Add(1)
 			p.log.Error("inserting", zap.String("index", location), zap.Error(err))
 			answer(w, http.StatusInternalServerError, mimeText, err.Error())
 		} else {
+			metricRequests(namespace, prefix, "uploaded").Add(1)
 			p.log.Info("stored", zap.String("location", location))
 			w.WriteHeader(http.StatusCreated)
 		}

@@ -316,6 +316,10 @@ in {
           StateDirectory = "spongix";
           Restart = "on-failure";
           RestartSec = 5;
+          # The Go server drains in-flight requests (up to 15 min HTTP
+          # timeout) then drains worker pools and closes Pebble.  Give
+          # it enough time to finish gracefully before systemd SIGKILLs.
+          TimeoutStopSec = "16min";
           OOMScoreAdjust = 1000;
           MemoryAccounting = "true";
           MemoryMax = "70%";

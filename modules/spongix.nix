@@ -322,6 +322,9 @@ in {
         }
         // lib.optionalAttrs (s3Credentials != []) {
           LoadCredential = s3Credentials;
+        }
+        // lib.optionalAttrs (lib.hasPrefix "/run/spongix" cfg.chunks.pebbleWALDir) {
+          RuntimeDirectory = "spongix";
         };
     };
   };

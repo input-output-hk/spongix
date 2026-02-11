@@ -55,6 +55,10 @@
         }
         // lib.optionalAttrs (cfg.chunks.storeType == "pebble") {
           pebble_dir = cfg.chunks.pebbleDir;
+          pebble_wal_dir = cfg.chunks.pebbleWALDir;
+          pebble_memtable_size = cfg.chunks.pebbleMemTableSize;
+          pebble_l0_compaction_threshold = cfg.chunks.pebbleL0CompactionThreshold;
+          batch_max_bytes = cfg.chunks.batchMaxBytes;
         };
     }
     // lib.optionalAttrs (cfg.signingKeyFile != null) {
@@ -167,6 +171,38 @@ in {
             };
 
             s3 = s3Option;
+
+            pebbleWALDir = lib.mkOption {
+              type = lib.types.str;
+              default = "";
+              description = ''
+                Separate WAL directory for Pebble (e.g. on SSD). Empty means same as pebbleDir.
+              '';
+            };
+
+            pebbleMemTableSize = lib.mkOption {
+              type = lib.types.ints.unsigned;
+              default = 67108864;
+              description = ''
+                Pebble memtable size in bytes. Default 64MB.
+              '';
+            };
+
+            pebbleL0CompactionThreshold = lib.mkOption {
+              type = lib.types.ints.unsigned;
+              default = 4;
+              description = ''
+                Pebble L0 compaction threshold. Default 4.
+              '';
+            };
+
+            batchMaxBytes = lib.mkOption {
+              type = lib.types.ints.unsigned;
+              default = 268435456;
+              description = ''
+                Maximum bytes to buffer in memory before flushing chunks to Pebble. Default 256MB.
+              '';
+            };
           };
         };
       };

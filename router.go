@@ -327,6 +327,20 @@ func (p *Proxy) insert(ctx context.Context, namespace, location string, body io.
 		return errors.WithMessage(err, "failed creating chunker")
 	}
 
+	if p.pebbleDB != nil {
+		batcher := store.NewBatchingChunkStore(p.pebbleDB, p.config.Chunks.BatchMaxBytes)
+		index, err := desync.ChunkStream(ctx, chunker, batcher, p.config.Chunks.Threads)
+		if err != nil {
+			return errors.WithMessage(err, "failed chunking")
+		}
+		if err := batcher.CommitWithIndex(location, index, narRefs); err != nil {
+			return errors.WithMessage(err, "failed committing batch")
+		}
+		p.log.Info("stored", zap.String("location", location), zap.Int("chunks", len(index.Chunks)))
+		return nil
+	}
+
+	// S3 path: unchanged
 	index, err := desync.ChunkStream(ctx, chunker, p.s3Store, p.config.Chunks.Threads)
 	if err != nil {
 		return errors.WithMessage(err, "failed chunking")

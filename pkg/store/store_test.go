@@ -11,7 +11,7 @@ import (
 
 func tempDB(t *testing.T) *DB {
 	t.Helper()
-	db, err := Open(t.TempDir())
+	db, err := Open(t.TempDir(), nil)
 	if err != nil {
 		t.Fatal(err)
 	}

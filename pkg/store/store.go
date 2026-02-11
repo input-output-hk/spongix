@@ -26,13 +26,37 @@ type DB struct {
 	db *pebble.DB
 }
 
+// PebbleOptions configures the Pebble database.
+type PebbleOptions struct {
+	WALDir             string // separate WAL directory (e.g. SSD)
+	MemTableSize       uint64 // default 64MB if 0
+	L0CompactionThresh int    // default 4 if 0
+}
+
 // Open opens or creates a Pebble database at the given directory.
-func Open(dir string) (*DB, error) {
-	db, err := pebble.Open(dir, &pebble.Options{
+func Open(dir string, opts *PebbleOptions) (*DB, error) {
+	if opts == nil {
+		opts = &PebbleOptions{}
+	}
+	if opts.MemTableSize == 0 {
+		opts.MemTableSize = 64 << 20
+	}
+	if opts.L0CompactionThresh == 0 {
+		opts.L0CompactionThresh = 4
+	}
+
+	pOpts := &pebble.Options{
+		MemTableSize:          opts.MemTableSize,
+		L0CompactionThreshold: opts.L0CompactionThresh,
 		Levels: []pebble.LevelOptions{{
 			FilterPolicy: bloom.FilterPolicy(10),
 		}},
-	})
+	}
+	if opts.WALDir != "" {
+		pOpts.WALDir = opts.WALDir
+	}
+
+	db, err := pebble.Open(dir, pOpts)
 	if err != nil {
 		return nil, fmt.Errorf("opening pebble db: %w", err)
 	}
@@ -43,6 +67,9 @@ func Open(dir string) (*DB, error) {
 func (d *DB) Close() error {
 	return d.db.Close()
 }
+
+// NewBatch creates a new Pebble write batch.
+func (d *DB) NewBatch() *pebble.Batch { return d.db.NewBatch() }
 
 // chunkKey returns the Pebble key for a chunk: c/<chunkID hex>
 func chunkKey(id desync.ChunkID) []byte {

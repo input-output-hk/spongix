@@ -221,7 +221,12 @@ func (proxy *Proxy) setupChunks() {
 		proxy.s3Store = s3Store
 
 	case "pebble":
-		db, err := store.Open(proxy.config.Chunks.PebbleDir)
+		opts := &store.PebbleOptions{
+			WALDir:             proxy.config.Chunks.PebbleWALDir,
+			MemTableSize:       proxy.config.Chunks.PebbleMemTableSize,
+			L0CompactionThresh: proxy.config.Chunks.PebbleL0CompactionThresh,
+		}
+		db, err := store.Open(proxy.config.Chunks.PebbleDir, opts)
 		if err != nil {
 			proxy.log.Fatal("failed opening pebble db",
 				zap.Error(err),

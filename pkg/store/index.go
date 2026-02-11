@@ -70,56 +70,48 @@ func (s *IndexStore) GetIndexReader(name string) (io.ReadCloser, error) {
 	return io.NopCloser(bytes.NewReader(data)), nil
 }
 
-func (s *IndexStore) StoreIndex(name string, idx desync.Index) error {
+// addIndexEntries adds index, chunk-ref, NAR-ref, and timestamp keys to an existing batch.
+func addIndexEntries(batch *pebble.Batch, name string, idx desync.Index, narRefs []string) error {
 	buf := &bytes.Buffer{}
 	if _, err := idx.WriteTo(buf); err != nil {
 		return fmt.Errorf("serializing index: %w", err)
 	}
 
-	batch := s.db.db.NewBatch()
 	_ = batch.Set(indexKey(name), buf.Bytes(), nil)
 
-	// Always record chunk references so GC can track them.
 	for _, chunk := range idx.Chunks {
 		_ = batch.Set(chunkRefKey(chunk.ID, name), nil, nil)
 	}
 
-	// Record timestamp for retention-based GC.
-	_ = batch.Set(timestampKey(name), encodeTimestamp(time.Now()), nil)
-
-	return batch.Commit(pebble.NoSync)
-}
-
-// StoreIndexWithRefs stores an index and records chunk references and NAR references.
-// chunkIDs are the chunks referenced by this index (for cr/ entries).
-// narRefs are store path hashes referenced by this narinfo (for r/ entries).
-func (s *IndexStore) StoreIndexWithRefs(name string, idx desync.Index, narRefs []string) error {
-	buf := &bytes.Buffer{}
-	if _, err := idx.WriteTo(buf); err != nil {
-		return fmt.Errorf("serializing index: %w", err)
-	}
-
-	batch := s.db.db.NewBatch()
-	_ = batch.Set(indexKey(name), buf.Bytes(), nil)
-
-	// Record chunk references: cr/<chunkID>/<indexPath>
-	for _, chunk := range idx.Chunks {
-		_ = batch.Set(chunkRefKey(chunk.ID, name), nil, nil)
-	}
-
-	// Record NAR references if this is a narinfo: r/<storePathHash>
 	if len(narRefs) > 0 {
-		// Extract store path hash from the index name.
-		// Index names look like "indices/narinfo/hyhr/hyhrnrnpsz9fw5p9dk85a58y31ink18c"
 		storePathHash := extractStorePathHash(name)
 		if storePathHash != "" {
 			_ = batch.Set(narRefKey(storePathHash), encodeNARRefs(narRefs), nil)
 		}
 	}
 
-	// Record timestamp for retention-based GC.
 	_ = batch.Set(timestampKey(name), encodeTimestamp(time.Now()), nil)
 
+	return nil
+}
+
+func (s *IndexStore) StoreIndex(name string, idx desync.Index) error {
+	batch := s.db.db.NewBatch()
+	defer batch.Close()
+	if err := addIndexEntries(batch, name, idx, nil); err != nil {
+		return err
+	}
+	return batch.Commit(pebble.NoSync)
+}
+
+// StoreIndexWithRefs stores an index and records chunk references and NAR references.
+// narRefs are store path hashes referenced by this narinfo (for r/ entries).
+func (s *IndexStore) StoreIndexWithRefs(name string, idx desync.Index, narRefs []string) error {
+	batch := s.db.db.NewBatch()
+	defer batch.Close()
+	if err := addIndexEntries(batch, name, idx, narRefs); err != nil {
+		return err
+	}
 	return batch.Commit(pebble.Sync)
 }
 

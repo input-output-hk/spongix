@@ -86,6 +86,12 @@ type Chunks struct {
 	StoreType string `json:"store_type"`
 	// PebbleDir is the directory for the Pebble chunk database (used when StoreType is "pebble").
 	PebbleDir string `json:"pebble_dir"`
+	// Pebble tuning
+	PebbleWALDir             string `json:"pebble_wal_dir"`
+	PebbleMemTableSize       uint64 `json:"pebble_memtable_size"`
+	PebbleL0CompactionThresh int    `json:"pebble_l0_compaction_threshold"`
+	// Batching
+	BatchMaxBytes uint64 `json:"batch_max_bytes"` // 0 = 256MB default
 }
 
 func (c *Chunks) Prepare() error {
@@ -132,6 +138,12 @@ func (c *Chunks) Prepare() error {
 			c.PebbleDir = "./data"
 		}
 		c.PebbleDir = os.ExpandEnv(c.PebbleDir)
+		if c.PebbleWALDir != "" {
+			c.PebbleWALDir = os.ExpandEnv(c.PebbleWALDir)
+		}
+		if c.BatchMaxBytes == 0 {
+			c.BatchMaxBytes = 256 << 20
+		}
 	default:
 		return errors.Errorf("unknown store_type %q (expected \"s3\" or \"pebble\")", c.StoreType)
 	}

@@ -111,7 +111,7 @@ func (gc *GC) gcPebble() {
 		gc.log.Fatal("--pebble-dir is required for pebble store type")
 	}
 
-	db, err := store.Open(gc.PebbleDir)
+	db, err := store.Open(gc.PebbleDir, nil)
 	if err != nil {
 		gc.log.Fatal("failed opening pebble db", zap.Error(err), zap.String("dir", gc.PebbleDir))
 	}

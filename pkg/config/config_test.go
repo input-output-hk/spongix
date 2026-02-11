@@ -31,7 +31,6 @@ const exampleConfig = `
 				"credentials_file": "$PUBLIC_CREDENTIALS_FILE"
 			},
 			"substituters": ["https://cache.nixos.org"],
-      "trusted_public_keys": [],
       "cache_info_priority": 50
     }
   }

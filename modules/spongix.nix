@@ -18,6 +18,8 @@
 
   logModes = ["production" "development"];
 
+  storeTypes = ["pebble" "s3"];
+
   mapS3 = prefix: value: {
     url = value.url;
     region = value.region;
@@ -25,28 +27,38 @@
     credentials_file = "$CREDENTIALS_DIRECTORY/${prefix}";
   };
 
-  mapNamespace = name: value: {
-    substituters = value.substituters;
-    trusted_public_keys = value.trustedPublicKeys;
-    cache_info_priority = value.cacheInfoPriority;
-    s3 = mapS3 "namespace_${name}" value.s3;
-  };
+  mapNamespace = name: value:
+    {
+      substituters = value.substituters;
+      cache_info_priority = value.cacheInfoPriority;
+      store_type = value.storeType;
+    }
+    // lib.optionalAttrs (value.storeType == "s3") {
+      s3 = mapS3 "namespace_${name}" value.s3;
+    };
 
   configFile = builtins.toFile "spongix.json" (builtins.toJSON {
     listen = "${cfg.host}:${builtins.toString cfg.port}";
     log_level = cfg.logLevel;
     log_mode = cfg.logMode;
     namespaces = builtins.mapAttrs mapNamespace cfg.namespaces;
-    chunks = {
-      minimum_size = cfg.chunks.minimumSize;
-      average_size = cfg.chunks.averageSize;
-      maximum_size = cfg.chunks.maximumSize;
-      s3 = mapS3 "chunks" cfg.chunks.s3;
-    };
+    chunks =
+      {
+        minimum_size = cfg.chunks.minimumSize;
+        average_size = cfg.chunks.averageSize;
+        maximum_size = cfg.chunks.maximumSize;
+        store_type = cfg.chunks.storeType;
+      }
+      // lib.optionalAttrs (cfg.chunks.storeType == "s3") {
+        s3 = mapS3 "chunks" cfg.chunks.s3;
+      }
+      // lib.optionalAttrs (cfg.chunks.storeType == "pebble") {
+        pebble_dir = cfg.chunks.pebbleDir;
+      };
   });
 
   s3Option = lib.mkOption {
-    type = lib.types.submodule {
+    type = lib.types.nullOr (lib.types.submodule {
       options = {
         url = lib.mkOption {
           type = lib.types.str;
@@ -77,8 +89,15 @@
           '';
         };
       };
-    };
+    });
+    default = null;
   };
+
+  # Collect LoadCredential entries only for S3-backed chunks/namespaces
+  s3Credentials =
+    lib.optional (cfg.chunks.storeType == "s3") "chunks:${cfg.chunks.s3.credentialsFile}"
+    ++ lib.mapAttrsToList (name: value: "namespace_${name}:${value.s3.credentialsFile}")
+    (lib.filterAttrs (_: ns: ns.storeType == "s3") cfg.namespaces);
 in {
   options = {
     services.spongix = {
@@ -113,6 +132,22 @@ in {
               default = (1024 * 64) * 4;
               description = ''
                 Maximum chunk size
+              '';
+            };
+
+            storeType = lib.mkOption {
+              type = lib.types.enum storeTypes;
+              default = "pebble";
+              description = ''
+                Storage backend for chunks: "pebble" (local) or "s3".
+              '';
+            };
+
+            pebbleDir = lib.mkOption {
+              type = lib.types.str;
+              default = "/var/lib/spongix/db";
+              description = ''
+                Directory for the Pebble chunk database. Only used when storeType is "pebble".
               '';
             };
 
@@ -162,22 +197,19 @@ in {
               '';
             };
 
-            trustedPublicKeys = lib.mkOption {
-              type = lib.types.listOf lib.types.str;
-              default = ["cache.nixos.org-1:6NCHdD59X431o0gWypbMrAURkbJ16ZPMQFGspcDShjY="];
-              description = ''
-                Keys in this list are kept in narinfo files, and re-signed with the spongix key.
-                This should include the public key of your secret key.
-                To generate a public key from the secret, you can use
-                `nix key convert-secret-to-public < foo.private > foo.public`
-              '';
-            };
-
             cacheInfoPriority = lib.mkOption {
               type = lib.types.ints.unsigned;
               default = 50;
               description = ''
                 Priority in /nix-cache-info
+              '';
+            };
+
+            storeType = lib.mkOption {
+              type = lib.types.enum storeTypes;
+              default = "pebble";
+              description = ''
+                Storage backend for this namespace's indices: "pebble" (local) or "s3".
               '';
             };
 
@@ -199,25 +231,38 @@ in {
   };
 
   config = lib.mkIf cfg.enable {
+    assertions =
+      [
+        {
+          assertion = cfg.chunks.storeType == "s3" -> cfg.chunks.s3 != null;
+          message = "services.spongix.chunks.s3 must be set when chunks.storeType is \"s3\"";
+        }
+      ]
+      ++ lib.mapAttrsToList (name: ns: {
+        assertion = ns.storeType == "s3" -> ns.s3 != null;
+        message = "services.spongix.namespaces.${name}.s3 must be set when storeType is \"s3\"";
+      })
+      cfg.namespaces;
+
     systemd.services.spongix = {
       wantedBy = ["multi-user.target"];
 
-      serviceConfig = {
-        ExecStart = "${cfg.package}/bin/spongix --config ${cfg.configFile}";
-        User = "spongix";
-        Group = "spongix";
-        DynamicUser = true;
-        StateDirectory = "spongix";
-        LoadCredential =
-          ["chunks:${cfg.chunks.s3.credentialsFile}"]
-          ++ (lib.mapAttrsToList (name: value: "namespace_${name}:${value.s3.credentialsFile}")
-            cfg.namespaces);
-        Restart = "on-failure";
-        RestartSec = 5;
-        OOMScoreAdjust = 1000;
-        MemoryAccounting = "true";
-        MemoryMax = "70%";
-      };
+      serviceConfig =
+        {
+          ExecStart = "${cfg.package}/bin/spongix --config ${cfg.configFile}";
+          User = "spongix";
+          Group = "spongix";
+          DynamicUser = true;
+          StateDirectory = "spongix";
+          Restart = "on-failure";
+          RestartSec = 5;
+          OOMScoreAdjust = 1000;
+          MemoryAccounting = "true";
+          MemoryMax = "70%";
+        }
+        // lib.optionalAttrs (s3Credentials != []) {
+          LoadCredential = s3Credentials;
+        };
     };
   };
 }

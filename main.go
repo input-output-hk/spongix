@@ -1,12 +1,17 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"net/url"
 	"os"
 	"os/signal"
+	"path"
+	"strings"
 	"syscall"
 	"time"
 
@@ -18,6 +23,8 @@ import (
 	"github.com/input-output-hk/spongix/pkg/store"
 	"github.com/minio/minio-go/v6"
 	"github.com/minio/minio-go/v6/pkg/credentials"
+	"github.com/nix-community/go-nix/pkg/narinfo"
+	"github.com/nix-community/go-nix/pkg/narinfo/signature"
 	"go.uber.org/zap"
 )
 
@@ -52,6 +59,19 @@ func main() {
 	proxy.setupLogger()
 	proxy.setupChunks()
 	proxy.setupIndices()
+
+	if c.SigningKeyFile != "" {
+		raw, err := os.ReadFile(c.SigningKeyFile)
+		if err != nil {
+			log.Fatal("reading signing key file", zap.Error(err))
+		}
+		key, err := signature.LoadSecretKey(strings.TrimSpace(string(raw)))
+		if err != nil {
+			log.Fatal("loading signing key", zap.Error(err))
+		}
+		proxy.signingKey = &key
+		proxy.log.Info("loaded signing key", zap.String("name", key.ToPublicKey().Name))
+	}
 
 	go func() {
 		t := time.Tick(5 * time.Second)
@@ -135,6 +155,8 @@ type Proxy struct {
 
 	// pebbleDB is the shared Pebble database for chunks and indices.
 	pebbleDB *store.DB
+
+	signingKey *signature.SecretKey // nil if no key configured
 }
 
 func NewProxy(config *config.Config) *Proxy {
@@ -295,10 +317,129 @@ func (proxy *Proxy) doCache(req *cacheRequest) {
 	}
 	defer func() { _ = response.Body.Close() }()
 
-	if err := proxy.insert(ctx, req.namespace, req.location, response.Body); err != nil {
-		metricCacheJobs("error").Add(1)
-		proxy.log.Error("failed caching file", zap.Error(err), zap.String("url", req.url))
+	if strings.HasPrefix(req.location, "indices/narinfo/") {
+		// 1. Buffer the narinfo body
+		body, err := io.ReadAll(response.Body)
+		if err != nil {
+			metricCacheJobs("error").Add(1)
+			proxy.log.Error("reading narinfo response", zap.Error(err))
+			return
+		}
+
+		// 2. Parse original narinfo to extract upstream NAR URL
+		info, err := narinfo.Parse(bytes.NewReader(body))
+		if err != nil {
+			proxy.log.Warn("parsing narinfo for eager caching", zap.Error(err))
+			// Fall through to store narinfo anyway
+		} else if info.Compression != "none" && info.URL != "" {
+			// 3. Derive upstream base URL + full NAR URL
+			baseURL := extractBaseURL(req.url)
+			narURL := baseURL + "/" + info.URL
+
+			// 4. Extract NAR hash for index location
+			narHash := extractNarHash(info.URL)
+			narLocation := fmt.Sprintf("indices/nar/%s/%s", narHash[:4], narHash)
+
+			// 5. Download NAR from upstream
+			narReq, err := http.NewRequestWithContext(ctx, "GET", narURL, nil)
+			if err == nil {
+				narResp, err := proxy.httpGetClient.Do(narReq)
+				if err == nil {
+					defer func() { _ = narResp.Body.Close() }()
+					if narResp.StatusCode == http.StatusOK {
+						// 6. Decompress
+						ext := narExtFromURL(info.URL)
+						rc, err := decompressReader(ext, narResp.Body)
+						if err == nil {
+							defer func() {
+								if err := rc.Close(); err != nil {
+									proxy.log.Warn("closing decompressor", zap.Error(err))
+								}
+							}()
+							// 7. Insert decompressed NAR
+							if err := proxy.insert(ctx, req.namespace, narLocation, rc); err != nil {
+								proxy.log.Error("failed caching NAR",
+									zap.String("url", narURL),
+									zap.Error(err))
+							}
+						} else {
+							proxy.log.Error("decompressing NAR",
+								zap.String("url", narURL),
+								zap.Error(err))
+						}
+					}
+				} else {
+					proxy.log.Error("downloading NAR",
+						zap.String("url", narURL),
+						zap.Error(err))
+				}
+			}
+		}
+
+		// 8. NOW insert narinfo (rewriteNarinfo called inside insert)
+		if err := proxy.insert(ctx, req.namespace, req.location, bytes.NewReader(body)); err != nil {
+			metricCacheJobs("error").Add(1)
+			proxy.log.Error("failed caching narinfo",
+				zap.String("location", req.location),
+				zap.Error(err))
+		} else {
+			metricCacheJobs("success").Add(1)
+		}
 	} else {
-		metricCacheJobs("success").Add(1)
+		// Non-narinfo: decompress if NAR with ext
+		var body io.Reader = response.Body
+		if strings.HasPrefix(req.location, "indices/nar/") && req.ext != "" {
+			rc, err := decompressReader(req.ext, response.Body)
+			if err == nil {
+				defer func() {
+					if err := rc.Close(); err != nil {
+						proxy.log.Warn("closing decompressor", zap.Error(err))
+					}
+				}()
+				body = rc
+			} else {
+				proxy.log.Error("decompressing cached NAR",
+					zap.String("ext", req.ext),
+					zap.Error(err))
+			}
+		}
+		if err := proxy.insert(ctx, req.namespace, req.location, body); err != nil {
+			metricCacheJobs("error").Add(1)
+			proxy.log.Error("inserting", zap.String("location", req.location), zap.Error(err))
+		} else {
+			metricCacheJobs("success").Add(1)
+		}
 	}
+}
+
+// extractBaseURL returns the scheme + host from a URL string.
+func extractBaseURL(u string) string {
+	parsed, err := url.Parse(u)
+	if err != nil {
+		return ""
+	}
+	return parsed.Scheme + "://" + parsed.Host
+}
+
+// narExtFromURL returns the compression extension from a NAR URL path.
+func narExtFromURL(u string) string {
+	base := path.Base(u)
+	for _, ext := range []string{".xz", ".zst", ".bz2", ".br"} {
+		if strings.HasSuffix(base, ext) {
+			return ext
+		}
+	}
+	return ""
+}
+
+// extractNarHash extracts the NAR hash from a NAR URL path like "nar/abc123.nar.xz".
+func extractNarHash(narURL string) string {
+	base := path.Base(narURL)
+	// Strip known compression extensions
+	for _, ext := range []string{".xz", ".zst", ".bz2", ".br"} {
+		base = strings.TrimSuffix(base, ext)
+	}
+	// Strip .nar extension
+	base = strings.TrimSuffix(base, ".nar")
+	return base
 }

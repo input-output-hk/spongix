@@ -13,6 +13,9 @@ package store
 import (
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
 
 	"github.com/cockroachdb/pebble"
 	"github.com/cockroachdb/pebble/bloom"
@@ -57,10 +60,47 @@ func Open(dir string, opts *PebbleOptions) (*DB, error) {
 	}
 
 	db, err := pebble.Open(dir, pOpts)
+	if err != nil && opts.WALDir != "" && errors.Is(err, os.ErrNotExist) {
+		// Separate WAL dir (e.g. tmpfs) was likely wiped on reboot.
+		// Create empty placeholders for missing WAL files so pebble
+		// can replay them as truncated, preserving all flushed SST data.
+		db, err = recoverMissingWAL(dir, pOpts)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("opening pebble db: %w", err)
 	}
 	return &DB{db: db}, nil
+}
+
+// recoverMissingWAL retries pebble.Open, creating empty placeholder files
+// for any WAL files that pebble expects but can't find (e.g. after a tmpfs
+// WAL directory is wiped on reboot). Empty WAL files are treated as truncated
+// during replay, so all flushed SST data is preserved.
+func recoverMissingWAL(dir string, pOpts *pebble.Options) (*pebble.DB, error) {
+	for range 10 {
+		db, err := pebble.Open(dir, pOpts)
+		if err == nil {
+			return db, nil
+		}
+		if !errors.Is(err, os.ErrNotExist) {
+			return nil, err
+		}
+		// Extract the missing path from the error chain.
+		var pathErr *os.PathError
+		if !errors.As(err, &pathErr) {
+			return nil, err
+		}
+		missing := pathErr.Path
+		if !strings.HasPrefix(missing, pOpts.WALDir+string(filepath.Separator)) {
+			return nil, err
+		}
+		f, createErr := os.Create(missing)
+		if createErr != nil {
+			return nil, fmt.Errorf("creating WAL placeholder %s: %w (original: %v)", missing, createErr, err)
+		}
+		f.Close()
+	}
+	return nil, fmt.Errorf("too many missing WAL files in %s", pOpts.WALDir)
 }
 
 // Close closes the underlying Pebble database.

@@ -3,7 +3,6 @@ package main
 const (
 	headerContentType   = "Content-Type"
 	headerContentLength = "Content-Length"
-	headerLocation      = "Location"
 
 	headerCache       = "X-Cache"
 	headerCacheHit    = "HIT"

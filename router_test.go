@@ -125,10 +125,11 @@ Sig: kappa:JccDYkaQjN7ywE9VGJ6/RAzCt7XJoqWsmjTRsdAdM8DF40ebDDu3XWaasuJkaezbhVxja
 	nsRealisation = "/" + testNamespace + fRealisation
 	nsLog         = "/" + testNamespace + fLog
 
-	mockGetNar200      = mockGet(suffix+fNar, 200).Body(string(fixtureNar)).Header(headerContentType, mimeNar).End()
-	mockHeadNarinfo200 = mockHead(suffix+fNarinfo, 200).Body(fixtureNarinfoNoneUpstream).Header(headerContentType, mimeNarinfo).End()
-	mockGetNar404      = mockGet(suffix+fNar, 404).End()
-	mockGetNarinfo404  = mockGet(suffix+fNarinfo, 404).End()
+	mockGetNar200       = mockGet(suffix+fNar, 200).Body(string(fixtureNar)).Header(headerContentType, mimeNar).End()
+	mockHeadNarinfo200  = mockHead(suffix+fNarinfo, 200).Body(fixtureNarinfoNoneUpstream).Header(headerContentType, mimeNarinfo).End()
+	mockGetNarinfo200   = mockGet(suffix+fNarinfo, 200).Body(fixtureNarinfoNoneUpstream).Header(headerContentType, mimeNarinfo).End()
+	mockGetNar404       = mockGet(suffix+fNar, 404).End()
+	mockGetNarinfo404   = mockGet(suffix+fNarinfo, 404).End()
 
 	mockGetNarXz404 = mockGet(suffix+fNarXzUpstream, 404).End()
 )
@@ -202,14 +203,16 @@ func TestRouterNarinfoHead(t *testing.T) {
 	t.Run("found remote", func(tt *testing.T) {
 		proxy := testProxy(tt)
 
+		// Narinfos are proxied (not redirected) so upstream content
+		// is fetched, rewritten, and served directly.
 		apitest.New().
-			Mocks(mockHeadNarinfo200).
+			Mocks(mockHeadNarinfo200, mockGetNarinfo200).
 			Handler(proxy.router()).
 			Method(http.MethodHead).
 			URL(nsNarinfo).
 			Expect(tt).
-			Status(http.StatusFound).
-			Header(headerLocation, upstream+fNarinfo).
+			Status(http.StatusOK).
+			Header(headerContentType, mimeNarinfo).
 			End()
 	})
 
@@ -310,29 +313,27 @@ func TestRouterNarGet(t *testing.T) {
 		proxy := testProxy(tt)
 
 		apitest.New().
-			Mocks(mockHeadNarinfo200).
+			Mocks(mockHeadNarinfo200, mockGetNarinfo200).
 			Handler(proxy.router()).
 			Method(http.MethodGet).
 			URL(nsNarinfo).
 			Expect(tt).
-			Status(http.StatusFound).
-			Header(headerLocation, upstream+fNarinfo).
+			Status(http.StatusOK).
+			Header(headerContentType, mimeNarinfo).
 			End()
 	})
 
 	t.Run("found remote after Narinfo HEAD", func(tt *testing.T) {
 		proxy := testProxy(tt)
 
-		// This unfortunately can't be easily deduplicated because for some reason
-		// one cannot specify the `URL` when using `Method` on mocks.
 		apitest.New().
-			Mocks(mockHeadNarinfo200).
+			Mocks(mockHeadNarinfo200, mockGetNarinfo200).
 			Handler(proxy.router()).
 			Method(http.MethodHead).
 			URL(nsNarinfo).
 			Expect(tt).
-			Status(http.StatusFound).
-			Header(headerLocation, upstream+fNarinfo).
+			Status(http.StatusOK).
+			Header(headerContentType, mimeNarinfo).
 			End()
 	})
 }
@@ -358,13 +359,13 @@ func TestRouterNarinfoGet(t *testing.T) {
 
 		apitest.New().
 			EnableMockResponseDelay().
-			Mocks(mockHeadNarinfo200).
+			Mocks(mockHeadNarinfo200, mockGetNarinfo200).
 			Handler(proxy.router()).
 			Method(http.MethodGet).
 			URL(nsNarinfo).
 			Expect(tt).
-			Status(http.StatusFound).
-			Header(headerLocation, upstream+fNarinfo).
+			Status(http.StatusOK).
+			Header(headerContentType, mimeNarinfo).
 			End()
 	})
 }
@@ -420,29 +421,17 @@ func TestRouterNarPut(t *testing.T) {
 			End()
 	})
 
-	t.Run("upload xz success", func(tt *testing.T) {
+	t.Run("upload xz rejected", func(tt *testing.T) {
 		proxy := testProxy(tt)
 
+		// Compressed NAR uploads are rejected with 400
 		apitest.New().
 			Handler(proxy.router()).
 			Method(http.MethodPut).
 			URL(nsNarXz).
 			Body(string(fixtureNarXz)).
 			Expect(tt).
-			Status(http.StatusCreated).
-			Body("").
-			End()
-
-		// After decompression-on-ingest, GET via .nar should return
-		// uncompressed content, not the original xz bytes.
-		apitest.New().
-			Handler(proxy.router()).
-			Method(http.MethodGet).
-			URL(nsNar).
-			Expect(tt).
-			Status(http.StatusOK).
-			Header(headerContentType, mimeNar).
-			Body(string(fixtureNar)).
+			Status(http.StatusBadRequest).
 			End()
 	})
 }
@@ -607,15 +596,16 @@ func TestTrySubmitDropsJobsUnderLoad(t *testing.T) {
 	proxy.cachePool.Submit(func() { <-blocker })    // blocks the only worker
 	proxy.cachePool.TrySubmit(func() { <-blocker }) // fills the queue
 
-	// HEAD request triggers redirect + background cache job submission.
+	// GET request triggers proxy + background cache job submission.
 	// With the fix (go Submit instead of TrySubmit), the job blocks until
 	// pool capacity is available rather than being silently dropped.
-	req, _ := http.NewRequest(http.MethodHead, nsNarinfo, nil)
+	// Narinfos are proxied (not redirected) so we get 200 with rewritten content.
+	req, _ := http.NewRequest(http.MethodGet, nsNarinfo, nil)
 	rr := httptest.NewRecorder()
 	proxy.router().ServeHTTP(rr, req)
 
-	if rr.Code != http.StatusFound {
-		t.Fatalf("expected 302, got %d", rr.Code)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", rr.Code)
 	}
 
 	// Unblock pool workers, then wait for the cache job to complete

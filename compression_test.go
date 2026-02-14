@@ -123,69 +123,44 @@ func narinfoFieldAbsent(t *testing.T, field string) func(*http.Response, *http.R
 	}
 }
 
-// TestNarDecompressOnIngest verifies that compressed NAR uploads are
-// decompressed before chunking, so GET returns uncompressed content.
-func TestNarDecompressOnIngest(t *testing.T) {
+// TestNarRejectsCompressedUpload verifies that compressed NAR uploads
+// are rejected with 400, since spongix requires uncompressed NARs.
+func TestNarRejectsCompressedUpload(t *testing.T) {
 	narUncompressed := loadTestNar(t)
 
-	t.Run("xz", func(tt *testing.T) {
+	t.Run("xz rejected", func(tt *testing.T) {
 		proxy := testProxy(tt)
 		narXz := compressWithXz(tt, narUncompressed)
 
-		// Upload compressed NAR via .nar.xz URL
 		apitest.New().
 			Handler(proxy.router()).
 			Method(http.MethodPut).
 			URL(nsNarXz).
 			Body(string(narXz)).
 			Expect(tt).
-			Status(http.StatusCreated).
-			End()
-
-		// Retrieve via .nar URL -- should get decompressed content
-		apitest.New().
-			Handler(proxy.router()).
-			Method(http.MethodGet).
-			URL(nsNar).
-			Expect(tt).
-			Status(http.StatusOK).
-			Header(headerContentType, mimeNar).
-			Body(string(narUncompressed)).
+			Status(http.StatusBadRequest).
 			End()
 	})
 
-	t.Run("zstd", func(tt *testing.T) {
+	t.Run("zstd rejected", func(tt *testing.T) {
 		proxy := testProxy(tt)
 		narZstd := compressWithZstd(tt, narUncompressed)
 
 		nsNarZst := "/" + testNamespace + fNar + ".zst"
 
-		// Upload compressed NAR via .nar.zst URL
 		apitest.New().
 			Handler(proxy.router()).
 			Method(http.MethodPut).
 			URL(nsNarZst).
 			Body(string(narZstd)).
 			Expect(tt).
-			Status(http.StatusCreated).
-			End()
-
-		// Retrieve via .nar URL -- should get decompressed content
-		apitest.New().
-			Handler(proxy.router()).
-			Method(http.MethodGet).
-			URL(nsNar).
-			Expect(tt).
-			Status(http.StatusOK).
-			Header(headerContentType, mimeNar).
-			Body(string(narUncompressed)).
+			Status(http.StatusBadRequest).
 			End()
 	})
 
-	t.Run("none passthrough", func(tt *testing.T) {
+	t.Run("uncompressed accepted", func(tt *testing.T) {
 		proxy := testProxy(tt)
 
-		// Upload uncompressed NAR -- should be stored as-is
 		apitest.New().
 			Handler(proxy.router()).
 			Method(http.MethodPut).
@@ -195,7 +170,6 @@ func TestNarDecompressOnIngest(t *testing.T) {
 			Status(http.StatusCreated).
 			End()
 
-		// Retrieve -- should get identical bytes back
 		apitest.New().
 			Handler(proxy.router()).
 			Method(http.MethodGet).
@@ -208,14 +182,12 @@ func TestNarDecompressOnIngest(t *testing.T) {
 	})
 }
 
-// TestNarDeduplicationAcrossCompression verifies that uploading the same
-// NAR content in different compression formats results in identical chunks
-// (i.e., the compressed content is decompressed before chunking).
-func TestNarDeduplicationAcrossCompression(t *testing.T) {
+// TestCompressedNarGetReturns404 verifies that GET requests for compressed
+// NAR URLs (.nar.xz, .nar.zst) return 404, since spongix only stores
+// uncompressed NARs.
+func TestCompressedNarGetReturns404(t *testing.T) {
 	proxy := testProxy(t)
-	chunkStore := proxy.s3Store.(*fakeStore)
 	narUncompressed := loadTestNar(t)
-	narXz := compressWithXz(t, narUncompressed)
 
 	// Upload uncompressed NAR
 	apitest.New().
@@ -227,22 +199,14 @@ func TestNarDeduplicationAcrossCompression(t *testing.T) {
 		Status(http.StatusCreated).
 		End()
 
-	chunksAfterUncompressed := len(chunkStore.chunks)
-
-	// Upload the same NAR xz-compressed (same index path, but content should
-	// decompress to identical bytes, producing no new chunks).
+	// GET via .nar.xz should 404
 	apitest.New().
 		Handler(proxy.router()).
-		Method(http.MethodPut).
+		Method(http.MethodGet).
 		URL(nsNarXz).
-		Body(string(narXz)).
 		Expect(t).
-		Status(http.StatusCreated).
+		Status(http.StatusNotFound).
 		End()
-
-	chunksAfterXz := len(chunkStore.chunks)
-	assert.Equal(t, chunksAfterUncompressed, chunksAfterXz,
-		"uploading xz-compressed NAR should not create new chunks (content deduplicates with uncompressed)")
 }
 
 // TestNarinfoRewriteCompression verifies that narinfos with non-none

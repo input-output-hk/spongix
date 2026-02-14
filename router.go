@@ -175,7 +175,7 @@ Priority: `+strconv.FormatUint(ns.CacheInfoPriority, 10))
 	}
 }
 
-func (p *Proxy) redirectToUpstream(location string, w http.ResponseWriter, r *http.Request) {
+func (p *Proxy) redirectToUpstream(prefix, location string, w http.ResponseWriter, r *http.Request) {
 	if namespace, ok := mux.Vars(r)["namespace"]; !ok {
 		p.log.Warn("namespace not given", zap.String("url", r.URL.String()))
 		serveNotFound(w, r)
@@ -225,7 +225,14 @@ func (p *Proxy) redirectToUpstream(location string, w http.ResponseWriter, r *ht
 				})
 			}()
 
-			http.Redirect(w, r, found, http.StatusFound)
+			// Narinfos must be proxied so we can rewrite compression
+			// fields before the client sees them. Other content types
+			// can redirect directly to the upstream URL.
+			if prefix == narinfoPrefix {
+				p.proxyNarinfo(found, w, r)
+			} else {
+				http.Redirect(w, r, found, http.StatusFound)
+			}
 		case <-done:
 			serveNotFound(w, r)
 		case <-time.After(500 * time.Millisecond):
@@ -234,8 +241,52 @@ func (p *Proxy) redirectToUpstream(location string, w http.ResponseWriter, r *ht
 	}
 }
 
+// proxyNarinfo fetches a narinfo from an upstream URL, rewrites compression
+// fields to reflect uncompressed storage, and serves it to the client.
+func (p *Proxy) proxyNarinfo(upstreamURL string, w http.ResponseWriter, r *http.Request) {
+	resp, err := p.httpGetClient.Get(upstreamURL)
+	if err != nil {
+		p.log.Error("fetching narinfo from upstream", zap.String("url", upstreamURL), zap.Error(err))
+		serveNotFound(w, r)
+		return
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != http.StatusOK {
+		serveNotFound(w, r)
+		return
+	}
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		p.log.Error("reading upstream narinfo", zap.String("url", upstreamURL), zap.Error(err))
+		answer(w, http.StatusInternalServerError, mimeText, err.Error())
+		return
+	}
+
+	body, err = p.rewriteNarinfo(body)
+	if err != nil {
+		p.log.Error("rewriting upstream narinfo", zap.String("url", upstreamURL), zap.Error(err))
+		answer(w, http.StatusInternalServerError, mimeText, err.Error())
+		return
+	}
+
+	w.Header().Set(headerContentType, mimeNarinfo)
+	w.Header().Set(headerCache, headerCacheMiss)
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(body)
+}
+
 func (p *Proxy) largeHeadAndGet(prefix, mime string) func(w http.ResponseWriter, r *http.Request) {
 	return func(w http.ResponseWriter, r *http.Request) {
+		// NARs are stored decompressed. If the client requests a compressed
+		// variant (.nar.xz, .nar.zst, etc.), return 404 so it falls back
+		// to the plain .nar URL.
+		if prefix == narPrefix && mux.Vars(r)["ext"] != "" {
+			serveNotFound(w, r)
+			return
+		}
+
 		start := time.Now()
 		location := indexPathFor(prefix, r)
 		namespace := mux.Vars(r)["namespace"]
@@ -246,7 +297,7 @@ func (p *Proxy) largeHeadAndGet(prefix, mime string) func(w http.ResponseWriter,
 		} else if index, err := indices.GetIndex(location); err != nil {
 			if errors.Is(err, store.ErrIndexNotFound) {
 				metricRequests(namespace, prefix, "miss").Add(1)
-				p.redirectToUpstream(location, w, r)
+				p.redirectToUpstream(prefix, location, w, r)
 			} else {
 				metricRequests(namespace, prefix, "error").Add(1)
 				p.log.Error("getting index", zap.String("index", location), zap.Error(err))
@@ -255,8 +306,29 @@ func (p *Proxy) largeHeadAndGet(prefix, mime string) func(w http.ResponseWriter,
 		} else {
 			metricRequests(namespace, prefix, "hit").Add(1)
 			w.Header().Set("Content-Type", mime)
-			rd := desync.NewIndexReadSeeker(index, p.s3Store)
-			http.ServeContent(w, r, r.URL.Path, time.Now(), rd)
+
+			// Narinfos may have been stored with Compression: xz/zst before
+			// we enforced uncompressed-only. Rewrite on the fly so clients
+			// get URLs pointing to plain .nar files.
+			if prefix == narinfoPrefix {
+				rd := desync.NewIndexReadSeeker(index, p.s3Store)
+				body, err := io.ReadAll(rd)
+				if err != nil {
+					p.log.Error("reading narinfo", zap.String("index", location), zap.Error(err))
+					answer(w, http.StatusInternalServerError, mimeText, err.Error())
+					return
+				}
+				body, err = p.rewriteNarinfo(body)
+				if err != nil {
+					p.log.Error("rewriting narinfo", zap.String("index", location), zap.Error(err))
+					answer(w, http.StatusInternalServerError, mimeText, err.Error())
+					return
+				}
+				http.ServeContent(w, r, r.URL.Path, time.Now(), bytes.NewReader(body))
+			} else {
+				rd := desync.NewIndexReadSeeker(index, p.s3Store)
+				http.ServeContent(w, r, r.URL.Path, time.Now(), rd)
+			}
 		}
 	}
 }
@@ -270,24 +342,16 @@ func (p *Proxy) largePut(prefix string) func(w http.ResponseWriter, r *http.Requ
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
 		defer cancel()
 
-		var body io.Reader = r.Body
-		if prefix == narPrefix {
-			ext := mux.Vars(r)["ext"]
-			rc, err := decompressReader(ext, r.Body)
-			if err != nil {
-				metricRequests(namespace, prefix, "error").Add(1)
-				answer(w, http.StatusBadRequest, mimeText, err.Error())
-				return
-			}
-			defer func() {
-				if err := rc.Close(); err != nil {
-					p.log.Warn("closing decompressor", zap.Error(err))
-				}
-			}()
-			body = rc
+		// NARs must be uploaded uncompressed; content-defined chunking
+		// requires raw bytes for deduplication. Clients should use
+		// compression=none in their store URI.
+		if prefix == narPrefix && mux.Vars(r)["ext"] != "" {
+			answer(w, http.StatusBadRequest, mimeText,
+				"compressed NARs not accepted; use compression=none in your store URI")
+			return
 		}
 
-		if err := p.insert(ctx, namespace, location, body); err != nil {
+		if err := p.insert(ctx, namespace, location, r.Body); err != nil {
 			metricRequests(namespace, prefix, "error").Add(1)
 			p.log.Error("inserting", zap.String("index", location), zap.Error(err))
 			answer(w, http.StatusInternalServerError, mimeText, err.Error())

@@ -71,17 +71,20 @@ var (
 var yes = struct{}{}
 
 type GC struct {
-	Dir          string `arg:"--dir,env:CACHE_DIR" help:"directory for the cache"`
-	CacheSize    uint64 `arg:"--cache-size,env:CACHE_SIZE" help:"Number of gigabytes to keep in the disk cache"`
-	Verify       bool   `arg:"--verify" help:"Run store integrity verification before GC"`
-	DryRun       bool   `arg:"--dry-run" help:"Only report what would be deleted (pebble mode)"`
-	StoreType    string `arg:"--store-type,env:STORE_TYPE" help:"Storage backend: filesystem (default) or pebble"`
-	PebbleDir    string `arg:"--pebble-dir,env:PEBBLE_DIR" help:"Pebble database directory (required for pebble store type)"`
-	LogLevel     string `arg:"--log-level,env:LOG_LEVEL" help:"One of debug, info, warn, error, dpanic, panic, fatal"`
-	LogMode      string `arg:"--log-mode,env:LOG_MODE" help:"development or production"`
-	log          *zap.Logger
-	localStore   desync.LocalStore
-	localIndices []desync.LocalIndexStore
+	Dir              string `arg:"--dir,env:CACHE_DIR" help:"directory for the cache"`
+	CacheSize        uint64 `arg:"--cache-size,env:CACHE_SIZE" help:"Number of gigabytes to keep in the disk cache"`
+	Verify           bool   `arg:"--verify" help:"Run store integrity verification before GC"`
+	DryRun           bool   `arg:"--dry-run" help:"Only report what would be deleted (pebble mode)"`
+	StoreType        string `arg:"--store-type,env:STORE_TYPE" help:"Storage backend: filesystem (default) or pebble"`
+	PebbleDir        string `arg:"--pebble-dir,env:PEBBLE_DIR" help:"Pebble database directory (required for pebble store type)"`
+	Retention        string `arg:"--retention" help:"Retention period as Go duration (e.g. 720h); narinfos newer than this are kept"`
+	MaxBytes         uint64 `arg:"--max-bytes" help:"Max disk usage in bytes; oldest unpinned narinfos evicted when exceeded (0 = no limit)"`
+	PinnedHashesFile string `arg:"--pinned-hashes-file" help:"File with one pinned store path hash per line"`
+	LogLevel         string `arg:"--log-level,env:LOG_LEVEL" help:"One of debug, info, warn, error, dpanic, panic, fatal"`
+	LogMode          string `arg:"--log-mode,env:LOG_MODE" help:"development or production"`
+	log              *zap.Logger
+	localStore       desync.LocalStore
+	localIndices     []desync.LocalIndexStore
 }
 
 func newGC() *GC {
@@ -118,8 +121,24 @@ func (gc *GC) gcPebble() {
 	}
 	defer func() { _ = db.Close() }()
 
+	var retention time.Duration
+	if gc.Retention != "" {
+		retention, err = time.ParseDuration(gc.Retention)
+		if err != nil {
+			gc.log.Fatal("invalid --retention", zap.String("value", gc.Retention), zap.Error(err))
+		}
+	}
+
+	filePins, err := store.LoadPinnedHashes(gc.PinnedHashesFile)
+	if err != nil {
+		gc.log.Fatal("loading pinned hashes file", zap.Error(err))
+	}
+
 	cfg := store.GCConfig{
-		DryRun: gc.DryRun,
+		DryRun:          gc.DryRun,
+		PinnedHashes:    filePins,
+		RetentionPeriod: retention,
+		MaxBytes:        gc.MaxBytes,
 	}
 
 	start := time.Now()
@@ -138,6 +157,8 @@ func (gc *GC) gcPebble() {
 		zap.Int("orphan_chunks", stats.OrphanChunks),
 		zap.Int("deleted_chunks", stats.DeletedChunks),
 		zap.Uint64("deleted_bytes", stats.DeletedBytes),
+		zap.Int("size_evicted_indices", stats.SizeEvictedIndices),
+		zap.Uint64("size_evicted_bytes", stats.SizeEvictedBytes),
 		zap.Bool("dry_run", gc.DryRun),
 	)
 }

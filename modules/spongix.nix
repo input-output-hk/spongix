@@ -63,6 +63,21 @@
     }
     // lib.optionalAttrs (cfg.signingKeyFile != null) {
       signing_key_file = "$CREDENTIALS_DIRECTORY/signing-key";
+    }
+    // lib.optionalAttrs cfg.gc.enable {
+      gc = {
+        interval = cfg.gc.interval;
+        retention_period = cfg.gc.retention;
+        max_bytes = cfg.gc.maxBytes;
+        pinned_hashes_file = cfg.gc.pinnedHashesFile;
+        dry_run = cfg.gc.dryRun;
+      };
+    }
+    // lib.optionalAttrs cfg.pinAPI.enable {
+      pin_api = {
+        enable = true;
+        bearer_token = "$CREDENTIALS_DIRECTORY/pin-api-token";
+      };
     }));
 
   s3Option = lib.mkOption {
@@ -106,7 +121,9 @@
     lib.optional (cfg.chunks.storeType == "s3") "chunks:${cfg.chunks.s3.credentialsFile}"
     ++ lib.mapAttrsToList (name: value: "namespace_${name}:${value.s3.credentialsFile}")
     (lib.filterAttrs (_: ns: ns.storeType == "s3") cfg.namespaces)
-    ++ lib.optional (cfg.signingKeyFile != null) "signing-key:${cfg.signingKeyFile}";
+    ++ lib.optional (cfg.signingKeyFile != null) "signing-key:${cfg.signingKeyFile}"
+    ++ lib.optional (cfg.pinAPI.enable && cfg.pinAPI.bearerTokenFile != null)
+      "pin-api-token:${cfg.pinAPI.bearerTokenFile}";
 in {
   options = {
     services.spongix = {
@@ -279,6 +296,77 @@ in {
         '';
       };
 
+      gc = lib.mkOption {
+        default = {};
+        type = lib.types.submodule {
+          options = {
+            enable = lib.mkEnableOption "periodic garbage collection";
+
+            interval = lib.mkOption {
+              type = lib.types.str;
+              default = "24h";
+              description = ''
+                How often to run GC, as a Go duration string.
+              '';
+            };
+
+            retention = lib.mkOption {
+              type = lib.types.str;
+              default = "720h";
+              description = ''
+                Retention period for narinfos. Narinfos newer than this are kept.
+                Default 720h (30 days).
+              '';
+            };
+
+            maxBytes = lib.mkOption {
+              type = lib.types.ints.unsigned;
+              default = 0;
+              description = ''
+                Maximum disk usage in bytes. When exceeded, oldest unpinned
+                narinfos are evicted. 0 means no size limit.
+              '';
+            };
+
+            pinnedHashesFile = lib.mkOption {
+              type = lib.types.str;
+              default = "/var/lib/spongix/pinned-hashes";
+              description = ''
+                Path to a file containing pinned store path hashes, one per line.
+                Missing file is treated as empty.
+              '';
+            };
+
+            dryRun = lib.mkOption {
+              type = lib.types.bool;
+              default = false;
+              description = ''
+                Only report what would be deleted, without actually deleting.
+              '';
+            };
+          };
+        };
+      };
+
+      pinAPI = lib.mkOption {
+        default = {};
+        type = lib.types.submodule {
+          options = {
+            enable = lib.mkEnableOption "HTTP pin management API";
+
+            bearerTokenFile = lib.mkOption {
+              type = lib.types.nullOr lib.types.str;
+              default = null;
+              description = ''
+                Path to a file containing the bearer token for the pin API.
+                Loaded via systemd LoadCredential to avoid secrets in the Nix store.
+                Required when the pin API is enabled.
+              '';
+            };
+          };
+        };
+      };
+
       configFile = lib.mkOption {
         type = lib.types.path;
         default = builtins.toPath configFile;
@@ -296,6 +384,10 @@ in {
         {
           assertion = cfg.chunks.storeType == "s3" -> cfg.chunks.s3 != null;
           message = "services.spongix.chunks.s3 must be set when chunks.storeType is \"s3\"";
+        }
+        {
+          assertion = cfg.pinAPI.enable -> cfg.pinAPI.bearerTokenFile != null;
+          message = "services.spongix.pinAPI.bearerTokenFile is required when the pin API is enabled";
         }
       ]
       ++ lib.mapAttrsToList (name: ns: {

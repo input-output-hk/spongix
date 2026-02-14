@@ -19,6 +19,8 @@ import (
 	"github.com/folbricht/desync"
 	"github.com/gorilla/handlers"
 	"github.com/gorilla/mux"
+	"encoding/json"
+
 	"github.com/input-output-hk/spongix/pkg/compress"
 	"github.com/input-output-hk/spongix/pkg/store"
 	"github.com/klauspost/compress/zstd"
@@ -78,7 +80,87 @@ func (proxy *Proxy) router() *mux.Router {
 		namespace.HandleFunc(matchLog, proxy.largePut(logPrefix)).Methods("PUT")
 	}
 
+	// Pin API: disabled by default. When enabled, requires bearer token auth.
+	// These routes are global (not namespace-scoped) since pins are DB-wide.
+	//
+	// Threat model:
+	//   - GC denial: attacker pins all hashes, preventing eviction
+	//   - Store path probing: GET /pins reveals cached paths; PUT confirms existence
+	//   - Disk exhaustion: preventing GC while pushing data
+	// Mitigations: API disabled by default, bearer token required, token loaded
+	// via LoadCredential (never in Nix store). Rate limiting can be layered via
+	// reverse proxy.
+	if proxy.config.PinAPI != nil && proxy.config.PinAPI.Enable && proxy.pebbleDB != nil {
+		matchPinHash := "/pin/{hash:[0-9a-df-np-sv-z]{32}}"
+		r.HandleFunc(matchPinHash, proxy.requireBearerToken(proxy.pinHash)).Methods("PUT")
+		r.HandleFunc(matchPinHash, proxy.requireBearerToken(proxy.unpinHash)).Methods("DELETE")
+		r.HandleFunc("/pins", proxy.requireBearerToken(proxy.listPins)).Methods("GET")
+	}
+
 	return r
+}
+
+// requireBearerToken wraps a handler with bearer token authentication.
+func (p *Proxy) requireBearerToken(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		auth := r.Header.Get("Authorization")
+		if auth == "" {
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		const prefix = "Bearer "
+		if !strings.HasPrefix(auth, prefix) {
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		token := auth[len(prefix):]
+		if token != p.config.PinAPI.BearerToken {
+			w.WriteHeader(http.StatusForbidden)
+			return
+		}
+		next(w, r)
+	}
+}
+
+// pinHash handles PUT /pin/{hash}.
+// Race condition note: If a pin arrives while GC is mid-run and has already
+// scanned past this hash in findRoots, the data may be evicted this cycle.
+// The pin persists in Pebble and takes effect on the next GC cycle.
+func (p *Proxy) pinHash(w http.ResponseWriter, r *http.Request) {
+	hash := mux.Vars(r)["hash"]
+	if err := p.pebbleDB.PinHash(hash); err != nil {
+		p.log.Error("pinning hash", zap.String("hash", hash), zap.Error(err))
+		answer(w, http.StatusInternalServerError, mimeText, err.Error())
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// unpinHash handles DELETE /pin/{hash}.
+func (p *Proxy) unpinHash(w http.ResponseWriter, r *http.Request) {
+	hash := mux.Vars(r)["hash"]
+	if err := p.pebbleDB.UnpinHash(hash); err != nil {
+		p.log.Error("unpinning hash", zap.String("hash", hash), zap.Error(err))
+		answer(w, http.StatusInternalServerError, mimeText, err.Error())
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// listPins handles GET /pins.
+func (p *Proxy) listPins(w http.ResponseWriter, r *http.Request) {
+	pins, err := p.pebbleDB.ListPins()
+	if err != nil {
+		p.log.Error("listing pins", zap.Error(err))
+		answer(w, http.StatusInternalServerError, mimeText, err.Error())
+		return
+	}
+	if pins == nil {
+		pins = []string{}
+	}
+	w.Header().Set("Content-Type", mimeJson)
+	w.WriteHeader(http.StatusOK)
+	_ = json.NewEncoder(w).Encode(pins)
 }
 
 func indexPathFor(kind string, r *http.Request) string {

@@ -19,6 +19,21 @@ type Config struct {
 	SigningKeyFile string                `json:"signing_key_file"`
 	Chunks         *Chunks               `json:"chunks"`
 	Namespaces     map[string]*Namespace `json:"namespaces"`
+	GC             *GC                   `json:"gc"`
+	PinAPI         *PinAPI               `json:"pin_api"`
+}
+
+type GC struct {
+	Interval         string `json:"interval"`            // Go duration, e.g. "24h"
+	RetentionPeriod  string `json:"retention_period"`     // Go duration, e.g. "720h"
+	MaxBytes         uint64 `json:"max_bytes"`            // 0 = no size limit
+	PinnedHashesFile string `json:"pinned_hashes_file"`   // one hash per line; missing file = no file pins
+	DryRun           bool   `json:"dry_run"`
+}
+
+type PinAPI struct {
+	Enable      bool   `json:"enable"`       // false by default -- routes not registered unless enabled
+	BearerToken string `json:"bearer_token"` // required when enabled; requests without valid token get 401
 }
 
 func (c *Config) Prepare() error {

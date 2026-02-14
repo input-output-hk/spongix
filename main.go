@@ -56,6 +56,54 @@ func main() {
 	proxy.setupChunks()
 	proxy.setupIndices()
 
+	// Start in-process GC goroutine if configured and using Pebble.
+	var gcTicker *time.Ticker
+	if c.GC != nil && c.GC.Interval != "" && proxy.pebbleDB != nil {
+		gcInterval, err := time.ParseDuration(c.GC.Interval)
+		if err != nil {
+			log.Fatalf("invalid gc.interval %q: %v", c.GC.Interval, err)
+		}
+		var gcRetention time.Duration
+		if c.GC.RetentionPeriod != "" {
+			gcRetention, err = time.ParseDuration(c.GC.RetentionPeriod)
+			if err != nil {
+				log.Fatalf("invalid gc.retention_period %q: %v", c.GC.RetentionPeriod, err)
+			}
+		}
+		gcTicker = time.NewTicker(gcInterval)
+		go func() {
+			for range gcTicker.C {
+				filePins, err := store.LoadPinnedHashes(c.GC.PinnedHashesFile)
+				if err != nil {
+					proxy.log.Error("loading pinned hashes file", zap.Error(err))
+					continue
+				}
+				gcCfg := store.GCConfig{
+					DryRun:          c.GC.DryRun,
+					PinnedHashes:    filePins,
+					RetentionPeriod: gcRetention,
+					MaxBytes:        c.GC.MaxBytes,
+				}
+				stats, err := store.GC(proxy.pebbleDB, gcCfg)
+				if err != nil {
+					proxy.log.Error("GC failed", zap.Error(err))
+					continue
+				}
+				proxy.log.Info("GC complete",
+					zap.Int("reachable_narinfos", stats.ReachableNarinfos),
+					zap.Int("unreachable_narinfos", stats.UnreachableNarinfos),
+					zap.Int("deleted_indices", stats.DeletedIndices),
+					zap.Int("orphan_chunks", stats.OrphanChunks),
+					zap.Int("deleted_chunks", stats.DeletedChunks),
+					zap.Uint64("deleted_bytes", stats.DeletedBytes),
+					zap.Int("size_evicted_indices", stats.SizeEvictedIndices),
+					zap.Uint64("size_evicted_bytes", stats.SizeEvictedBytes),
+					zap.Bool("dry_run", c.GC.DryRun),
+				)
+			}
+		}()
+	}
+
 	if c.SigningKeyFile != "" {
 		raw, err := os.ReadFile(c.SigningKeyFile)
 		if err != nil {
@@ -118,6 +166,11 @@ func main() {
 
 	if err := srv.Shutdown(ctxShutDown); err != nil {
 		proxy.log.Fatal("server shutdown failed", zap.Error(err))
+	}
+
+	// Stop GC ticker before draining pools.
+	if gcTicker != nil {
+		gcTicker.Stop()
 	}
 
 	// Drain worker pools before closing stores.

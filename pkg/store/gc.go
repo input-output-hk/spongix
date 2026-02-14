@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -19,6 +20,10 @@ type GCConfig struct {
 	// Narinfos newer than this are roots (kept alive).
 	// Zero means only pinned hashes survive.
 	RetentionPeriod time.Duration
+	// MaxBytes triggers size-based eviction when > 0.
+	// After the normal GC phases, if disk usage exceeds this budget,
+	// the oldest unpinned narinfos are evicted until under budget.
+	MaxBytes uint64
 }
 
 // GCStats holds statistics about a GC run.
@@ -30,6 +35,8 @@ type GCStats struct {
 	OrphanChunks        int
 	DeletedChunks       int
 	DeletedBytes        uint64
+	SizeEvictedIndices  int
+	SizeEvictedBytes    uint64
 }
 
 // GC runs the closure-aware garbage collection algorithm.
@@ -72,14 +79,164 @@ func GC(db *DB, cfg GCConfig) (GCStats, error) {
 	stats.DeletedChunks = orphans.deleted
 	stats.DeletedBytes = orphans.bytes
 
+	// Phase 5: Size-based eviction — if MaxBytes > 0 and DB exceeds budget,
+	// evict oldest unpinned narinfos until under budget.
+	if cfg.MaxBytes > 0 {
+		sizeStats, err := sizeEvict(db, cfg)
+		if err != nil {
+			return stats, fmt.Errorf("phase 5 (size eviction): %w", err)
+		}
+		stats.SizeEvictedIndices = sizeStats.evicted
+		stats.SizeEvictedBytes = sizeStats.bytes
+	}
+
 	return stats, nil
 }
 
+type sizeEvictResult struct {
+	evicted int
+	bytes   uint64
+}
+
+// timestampedIndex holds a narinfo index path and its creation timestamp.
+type timestampedIndex struct {
+	path string
+	ts   time.Time
+}
+
+// sizeEvict deletes the oldest unpinned narinfos (and their transitive chunks)
+// until disk usage drops below cfg.MaxBytes.
+func sizeEvict(db *DB, cfg GCConfig) (sizeEvictResult, error) {
+	var result sizeEvictResult
+
+	diskUsage := db.db.Metrics().DiskSpaceUsage()
+	if diskUsage <= cfg.MaxBytes {
+		return result, nil
+	}
+
+	// Merge all pin sources for exclusion.
+	allPins := make(map[string]struct{}, len(cfg.PinnedHashes))
+	for h := range cfg.PinnedHashes {
+		allPins[h] = struct{}{}
+	}
+	pebblePins, err := db.ListPins()
+	if err != nil {
+		return result, fmt.Errorf("listing pebble pins: %w", err)
+	}
+	for _, h := range pebblePins {
+		allPins[h] = struct{}{}
+	}
+
+	// Collect remaining (surviving) narinfo indices with timestamps.
+	prefix := []byte("i/indices/narinfo/")
+	iter, err := db.db.NewIter(&pebble.IterOptions{
+		LowerBound: prefix,
+		UpperBound: incrementKey(prefix),
+	})
+	if err != nil {
+		return result, err
+	}
+	defer func() { _ = iter.Close() }()
+
+	var candidates []timestampedIndex
+	for iter.First(); iter.Valid(); iter.Next() {
+		indexPath := strings.TrimPrefix(string(iter.Key()), "i/")
+		hash := extractStorePathHash(indexPath)
+		if hash == "" {
+			continue
+		}
+		// Skip pinned hashes.
+		if _, pinned := allPins[hash]; pinned {
+			continue
+		}
+		ts := time.Time{}
+		tsVal, tsCloser, tsErr := db.db.Get(timestampKey(indexPath))
+		if tsErr == nil {
+			ts = decodeTimestamp(tsVal)
+			_ = tsCloser.Close()
+		}
+		candidates = append(candidates, timestampedIndex{path: indexPath, ts: ts})
+	}
+	if err := iter.Error(); err != nil {
+		return result, err
+	}
+
+	// Sort oldest-first.
+	sort.Slice(candidates, func(i, j int) bool {
+		return candidates[i].ts.Before(candidates[j].ts)
+	})
+
+	// Evict oldest narinfos until under budget.
+	for _, cand := range candidates {
+		if db.db.Metrics().DiskSpaceUsage() <= cfg.MaxBytes {
+			break
+		}
+
+		if cfg.DryRun {
+			result.evicted++
+			continue
+		}
+
+		batch := db.db.NewBatch()
+		_ = batch.Delete(indexKey(cand.path), nil)
+		_ = batch.Delete(timestampKey(cand.path), nil)
+
+		hash := extractStorePathHash(cand.path)
+		_ = batch.Delete(narRefKey(hash), nil)
+
+		// Read index to delete cr/ entries and orphaned chunks.
+		idxVal, idxCloser, idxErr := db.db.Get(indexKey(cand.path))
+		if idxErr == nil {
+			data := make([]byte, len(idxVal))
+			copy(data, idxVal)
+			_ = idxCloser.Close()
+			idx, parseErr := desync.IndexFromReader(strings.NewReader(string(data)))
+			if parseErr == nil {
+				for _, chunk := range idx.Chunks {
+					_ = batch.Delete(chunkRefKey(chunk.ID, cand.path), nil)
+				}
+			}
+		}
+
+		if err := batch.Commit(pebble.Sync); err != nil {
+			_ = batch.Close()
+			return result, fmt.Errorf("committing size eviction batch: %w", err)
+		}
+
+		result.evicted++
+		result.bytes += uint64(len(idxVal))
+	}
+
+	// Run orphan chunk cleanup again after eviction to reclaim chunk storage.
+	if !cfg.DryRun && result.evicted > 0 {
+		orphans, err := deleteOrphanChunks(db, false)
+		if err != nil {
+			return result, fmt.Errorf("post-eviction orphan cleanup: %w", err)
+		}
+		result.bytes += orphans.bytes
+	}
+
+	return result, nil
+}
+
 // findRoots scans all narinfo indices and returns store path hashes that
-// are roots (within retention or pinned).
+// are roots (within retention, file-pinned, or Pebble-pinned).
 func findRoots(db *DB, cfg GCConfig) (map[string]struct{}, error) {
 	roots := make(map[string]struct{})
 	now := time.Now()
+
+	// Merge Pebble-managed pins (p/ keys) into the pin set.
+	allPins := make(map[string]struct{}, len(cfg.PinnedHashes))
+	for h := range cfg.PinnedHashes {
+		allPins[h] = struct{}{}
+	}
+	pebblePins, err := db.ListPins()
+	if err != nil {
+		return nil, fmt.Errorf("listing pebble pins: %w", err)
+	}
+	for _, h := range pebblePins {
+		allPins[h] = struct{}{}
+	}
 
 	prefix := []byte("i/indices/narinfo/")
 	iter, err := db.db.NewIter(&pebble.IterOptions{
@@ -99,8 +256,8 @@ func findRoots(db *DB, cfg GCConfig) (map[string]struct{}, error) {
 			continue
 		}
 
-		// Pinned hashes are always roots.
-		if _, pinned := cfg.PinnedHashes[hash]; pinned {
+		// Pinned hashes (file or Pebble) are always roots.
+		if _, pinned := allPins[hash]; pinned {
 			roots[hash] = struct{}{}
 			continue
 		}

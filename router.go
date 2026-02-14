@@ -505,10 +505,10 @@ func (p *Proxy) insert(ctx context.Context, namespace, location string, body io.
 	return nil
 }
 
-// rewriteNarinfo rewrites a narinfo to reflect that the NAR is stored uncompressed.
 // rewriteNarinfo rewrites a narinfo to reflect that the NAR is stored uncompressed
-// and appends the proxy's signature. Existing upstream signatures are preserved
-// since the fingerprint (StorePath, NarHash, NarSize, References) is unchanged.
+// and appends the proxy's signature if not already present. Existing upstream
+// signatures are preserved since the fingerprint (StorePath, NarHash, NarSize,
+// References) is unchanged.
 func (p *Proxy) rewriteNarinfo(body []byte) ([]byte, error) {
 	info, err := narinfo.Parse(bytes.NewReader(body))
 	if err != nil {
@@ -530,14 +530,24 @@ func (p *Proxy) rewriteNarinfo(body []byte) ([]byte, error) {
 		}
 	}
 
-	// Append our signature if a signing key is configured.
+	// Append our signature if a signing key is configured and not already present.
 	if p.signingKey != nil {
-		fingerprint := info.Fingerprint()
-		sig, err := p.signingKey.Sign(nil, fingerprint)
-		if err != nil {
-			return nil, fmt.Errorf("signing narinfo: %w", err)
+		keyName := p.signingKey.ToPublicKey().Name
+		alreadySigned := false
+		for _, s := range info.Signatures {
+			if s.Name == keyName {
+				alreadySigned = true
+				break
+			}
 		}
-		info.Signatures = append(info.Signatures, sig)
+		if !alreadySigned {
+			fingerprint := info.Fingerprint()
+			sig, err := p.signingKey.Sign(nil, fingerprint)
+			if err != nil {
+				return nil, fmt.Errorf("signing narinfo: %w", err)
+			}
+			info.Signatures = append(info.Signatures, sig)
+		}
 	}
 
 	return []byte(info.String()), nil

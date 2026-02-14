@@ -105,24 +105,6 @@ func narinfoFieldEquals(t *testing.T, field, expected string) func(*http.Respons
 	}
 }
 
-// narinfoFieldAbsent returns an apitest Assert function that checks a specific
-// narinfo field is not present in the response.
-func narinfoFieldAbsent(t *testing.T, field string) func(*http.Response, *http.Request) error {
-	return func(resp *http.Response, req *http.Request) error {
-		body, err := io.ReadAll(resp.Body)
-		if err != nil {
-			return fmt.Errorf("reading response body: %w", err)
-		}
-		resp.Body = io.NopCloser(bytes.NewReader(body))
-
-		actual := parseNarinfoField(string(body), field)
-		if actual != "" {
-			t.Errorf("narinfo field %s should be absent, but got %q", field, actual)
-		}
-		return nil
-	}
-}
-
 // TestNarRejectsCompressedUpload verifies that compressed NAR uploads
 // are rejected with 400, since spongix requires uncompressed NARs.
 func TestNarRejectsCompressedUpload(t *testing.T) {
@@ -303,10 +285,10 @@ func TestNarinfoRewriteCompression(t *testing.T) {
 	})
 }
 
-// TestNarinfoSignatureStrippedOnRewrite verifies that upstream signatures
-// are removed when the narinfo is rewritten (since changing fields
-// invalidates the original signature).
-func TestNarinfoSignatureStrippedOnRewrite(t *testing.T) {
+// TestNarinfoSignaturePreservedOnRewrite verifies that upstream signatures
+// are preserved when the narinfo is rewritten, since the fingerprint
+// (StorePath, NarHash, NarSize, References) is unchanged by compression rewriting.
+func TestNarinfoSignaturePreservedOnRewrite(t *testing.T) {
 	proxy := testProxy(t)
 
 	narHash := "1h6m2q7f8zq5z4kvn8j5wiz05jdic77df1x68dfwqg149jsy7gyp"
@@ -327,6 +309,6 @@ func TestNarinfoSignatureStrippedOnRewrite(t *testing.T) {
 		URL(nsNarinfo).
 		Expect(t).
 		Status(http.StatusOK).
-		Assert(narinfoFieldAbsent(t, "Sig")).
+		Assert(narinfoFieldEquals(t, "Sig", "kappa:sn5s/RrqEI+YG6/PjwdbPjcAC7rcta7sJU4mFOawGvJBLsWkyLtBrT2EuFt/LJjWkTZ+ZWOI9NTtjo/woMdvAg==")).
 		End()
 }

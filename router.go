@@ -26,7 +26,6 @@ import (
 	"github.com/klauspost/compress/zstd"
 	"github.com/nix-community/go-nix/pkg/nar"
 	"github.com/nix-community/go-nix/pkg/narinfo"
-	"github.com/nix-community/go-nix/pkg/narinfo/signature"
 	"github.com/pascaldekloe/metrics"
 	"github.com/ulikunitz/xz"
 	"go.uber.org/zap"
@@ -507,55 +506,38 @@ func (p *Proxy) insert(ctx context.Context, namespace, location string, body io.
 }
 
 // rewriteNarinfo rewrites a narinfo to reflect that the NAR is stored uncompressed.
-// If the narinfo already indicates no compression, it is returned unchanged.
-// Otherwise, it sets Compression to "none", adjusts FileHash/FileSize to match
-// NarHash/NarSize, strips the compression extension from URL, clears old signatures,
-// and re-signs with the proxy's signing key if configured.
+// rewriteNarinfo rewrites a narinfo to reflect that the NAR is stored uncompressed
+// and appends the proxy's signature. Existing upstream signatures are preserved
+// since the fingerprint (StorePath, NarHash, NarSize, References) is unchanged.
 func (p *Proxy) rewriteNarinfo(body []byte) ([]byte, error) {
-	// Quick scan: if Compression is "none" or absent, return unchanged.
-	scanner := bufio.NewScanner(bytes.NewReader(body))
-	foundCompression := false
-	for scanner.Scan() {
-		line := scanner.Text()
-		if strings.HasPrefix(line, "Compression:") {
-			value := strings.TrimSpace(strings.TrimPrefix(line, "Compression:"))
-			if value == "none" {
-				return body, nil
-			}
-			foundCompression = true
-			break
-		}
-	}
-	if !foundCompression {
-		return body, nil
-	}
-
 	info, err := narinfo.Parse(bytes.NewReader(body))
 	if err != nil {
 		return nil, fmt.Errorf("parsing narinfo: %w", err)
 	}
 
-	info.Compression = "none"
-	info.FileHash = info.NarHash
-	info.FileSize = info.NarSize
+	// Rewrite compression fields if the NAR was stored compressed.
+	if info.Compression != "none" && info.Compression != "" {
+		info.Compression = "none"
+		info.FileHash = info.NarHash
+		info.FileSize = info.NarSize
 
-	// Strip compression extension from URL.
-	for _, ext := range []string{".xz", ".zst", ".bz2", ".br"} {
-		if strings.HasSuffix(info.URL, ext) {
-			info.URL = strings.TrimSuffix(info.URL, ext)
-			break
+		// Strip compression extension from URL.
+		for _, ext := range []string{".xz", ".zst", ".bz2", ".br"} {
+			if strings.HasSuffix(info.URL, ext) {
+				info.URL = strings.TrimSuffix(info.URL, ext)
+				break
+			}
 		}
 	}
 
-	// Clear old signatures and re-sign if a signing key is configured.
-	info.Signatures = nil
+	// Append our signature if a signing key is configured.
 	if p.signingKey != nil {
 		fingerprint := info.Fingerprint()
 		sig, err := p.signingKey.Sign(nil, fingerprint)
 		if err != nil {
 			return nil, fmt.Errorf("signing narinfo: %w", err)
 		}
-		info.Signatures = []signature.Signature{sig}
+		info.Signatures = append(info.Signatures, sig)
 	}
 
 	return []byte(info.String()), nil

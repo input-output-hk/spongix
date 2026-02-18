@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -85,7 +86,22 @@ Sig: kappa:JccDYkaQjN7ywE9VGJ6/RAzCt7XJoqWsmjTRsdAdM8DF40ebDDu3XWaasuJkaezbhVxja
 
 	fNarXz         = fNar + ".xz"
 	fNarXzUpstream = "/nar/0rjb49w7dldq79d3ax30gw279bnbn48w9q925g3lr0rhrl0ycxvs.nar.xz"
-	fixtureNarXz   = []byte{
+
+	// Narinfo with xz compression, as served by upstream caches like cache.nixos.org.
+	// URL points to a .nar.xz file; rewriteNarinfo will strip the extension.
+	fixtureNarinfoXzUpstream = `StorePath: /nix/store/hyhrnrnpsz9fw5p9dk85a58y31ink18c-test
+URL: nar/1h6m2q7f8zq5z4kvn8j5wiz05jdic77df1x68dfwqg149jsy7gyp.nar.xz
+Compression: xz
+FileHash: sha256:0rjb49w7dldq79d3ax30gw279bnbn48w9q925g3lr0rhrl0ycxvs
+FileSize: 224
+NarHash: sha256:1h6m2q7f8zq5z4kvn8j5wiz05jdic77df1x68dfwqg149jsy7gyp
+NarSize: 512
+References: 5b4cprjhjw35wyzvgmgvqay4hjf59h7x-test
+Deriver: 914ivbx6hfpgczwphndm0vc4z6q2c8a1-test.drv
+Sig: kappa:JccDYkaQjN7ywE9VGJ6/RAzCt7XJoqWsmjTRsdAdM8DF40ebDDu3XWaasuJkaezbhVxjaRLJm3VWDEk6EmRpCw==
+`
+
+	fixtureNarXz = []byte{
 		0xfd, 0x37, 0x7a, 0x58, 0x5a, 0x00, 0x00, 0x04, 0xe6, 0xd6, 0xb4, 0x46, 0x02, 0x00, 0x21, 0x01,
 		0x16, 0x00, 0x00, 0x00, 0x74, 0x2f, 0xe5, 0xa3, 0xe0, 0x01, 0xff, 0x00, 0x9b, 0x5d, 0x00, 0x06,
 		0x80, 0x36, 0x1f, 0xef, 0xa6, 0xce, 0xbf, 0x76, 0xba, 0x1a, 0x7a, 0x4f, 0x2b, 0xea, 0xa4, 0x53,
@@ -125,11 +141,11 @@ Sig: kappa:JccDYkaQjN7ywE9VGJ6/RAzCt7XJoqWsmjTRsdAdM8DF40ebDDu3XWaasuJkaezbhVxja
 	nsRealisation = "/" + testNamespace + fRealisation
 	nsLog         = "/" + testNamespace + fLog
 
-	mockGetNar200       = mockGet(suffix+fNar, 200).Body(string(fixtureNar)).Header(headerContentType, mimeNar).End()
-	mockHeadNarinfo200  = mockHead(suffix+fNarinfo, 200).Body(fixtureNarinfoNoneUpstream).Header(headerContentType, mimeNarinfo).End()
-	mockGetNarinfo200   = mockGet(suffix+fNarinfo, 200).Body(fixtureNarinfoNoneUpstream).Header(headerContentType, mimeNarinfo).End()
-	mockGetNar404       = mockGet(suffix+fNar, 404).End()
-	mockGetNarinfo404   = mockGet(suffix+fNarinfo, 404).End()
+	mockGetNar200      = mockGet(suffix+fNar, 200).Body(string(fixtureNar)).Header(headerContentType, mimeNar).End()
+	mockHeadNarinfo200 = mockHead(suffix+fNarinfo, 200).Body(fixtureNarinfoNoneUpstream).Header(headerContentType, mimeNarinfo).End()
+	mockGetNarinfo200  = mockGet(suffix+fNarinfo, 200).Body(fixtureNarinfoNoneUpstream).Header(headerContentType, mimeNarinfo).End()
+	mockGetNar404      = mockGet(suffix+fNar, 404).End()
+	mockGetNarinfo404  = mockGet(suffix+fNarinfo, 404).End()
 
 	mockGetNarXz404 = mockGet(suffix+fNarXzUpstream, 404).End()
 )
@@ -616,6 +632,87 @@ func TestTrySubmitDropsJobsUnderLoad(t *testing.T) {
 	_, err := fakeIdx.GetIndex("indices/narinfo/hyhr/hyhrnrnpsz9fw5p9dk85a58y31ink18c")
 	if err != nil {
 		t.Errorf("expected cache job to store the index, but it was lost: %v", err)
+	}
+}
+
+// TestNarProxyDecompressOnCacheMiss verifies that when a narinfo on upstream
+// advertises a compressed NAR (Compression: xz, URL: nar/HASH.nar.xz),
+// Spongix rewrites the narinfo to uncompressed (Compression: none, URL: nar/HASH.nar),
+// and then successfully serves the uncompressed NAR by proxying + decompressing
+// from upstream. This is the bug where Spongix returned 404 for the uncompressed
+// NAR URL because it only tried HEAD on the exact (uncompressed) URL upstream.
+func TestNarProxyDecompressOnCacheMiss(t *testing.T) {
+	// Upstream that serves xz-compressed narinfo and NAR.
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.HasSuffix(r.URL.Path, ".narinfo"):
+			w.Header().Set("Content-Type", mimeNarinfo)
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(fixtureNarinfoXzUpstream))
+		case strings.HasSuffix(r.URL.Path, ".nar.xz"):
+			w.Header().Set("Content-Type", "application/x-xz")
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write(fixtureNarXz)
+		case strings.HasSuffix(r.URL.Path, ".nar"):
+			// Upstream does NOT have the uncompressed NAR.
+			w.WriteHeader(http.StatusNotFound)
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer ts.Close()
+
+	proxy := testProxy(t)
+	proxy.config.Namespaces[testNamespace].Substituters = []string{ts.URL}
+
+	router := proxy.router()
+
+	// Step 1: GET narinfo -- should be proxied and rewritten to uncompressed.
+	rr := httptest.NewRecorder()
+	req, _ := http.NewRequest(http.MethodGet, nsNarinfo, nil)
+	router.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("narinfo: expected 200, got %d: %s", rr.Code, rr.Body.String())
+	}
+	body := rr.Body.String()
+	if !strings.Contains(body, "Compression: none") {
+		t.Fatalf("narinfo not rewritten to Compression: none:\n%s", body)
+	}
+	if strings.Contains(body, ".nar.xz") {
+		t.Fatalf("narinfo URL still has .xz extension:\n%s", body)
+	}
+
+	// Step 2: GET the uncompressed NAR URL (as a real Nix client would).
+	// This is the critical test: upstream only has .nar.xz, Spongix must
+	// proxy it, decompress, and serve uncompressed.
+	rr2 := httptest.NewRecorder()
+	req2, _ := http.NewRequest(http.MethodGet, nsNar, nil)
+	router.ServeHTTP(rr2, req2)
+
+	if rr2.Code != http.StatusOK {
+		t.Fatalf("NAR: expected 200, got %d: %s", rr2.Code, rr2.Body.String())
+	}
+	if rr2.Body.Len() != len(fixtureNar) {
+		t.Errorf("NAR body length: got %d, want %d", rr2.Body.Len(), len(fixtureNar))
+	}
+	if !bytes.Equal(rr2.Body.Bytes(), fixtureNar) {
+		t.Error("NAR body does not match expected decompressed content")
+	}
+
+	// Step 3: GET the NAR again -- should be served from local cache now.
+	// Stop the upstream server first to prove we're not re-fetching.
+	ts.Close()
+
+	rr3 := httptest.NewRecorder()
+	req3, _ := http.NewRequest(http.MethodGet, nsNar, nil)
+	router.ServeHTTP(rr3, req3)
+
+	if rr3.Code != http.StatusOK {
+		t.Fatalf("NAR (cached): expected 200, got %d: %s", rr3.Code, rr3.Body.String())
+	}
+	if !bytes.Equal(rr3.Body.Bytes(), fixtureNar) {
+		t.Error("NAR (cached): body does not match expected content")
 	}
 }
 

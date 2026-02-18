@@ -97,7 +97,7 @@ func addIndexEntries(batch *pebble.Batch, name string, idx desync.Index, narRefs
 
 func (s *IndexStore) StoreIndex(name string, idx desync.Index) error {
 	batch := s.db.db.NewBatch()
-	defer batch.Close()
+	defer func() { _ = batch.Close() }()
 	if err := addIndexEntries(batch, name, idx, nil); err != nil {
 		return err
 	}
@@ -108,7 +108,7 @@ func (s *IndexStore) StoreIndex(name string, idx desync.Index) error {
 // narRefs are store path hashes referenced by this narinfo (for r/ entries).
 func (s *IndexStore) StoreIndexWithRefs(name string, idx desync.Index, narRefs []string) error {
 	batch := s.db.db.NewBatch()
-	defer batch.Close()
+	defer func() { _ = batch.Close() }()
 	if err := addIndexEntries(batch, name, idx, narRefs); err != nil {
 		return err
 	}

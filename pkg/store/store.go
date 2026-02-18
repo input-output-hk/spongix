@@ -98,7 +98,7 @@ func recoverMissingWAL(dir string, pOpts *pebble.Options) (*pebble.DB, error) {
 		if createErr != nil {
 			return nil, fmt.Errorf("creating WAL placeholder %s: %w (original: %v)", missing, createErr, err)
 		}
-		f.Close()
+		_ = f.Close()
 	}
 	return nil, fmt.Errorf("too many missing WAL files in %s", pOpts.WALDir)
 }

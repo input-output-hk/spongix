@@ -69,7 +69,7 @@ func pebbleDir(b *testing.B) string {
 		if err := os.MkdirAll(dir, 0o755); err != nil {
 			b.Fatal(err)
 		}
-		b.Cleanup(func() { os.RemoveAll(dir) })
+		b.Cleanup(func() { _ = os.RemoveAll(dir) })
 		return dir
 	}
 	return b.TempDir()
@@ -92,7 +92,7 @@ func benchProxyPebble(b *testing.B) *Proxy {
 	if err != nil {
 		b.Fatal(err)
 	}
-	b.Cleanup(func() { db.Close() })
+	b.Cleanup(func() { _ = db.Close() })
 	proxy := NewProxy(cfg)
 	proxy.pebbleDB = db
 	proxy.s3Store = store.NewChunkStore(db)
@@ -252,7 +252,7 @@ func BenchmarkInsertPebbleThreads(b *testing.B) {
 			if err != nil {
 				b.Fatal(err)
 			}
-			b.Cleanup(func() { db.Close() })
+			b.Cleanup(func() { _ = db.Close() })
 			proxy := NewProxy(cfg)
 			proxy.pebbleDB = db
 			proxy.s3Store = store.NewChunkStore(db)
@@ -313,7 +313,7 @@ func BenchmarkInsertPebbleBatching(b *testing.B) {
 			if err != nil {
 				b.Fatal(err)
 			}
-			b.Cleanup(func() { db.Close() })
+			b.Cleanup(func() { _ = db.Close() })
 			proxy := NewProxy(cfg)
 			proxy.pebbleDB = db
 			proxy.s3Store = store.NewChunkStore(db)
@@ -365,7 +365,7 @@ func BenchmarkPebbleTuning(b *testing.B) {
 						if err := os.MkdirAll(walPath, 0o755); err != nil {
 							b.Fatal(err)
 						}
-						b.Cleanup(func() { os.RemoveAll(walPath) })
+						b.Cleanup(func() { _ = os.RemoveAll(walPath) })
 					}
 					opts := &store.PebbleOptions{
 						MemTableSize:       mem,
@@ -386,7 +386,7 @@ func BenchmarkPebbleTuning(b *testing.B) {
 					if err != nil {
 						b.Fatal(err)
 					}
-					b.Cleanup(func() { db.Close() })
+					b.Cleanup(func() { _ = db.Close() })
 					proxy := NewProxy(cfg)
 					proxy.pebbleDB = db
 					proxy.s3Store = store.NewChunkStore(db)

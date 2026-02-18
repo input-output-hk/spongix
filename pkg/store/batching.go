@@ -134,7 +134,7 @@ func (b *BatchingChunkStore) CommitWithIndex(name string, idx desync.Index, narR
 	defer b.mu.Unlock()
 
 	batch := b.db.db.NewBatch()
-	defer batch.Close()
+	defer func() { _ = batch.Close() }()
 
 	if !b.flushed {
 		// Atomic path: write all buffered chunks + index entries in one batch.

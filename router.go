@@ -15,11 +15,11 @@ import (
 	"strings"
 	"time"
 
+	"encoding/json"
 	"github.com/andybalholm/brotli"
 	"github.com/folbricht/desync"
 	"github.com/gorilla/handlers"
 	"github.com/gorilla/mux"
-	"encoding/json"
 
 	"github.com/input-output-hk/spongix/pkg/compress"
 	"github.com/input-output-hk/spongix/pkg/store"
@@ -77,6 +77,22 @@ func (proxy *Proxy) router() *mux.Router {
 
 		namespace.HandleFunc(matchLog, proxy.largeHeadAndGet(logPrefix, mimeText)).Methods("HEAD", "GET")
 		namespace.HandleFunc(matchLog, proxy.largePut(logPrefix)).Methods("PUT")
+
+		// Registry routes: per-package flake tarball serving.
+		ns := proxy.config.Namespaces[name]
+		if proxy.pebbleDB != nil && ns.Registry != nil && ns.Registry.Enable {
+			f := namespace.PathPrefix("/f").Subrouter()
+			matchPkg := "/{owner:[a-zA-Z0-9_-]+}/{pkg:[a-zA-Z0-9_][a-zA-Z0-9._-]*}"
+			matchVer := matchPkg + "/{version:[0-9][0-9a-zA-Z.*_-]*}"
+
+			f.HandleFunc(matchVer+".tar.gz", proxy.registryFlakeTarball).Methods("GET")
+			f.HandleFunc(matchPkg+"/{version:\\*}.tar.gz", proxy.registryFlakeLatest).Methods("GET")
+			f.HandleFunc(matchVer, proxy.requireBearerToken(proxy.registryPut)).Methods("PUT")
+			f.HandleFunc(matchVer, proxy.requireBearerToken(proxy.registryDelete)).Methods("DELETE")
+			f.HandleFunc(matchVer, proxy.registryGet).Methods("GET")
+			f.HandleFunc(matchPkg, proxy.registryListVersions).Methods("GET")
+			f.HandleFunc("/{owner:[a-zA-Z0-9_-]+}", proxy.registryListPackages).Methods("GET")
+		}
 	}
 
 	// Pin API: disabled by default. When enabled, requires bearer token auth.
@@ -358,6 +374,101 @@ func (p *Proxy) proxyNarinfo(upstreamURL string, w http.ResponseWriter, r *http.
 	_, _ = w.Write(body)
 }
 
+// proxyNar handles NAR cache misses. It searches upstreams for the NAR,
+// trying compressed variants (.xz, .zst, .bz2, .br) when the uncompressed
+// URL isn't found. The NAR is decompressed, served to the client, and
+// simultaneously chunked and stored in the local cache.
+func (p *Proxy) proxyNar(location string, w http.ResponseWriter, r *http.Request) {
+	namespace, ok := mux.Vars(r)["namespace"]
+	if !ok {
+		serveNotFound(w, r)
+		return
+	}
+	ns, ok := p.config.Namespaces[namespace]
+	if !ok {
+		serveNotFound(w, r)
+		return
+	}
+
+	narPath := strings.TrimPrefix(r.URL.Path, "/"+namespace)
+	compressionExts := []string{"", ".xz", ".zst", ".bz2", ".br"}
+
+	for _, substituter := range ns.Substituters {
+		base, err := url.ParseRequestURI(substituter)
+		if err != nil {
+			p.log.Error("parsing substituter URL", zap.String("substituter", substituter), zap.Error(err))
+			continue
+		}
+
+		for _, ext := range compressionExts {
+			tryURL := *base
+			tryURL.Path = filepath.Join(base.Path, narPath+ext)
+			tryURLStr := tryURL.String()
+
+			headResp, err := p.httpHeadClient.Head(tryURLStr)
+			if err != nil {
+				continue
+			}
+			_ = headResp.Body.Close()
+			if headResp.StatusCode != http.StatusOK {
+				continue
+			}
+
+			// Found it. Download the body.
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+			defer cancel()
+
+			httpReq, err := http.NewRequestWithContext(ctx, "GET", tryURLStr, nil)
+			if err != nil {
+				p.log.Error("creating NAR proxy request", zap.Error(err))
+				continue
+			}
+			getResp, err := p.httpGetClient.Do(httpReq)
+			if err != nil {
+				p.log.Error("downloading NAR from upstream", zap.String("url", tryURLStr), zap.Error(err))
+				continue
+			}
+			defer func() { _ = getResp.Body.Close() }()
+			if getResp.StatusCode != http.StatusOK {
+				continue
+			}
+
+			// Decompress if needed.
+			var body io.Reader = getResp.Body
+			if ext != "" {
+				rc, err := decompressReader(ext, getResp.Body)
+				if err != nil {
+					p.log.Error("decompressing NAR", zap.String("ext", ext), zap.Error(err))
+					continue
+				}
+				defer func() { _ = rc.Close() }()
+				body = rc
+			}
+
+			buf, err := io.ReadAll(body)
+			if err != nil {
+				p.log.Error("reading NAR body", zap.String("url", tryURLStr), zap.Error(err))
+				serveNotFound(w, r)
+				return
+			}
+
+			// Chunk and store synchronously.
+			if err := p.insert(ctx, namespace, location, bytes.NewReader(buf)); err != nil {
+				p.log.Error("storing proxied NAR", zap.String("location", location), zap.Error(err))
+				// Still serve the NAR to the client even if storage fails.
+			}
+
+			w.Header().Set("Content-Type", mimeNar)
+			w.Header().Set(headerCache, headerCacheRemote)
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write(buf)
+			return
+		}
+	}
+
+	serveNotFound(w, r)
+}
+
 func (p *Proxy) largeHeadAndGet(prefix, mime string) func(w http.ResponseWriter, r *http.Request) {
 	return func(w http.ResponseWriter, r *http.Request) {
 		// NARs are stored decompressed. If the client requests a compressed
@@ -378,7 +489,11 @@ func (p *Proxy) largeHeadAndGet(prefix, mime string) func(w http.ResponseWriter,
 		} else if index, err := indices.GetIndex(location); err != nil {
 			if errors.Is(err, store.ErrIndexNotFound) {
 				metricRequests(namespace, prefix, "miss").Add(1)
-				p.redirectToUpstream(prefix, location, w, r)
+				if prefix == narPrefix {
+					p.proxyNar(location, w, r)
+				} else {
+					p.redirectToUpstream(prefix, location, w, r)
+				}
 			} else {
 				metricRequests(namespace, prefix, "error").Add(1)
 				p.log.Error("getting index", zap.String("index", location), zap.Error(err))
@@ -387,6 +502,7 @@ func (p *Proxy) largeHeadAndGet(prefix, mime string) func(w http.ResponseWriter,
 		} else {
 			metricRequests(namespace, prefix, "hit").Add(1)
 			w.Header().Set("Content-Type", mime)
+			w.Header().Set(headerCache, headerCacheHit)
 
 			// Narinfos may have been stored with Compression: xz/zst before
 			// we enforced uncompressed-only. Rewrite on the fly so clients

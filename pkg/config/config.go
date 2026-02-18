@@ -24,10 +24,10 @@ type Config struct {
 }
 
 type GC struct {
-	Interval         string `json:"interval"`            // Go duration, e.g. "24h"
-	RetentionPeriod  string `json:"retention_period"`     // Go duration, e.g. "720h"
-	MaxBytes         uint64 `json:"max_bytes"`            // 0 = no size limit
-	PinnedHashesFile string `json:"pinned_hashes_file"`   // one hash per line; missing file = no file pins
+	Interval         string `json:"interval"`           // Go duration, e.g. "24h"
+	RetentionPeriod  string `json:"retention_period"`   // Go duration, e.g. "720h"
+	MaxBytes         uint64 `json:"max_bytes"`          // 0 = no size limit
+	PinnedHashesFile string `json:"pinned_hashes_file"` // one hash per line; missing file = no file pins
 	DryRun           bool   `json:"dry_run"`
 }
 
@@ -53,11 +53,16 @@ func (c *Config) Prepare() error {
 }
 
 type Namespace struct {
-	Substituters      []string `json:"substituters"`
-	CacheInfoPriority uint64   `json:"cache_info_priority"`
-	S3                *S3      `json:"s3"`
+	Substituters      []string  `json:"substituters"`
+	CacheInfoPriority uint64    `json:"cache_info_priority"`
+	S3                *S3       `json:"s3"`
+	Registry          *Registry `json:"registry"`
 	// StoreType selects the index storage backend: "pebble" (default) or "s3".
 	StoreType string `json:"store_type"`
+}
+
+type Registry struct {
+	Enable bool `json:"enable"`
 }
 
 func (n *Namespace) Prepare() error {

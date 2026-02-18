@@ -8,6 +8,7 @@ var (
 		0.001, 0.005, 0.01, 0.05, 0.1, 0.5, 1, 5, 10)
 	metricCacheJobs       = metrics.Must1LabelCounter("spongix_cache_jobs_total", "result")
 	metricCacheJobsActive = metrics.MustInteger("spongix_cache_jobs_active", "Background cache jobs in flight")
+	metricRegistryOps     = metrics.Must2LabelCounter("spongix_registry_ops_total", "namespace", "op")
 )
 
 func init() {

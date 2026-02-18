@@ -2,6 +2,7 @@
   lib,
   buildGoModule,
   rev,
+  symlinkBin,
 }: let
   # TODO: split into multiple packages for each command.
   final = package "sha256-DNmG0Zhkr/NDye5IP52FbYwDyepXLvrivg2kcVFxehQ=";
@@ -28,6 +29,10 @@
           ./log_record.go
           ./main.go
           ./metrics.go
+          ./registry.go
+          ./registry_flake.go
+          ./registry_handlers.go
+          ./registry_test.go
           ./router.go
           ./router_test.go
         ];
@@ -40,6 +45,7 @@
         "-s"
         "-w"
         "-X main.buildVersion=${version} -X main.buildCommit=${rev}"
+        "-X main.symlinkBinStorePath=${symlinkBin}"
       ];
     };
 in

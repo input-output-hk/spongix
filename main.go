@@ -3,12 +3,14 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"log"
 	"net/http"
 	"net/url"
 	"os"
+	"os/exec"
 	"os/signal"
 	"path"
 	"strings"
@@ -157,6 +159,10 @@ func main() {
 		}
 	}()
 
+	// Bootstrap symlink binary in background. The HTTP server must be
+	// listening first so nix copy can push to it.
+	go proxy.bootstrapSymlinkBin()
+
 	<-sc
 	signal.Stop(sc)
 
@@ -206,6 +212,7 @@ type Proxy struct {
 	pebbleDB *store.DB
 
 	signingKey *signature.SecretKey // nil if no key configured
+	symlinkBin *SymlinkBin         // nil until bootstrap completes
 }
 
 func NewProxy(config *config.Config) *Proxy {
@@ -232,9 +239,18 @@ func NewProxy(config *config.Config) *Proxy {
 }
 
 var (
-	buildVersion = "dev"
-	buildCommit  = "dirty"
+	buildVersion        = "dev"
+	buildCommit         = "dirty"
+	symlinkBinStorePath = "" // set by ldflags: store path of the symlink binary
 )
+
+// SymlinkBin holds the resolved content-addressed paths for the symlink binary.
+// These are embedded into generated flake.nix templates.
+type SymlinkBin struct {
+	FromPath  string
+	ToPath    string
+	FromStore string
+}
 
 func (proxy *Proxy) Version() string {
 	return buildVersion + " (" + buildCommit + ")"
@@ -339,6 +355,81 @@ func (proxy *Proxy) defaultStoreOptions() desync.StoreOptions {
 		Timeout:    30 * time.Second,
 		ErrorRetry: 1,
 	}
+}
+
+// bootstrapSymlinkBin makes the symlink binary content-addressed and pushes it
+// to registry-enabled namespaces. Must be called after the HTTP server is listening
+// so that nix copy can reach the local endpoint.
+func (proxy *Proxy) bootstrapSymlinkBin() {
+	if symlinkBinStorePath == "" {
+		proxy.log.Warn("symlinkBinStorePath not set, registry flakes will not work")
+		return
+	}
+
+	// Check if any namespace has registry enabled.
+	hasRegistry := false
+	for _, ns := range proxy.config.Namespaces {
+		if ns.Registry != nil && ns.Registry.Enable {
+			hasRegistry = true
+			break
+		}
+	}
+	if !hasRegistry {
+		return
+	}
+
+	proxy.log.Info("bootstrapping symlink binary", zap.String("storePath", symlinkBinStorePath))
+
+	// 1. Make content-addressed.
+	cmd := exec.Command("nix", "store", "make-content-addressed", "--json", symlinkBinStorePath)
+	out, err := cmd.Output()
+	if err != nil {
+		proxy.log.Error("make-content-addressed failed", zap.Error(err), zap.String("path", symlinkBinStorePath))
+		return
+	}
+
+	var caResult struct {
+		Rewrites map[string]string `json:"rewrites"`
+	}
+	if err := json.Unmarshal(out, &caResult); err != nil {
+		proxy.log.Error("parsing make-content-addressed output", zap.Error(err))
+		return
+	}
+
+	toPath, ok := caResult.Rewrites[symlinkBinStorePath]
+	if !ok {
+		proxy.log.Error("symlink binary not found in make-content-addressed rewrites")
+		return
+	}
+
+	// 2. Push the input-addressed path (fromPath) to each registry-enabled namespace.
+	// fetchClosure fetches the fromPath hash, so that's what the cache needs.
+	for name, ns := range proxy.config.Namespaces {
+		if ns.Registry == nil || !ns.Registry.Enable {
+			continue
+		}
+		storeURL := fmt.Sprintf("http://localhost%s/%s?compression=none", proxy.config.Listen, name)
+		copyCmd := exec.Command("nix", "copy", "--to", storeURL, symlinkBinStorePath)
+		if copyOut, err := copyCmd.CombinedOutput(); err != nil {
+			proxy.log.Error("pushing symlink binary to namespace",
+				zap.String("namespace", name),
+				zap.Error(err),
+				zap.String("output", string(copyOut)),
+			)
+		} else {
+			proxy.log.Info("symlink binary pushed to namespace", zap.String("namespace", name))
+		}
+	}
+
+	proxy.symlinkBin = &SymlinkBin{
+		FromPath: symlinkBinStorePath,
+		ToPath:   toPath,
+		// FromStore is set per-namespace when rendering templates.
+	}
+	proxy.log.Info("symlink binary bootstrap complete",
+		zap.String("fromPath", symlinkBinStorePath),
+		zap.String("toPath", toPath),
+	)
 }
 
 func (proxy *Proxy) setupLogger() {

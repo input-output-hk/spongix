@@ -24,8 +24,11 @@
         ...
       }: {
         packages = {
+          symlink = pkgs.callPackage ./symlink.nix {};
+
           spongix = pkgs.callPackage ./package.nix {
             rev = inputs.self.rev or "dirty";
+            symlinkBin = self'.packages.symlink;
           };
 
           default = self'.packages.spongix;

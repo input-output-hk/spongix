@@ -87,7 +87,7 @@ func TestMetricsRequestMiss(t *testing.T) {
 
 func TestMetricsRequestError(t *testing.T) {
 	proxy := testProxy(t)
-	proxy.s3Indices[testNamespace] = &errorFakeIndex{
+	proxy.indexStores[testNamespace] = &errorFakeIndex{
 		fakeIndex: newFakeIndex(),
 		getError:  errors.New("test error"),
 	}
@@ -147,7 +147,7 @@ func TestMetricsDuration(t *testing.T) {
 func TestMetricsCacheJobSuccess(t *testing.T) {
 	proxy := testProxy(t)
 	fakeIdx := newFakeIndex()
-	proxy.s3Indices[testNamespace] = fakeIdx
+	proxy.indexStores[testNamespace] = fakeIdx
 
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
@@ -190,7 +190,7 @@ func TestMetricsCacheJobError(t *testing.T) {
 func TestMetricsCacheJobsActive(t *testing.T) {
 	proxy := testProxy(t)
 	fakeIdx := newFakeIndex()
-	proxy.s3Indices[testNamespace] = fakeIdx
+	proxy.indexStores[testNamespace] = fakeIdx
 
 	started := make(chan struct{})
 	release := make(chan struct{})

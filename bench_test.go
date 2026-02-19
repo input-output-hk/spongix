@@ -40,8 +40,8 @@ func benchProxy(b *testing.B) *Proxy {
 		b.Fatal(err)
 	}
 	proxy := NewProxy(cfg)
-	proxy.s3Store = newFakeStore()
-	proxy.s3Indices = map[string]desync.IndexWriteStore{benchNamespace: newFakeIndex()}
+	proxy.chunkStore = newFakeStore()
+	proxy.indexStores = map[string]desync.IndexWriteStore{benchNamespace: newFakeIndex()}
 	proxy.log = zap.NewNop()
 	return proxy
 }
@@ -56,8 +56,8 @@ func benchProxyDiscard(b *testing.B) *Proxy {
 		b.Fatal(err)
 	}
 	proxy := NewProxy(cfg)
-	proxy.s3Store = discardStore{}
-	proxy.s3Indices = map[string]desync.IndexWriteStore{benchNamespace: newFakeIndex()}
+	proxy.chunkStore = discardStore{}
+	proxy.indexStores = map[string]desync.IndexWriteStore{benchNamespace: newFakeIndex()}
 	proxy.log = zap.NewNop()
 	return proxy
 }
@@ -95,8 +95,8 @@ func benchProxyPebble(b *testing.B) *Proxy {
 	b.Cleanup(func() { _ = db.Close() })
 	proxy := NewProxy(cfg)
 	proxy.pebbleDB = db
-	proxy.s3Store = store.NewChunkStore(db)
-	proxy.s3Indices = map[string]desync.IndexWriteStore{benchNamespace: store.NewIndexStore(db, benchNamespace)}
+	proxy.chunkStore = store.NewChunkStore(db)
+	proxy.indexStores = map[string]desync.IndexWriteStore{benchNamespace: store.NewIndexStore(db, benchNamespace)}
 	proxy.log = zap.NewNop()
 	return proxy
 }
@@ -167,8 +167,8 @@ func BenchmarkInsertThreads(b *testing.B) {
 				b.Fatal(err)
 			}
 			proxy := NewProxy(cfg)
-			proxy.s3Store = discardStore{}
-			proxy.s3Indices = map[string]desync.IndexWriteStore{benchNamespace: newFakeIndex()}
+			proxy.chunkStore = discardStore{}
+			proxy.indexStores = map[string]desync.IndexWriteStore{benchNamespace: newFakeIndex()}
 			proxy.log = zap.NewNop()
 			b.SetBytes(size)
 			b.ResetTimer()
@@ -196,8 +196,8 @@ func BenchmarkInsertChunkSize(b *testing.B) {
 				b.Fatal(err)
 			}
 			proxy := NewProxy(cfg)
-			proxy.s3Store = discardStore{}
-			proxy.s3Indices = map[string]desync.IndexWriteStore{benchNamespace: newFakeIndex()}
+			proxy.chunkStore = discardStore{}
+			proxy.indexStores = map[string]desync.IndexWriteStore{benchNamespace: newFakeIndex()}
 			proxy.log = zap.NewNop()
 			b.SetBytes(size)
 			b.ResetTimer()
@@ -255,8 +255,8 @@ func BenchmarkInsertPebbleThreads(b *testing.B) {
 			b.Cleanup(func() { _ = db.Close() })
 			proxy := NewProxy(cfg)
 			proxy.pebbleDB = db
-			proxy.s3Store = store.NewChunkStore(db)
-			proxy.s3Indices = map[string]desync.IndexWriteStore{benchNamespace: store.NewIndexStore(db, benchNamespace)}
+			proxy.chunkStore = store.NewChunkStore(db)
+			proxy.indexStores = map[string]desync.IndexWriteStore{benchNamespace: store.NewIndexStore(db, benchNamespace)}
 			proxy.log = zap.NewNop()
 			b.SetBytes(size)
 			b.ResetTimer()
@@ -316,8 +316,8 @@ func BenchmarkInsertPebbleBatching(b *testing.B) {
 			b.Cleanup(func() { _ = db.Close() })
 			proxy := NewProxy(cfg)
 			proxy.pebbleDB = db
-			proxy.s3Store = store.NewChunkStore(db)
-			proxy.s3Indices = map[string]desync.IndexWriteStore{benchNamespace: store.NewIndexStore(db, benchNamespace)}
+			proxy.chunkStore = store.NewChunkStore(db)
+			proxy.indexStores = map[string]desync.IndexWriteStore{benchNamespace: store.NewIndexStore(db, benchNamespace)}
 			proxy.log = zap.NewNop()
 			b.SetBytes(int64(size))
 			b.ResetTimer()
@@ -389,8 +389,8 @@ func BenchmarkPebbleTuning(b *testing.B) {
 					b.Cleanup(func() { _ = db.Close() })
 					proxy := NewProxy(cfg)
 					proxy.pebbleDB = db
-					proxy.s3Store = store.NewChunkStore(db)
-					proxy.s3Indices = map[string]desync.IndexWriteStore{benchNamespace: store.NewIndexStore(db, benchNamespace)}
+					proxy.chunkStore = store.NewChunkStore(db)
+					proxy.indexStores = map[string]desync.IndexWriteStore{benchNamespace: store.NewIndexStore(db, benchNamespace)}
 					proxy.log = zap.NewNop()
 					b.SetBytes(size)
 					b.ResetTimer()

@@ -198,8 +198,8 @@ func main() {
 type Proxy struct {
 	config *config.Config
 
-	s3Store   desync.WriteStore
-	s3Indices map[string]desync.IndexWriteStore
+	chunkStore   desync.WriteStore
+	indexStores map[string]desync.IndexWriteStore
 
 	log       *zap.Logger
 	headPool  *pond.WorkerPool
@@ -232,7 +232,7 @@ func NewProxy(config *config.Config) *Proxy {
 		log:            devLog,
 		headPool:       pond.New(10, 1000),
 		cachePool:      pond.New(10, 1000),
-		s3Indices:      map[string]desync.IndexWriteStore{},
+		indexStores:      map[string]desync.IndexWriteStore{},
 		httpHeadClient: httpHeadClient,
 		httpGetClient:  httpGetClient,
 	}
@@ -273,7 +273,7 @@ func (proxy *Proxy) setupChunks() {
 			proxy.log.Fatal("couldn't parse S3 URL", zap.Error(err), zap.String("url", s3.Url))
 		}
 
-		s3Store, err := desync.NewS3Store(
+		chunkStore, err := desync.NewS3Store(
 			s3Url,
 			mkCredentials(s3),
 			s3.Region,
@@ -287,7 +287,7 @@ func (proxy *Proxy) setupChunks() {
 			)
 		}
 
-		proxy.s3Store = s3Store
+		proxy.chunkStore = chunkStore
 
 	case "pebble":
 		opts := &store.PebbleOptions{
@@ -303,7 +303,7 @@ func (proxy *Proxy) setupChunks() {
 			)
 		}
 		proxy.pebbleDB = db
-		proxy.s3Store = store.NewChunkStore(db)
+		proxy.chunkStore = store.NewChunkStore(db)
 	}
 }
 
@@ -332,7 +332,7 @@ func (proxy *Proxy) setupIndices() {
 				)
 			}
 
-			proxy.s3Indices[namespace] = store.WrapS3IndexStore(index)
+			proxy.indexStores[namespace] = store.WrapS3IndexStore(index)
 
 		case "pebble":
 			if proxy.pebbleDB == nil {
@@ -340,7 +340,7 @@ func (proxy *Proxy) setupIndices() {
 					zap.String("namespace", namespace),
 				)
 			}
-			proxy.s3Indices[namespace] = store.NewIndexStore(proxy.pebbleDB, namespace)
+			proxy.indexStores[namespace] = store.NewIndexStore(proxy.pebbleDB, namespace)
 		}
 	}
 }

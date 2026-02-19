@@ -484,7 +484,7 @@ func (p *Proxy) largeHeadAndGet(prefix, mime string) func(w http.ResponseWriter,
 		namespace := mux.Vars(r)["namespace"]
 		defer metricRequestDuration(namespace, prefix).AddSince(start)
 
-		if indices, ok := p.s3Indices[namespace]; !ok {
+		if indices, ok := p.indexStores[namespace]; !ok {
 			serveNotFound(w, r)
 		} else if index, err := indices.GetIndex(location); err != nil {
 			if errors.Is(err, store.ErrIndexNotFound) {
@@ -508,7 +508,7 @@ func (p *Proxy) largeHeadAndGet(prefix, mime string) func(w http.ResponseWriter,
 			// we enforced uncompressed-only. Rewrite on the fly so clients
 			// get URLs pointing to plain .nar files.
 			if prefix == narinfoPrefix {
-				rd := desync.NewIndexReadSeeker(index, p.s3Store)
+				rd := desync.NewIndexReadSeeker(index, p.chunkStore)
 				body, err := io.ReadAll(rd)
 				if err != nil {
 					p.log.Error("reading narinfo", zap.String("index", location), zap.Error(err))
@@ -523,7 +523,7 @@ func (p *Proxy) largeHeadAndGet(prefix, mime string) func(w http.ResponseWriter,
 				}
 				http.ServeContent(w, r, r.URL.Path, time.Now(), bytes.NewReader(body))
 			} else {
-				rd := desync.NewIndexReadSeeker(index, p.s3Store)
+				rd := desync.NewIndexReadSeeker(index, p.chunkStore)
 				http.ServeContent(w, r, r.URL.Path, time.Now(), rd)
 			}
 		}
@@ -561,7 +561,7 @@ func (p *Proxy) largePut(prefix string) func(w http.ResponseWriter, r *http.Requ
 }
 
 func (p *Proxy) insert(ctx context.Context, namespace, location string, body io.Reader) error {
-	indices, ok := p.s3Indices[namespace]
+	indices, ok := p.indexStores[namespace]
 	if !ok {
 		return fmt.Errorf("namespace '%s' not found", namespace)
 	}
@@ -601,7 +601,7 @@ func (p *Proxy) insert(ctx context.Context, namespace, location string, body io.
 	}
 
 	// S3 path: unchanged
-	index, err := desync.ChunkStream(ctx, chunker, p.s3Store, p.config.Chunks.Threads)
+	index, err := desync.ChunkStream(ctx, chunker, p.chunkStore, p.config.Chunks.Threads)
 	if err != nil {
 		return fmt.Errorf("failed chunking: %w", err)
 	}

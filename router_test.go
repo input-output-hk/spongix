@@ -176,8 +176,8 @@ func testProxy(t *testing.T) *Proxy {
 	a.So(proxy.config.Prepare(), assertions.ShouldBeNil)
 
 	// proxy.setupDesync()
-	proxy.s3Store = newFakeStore()
-	proxy.s3Indices = map[string]desync.IndexWriteStore{testNamespace: newFakeIndex()}
+	proxy.chunkStore = newFakeStore()
+	proxy.indexStores = map[string]desync.IndexWriteStore{testNamespace: newFakeIndex()}
 
 	// proxy.setupKeys()
 
@@ -526,7 +526,7 @@ func realisationMatches(t *testing.T, expectedBody []byte) func(*http.Response, 
 func TestS3ErrorsMaskedAs404(t *testing.T) {
 	proxy := testProxy(t)
 	// Replace the index for test namespace with an errorFakeIndex that returns "connection refused"
-	proxy.s3Indices[testNamespace] = &errorFakeIndex{
+	proxy.indexStores[testNamespace] = &errorFakeIndex{
 		fakeIndex: newFakeIndex(),
 		getError:  errors.New("connection refused"),
 	}
@@ -546,7 +546,7 @@ func TestS3ErrorsMaskedAs404(t *testing.T) {
 func TestDoCacheTimeout(t *testing.T) {
 	proxy := testProxy(t)
 	fakeIdx := newFakeIndex()
-	proxy.s3Indices[testNamespace] = fakeIdx
+	proxy.indexStores[testNamespace] = fakeIdx
 
 	// Serve 1MB body slowly: write in chunks with delays, so the full read
 	// takes ~12s — well within the 5min context timeout in doCache.
@@ -605,7 +605,7 @@ func TestTrySubmitDropsJobsUnderLoad(t *testing.T) {
 	proxy.cachePool = pond.New(1, 1)
 
 	fakeIdx := newFakeIndex()
-	proxy.s3Indices[testNamespace] = fakeIdx
+	proxy.indexStores[testNamespace] = fakeIdx
 
 	// Fill the pool completely
 	blocker := make(chan struct{})

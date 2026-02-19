@@ -557,13 +557,15 @@ func (proxy *Proxy) doCache(req *cacheRequest) {
 	}
 }
 
-// extractBaseURL returns the scheme + host from a URL string.
+// extractBaseURL returns the base URL from a narinfo URL, preserving any path
+// prefix by stripping only the filename component (path.Dir).
 func extractBaseURL(u string) string {
 	parsed, err := url.Parse(u)
 	if err != nil {
 		return ""
 	}
-	return parsed.Scheme + "://" + parsed.Host
+	parsed.Path = path.Dir(parsed.Path)
+	return parsed.String()
 }
 
 // narExtFromURL returns the compression extension from a NAR URL path.

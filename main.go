@@ -151,6 +151,15 @@ func main() {
 		syscall.SIGTERM,
 	)
 
+	if proxy.config.PProfListen != "" {
+		go func() {
+			proxy.log.Info("pprof listening", zap.String("listen", proxy.config.PProfListen))
+			if err := http.ListenAndServe(proxy.config.PProfListen, nil); err != nil {
+				proxy.log.Error("pprof listener failed", zap.Error(err))
+			}
+		}()
+	}
+
 	go func() {
 		proxy.log.Info("Server starting", zap.String("listen", proxy.config.Listen))
 		if err := srv.ListenAndServe(); err != http.ErrServerClosed {

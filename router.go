@@ -60,7 +60,6 @@ func (proxy *Proxy) router() *mux.Router {
 	r.Use(compress.CompressHandler)
 
 	r.HandleFunc("/metrics", metrics.ServeHTTP)
-	r.PathPrefix("/debug/pprof/").Handler(http.DefaultServeMux)
 
 	for name := range proxy.config.Namespaces {
 		namespace := r.Name("namespace").PathPrefix("/{namespace:" + name + "}").Subrouter()

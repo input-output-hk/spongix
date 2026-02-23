@@ -14,6 +14,7 @@ type CLI struct {
 
 type Config struct {
 	Listen         string                `json:"listen"`
+	PProfListen    string                `json:"pprof_listen"` // e.g. "127.0.0.1:6060"; empty = disabled
 	LogLevel       string                `json:"log_level"`
 	LogMode        string                `json:"log_mode"`
 	SigningKeyFile string                `json:"signing_key_file"`

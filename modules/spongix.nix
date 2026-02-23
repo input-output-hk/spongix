@@ -42,6 +42,7 @@
 
   configFile = builtins.toFile "spongix.json" (builtins.toJSON ({
       listen = "${cfg.host}:${builtins.toString cfg.port}";
+      pprof_listen = cfg.pprofListen;
       log_level = cfg.logLevel;
       log_mode = cfg.logMode;
       namespaces = builtins.mapAttrs mapNamespace cfg.namespaces;
@@ -240,6 +241,17 @@ in {
         default = 7745;
         description = ''
           Listen on this port.
+        '';
+      };
+
+      pprofListen = lib.mkOption {
+        type = lib.types.str;
+        default = "";
+        example = "127.0.0.1:6060";
+        description = ''
+          Address for the pprof debug HTTP server (goroutine dumps, heap
+          profiles). Empty string disables it. Should always be a loopback
+          address; access remotely via SSH port forwarding.
         '';
       };
 

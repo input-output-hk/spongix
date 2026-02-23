@@ -8,6 +8,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	_ "net/http/pprof"
 	"net/url"
 	"os"
 	"os/exec"
@@ -147,7 +148,6 @@ func main() {
 		sc,
 		syscall.SIGHUP,
 		syscall.SIGINT,
-		syscall.SIGQUIT,
 		syscall.SIGTERM,
 	)
 

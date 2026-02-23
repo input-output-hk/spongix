@@ -60,6 +60,7 @@ func (proxy *Proxy) router() *mux.Router {
 	r.Use(compress.CompressHandler)
 
 	r.HandleFunc("/metrics", metrics.ServeHTTP)
+	r.PathPrefix("/debug/pprof/").Handler(http.DefaultServeMux)
 
 	for name := range proxy.config.Namespaces {
 		namespace := r.Name("namespace").PathPrefix("/{namespace:" + name + "}").Subrouter()
@@ -311,16 +312,9 @@ func (p *Proxy) redirectToUpstream(prefix, location string, w http.ResponseWrite
 
 		select {
 		case found := <-first:
-			go func() {
-				defer func() {
-					if r := recover(); r != nil {
-						p.log.Warn("cache pool closed, dropping cache job", zap.String("url", found))
-					}
-				}()
-				p.cachePool.Submit(func() {
-					p.doCache(&cacheRequest{namespace: namespace, url: found, location: location, ext: mux.Vars(r)["ext"]})
-				})
-			}()
+			p.cachePool.TrySubmit(func() {
+				p.doCache(&cacheRequest{namespace: namespace, url: found, location: location, ext: mux.Vars(r)["ext"]})
+			})
 
 			// Narinfos must be proxied so we can rewrite compression
 			// fields before the client sees them. Other content types

@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"reflect"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -588,7 +589,6 @@ func TestDoCacheTimeout(t *testing.T) {
 }
 
 func TestTrySubmitDropsJobsUnderLoad(t *testing.T) {
-	// Use a real test server so doCache can actually download the narinfo
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if strings.HasSuffix(r.URL.Path, ".narinfo") {
 			w.Header().Set("Content-Type", mimeNarinfo)
@@ -607,15 +607,15 @@ func TestTrySubmitDropsJobsUnderLoad(t *testing.T) {
 	fakeIdx := newFakeIndex()
 	proxy.indexStores[testNamespace] = fakeIdx
 
-	// Fill the pool completely
+	// Fill the pool completely: 1 worker blocked + 1 queue slot filled.
 	blocker := make(chan struct{})
 	proxy.cachePool.Submit(func() { <-blocker })    // blocks the only worker
 	proxy.cachePool.TrySubmit(func() { <-blocker }) // fills the queue
+	defer close(blocker)
 
-	// GET request triggers proxy + background cache job submission.
-	// With the fix (go Submit instead of TrySubmit), the job blocks until
-	// pool capacity is available rather than being silently dropped.
-	// Narinfos are proxied (not redirected) so we get 200 with rewritten content.
+	// GET request triggers proxy + background TrySubmit.
+	// Pool is saturated so TrySubmit returns false and the cache job is dropped.
+	// The client still receives 200 with the proxied narinfo.
 	req, _ := http.NewRequest(http.MethodGet, nsNarinfo, nil)
 	rr := httptest.NewRecorder()
 	proxy.router().ServeHTTP(rr, req)
@@ -624,14 +624,63 @@ func TestTrySubmitDropsJobsUnderLoad(t *testing.T) {
 		t.Fatalf("expected 200, got %d", rr.Code)
 	}
 
-	// Unblock pool workers, then wait for the cache job to complete
-	close(blocker)
-	time.Sleep(100 * time.Millisecond) // allow background goroutine to submit
-	proxy.cachePool.StopAndWait()
+	time.Sleep(50 * time.Millisecond)
 
 	_, err := fakeIdx.GetIndex("indices/narinfo/hyhr/hyhrnrnpsz9fw5p9dk85a58y31ink18c")
-	if err != nil {
-		t.Errorf("expected cache job to store the index, but it was lost: %v", err)
+	if err == nil {
+		t.Error("expected cache job to be dropped under load, but index was stored")
+	}
+}
+
+// TestCacheSubmitDoesNotLeakGoroutine verifies that when the cachePool is
+// saturated, no goroutine is left blocking on pool.Submit. With the old code
+// (go func() { cachePool.Submit(...) }()), the goroutine blocked indefinitely
+// until pool capacity was available. The fix is to use cachePool.TrySubmit,
+// which drops the job but never leaks a goroutine.
+func TestCacheSubmitDoesNotLeakGoroutine(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, ".narinfo") {
+			w.Header().Set("Content-Type", mimeNarinfo)
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(fixtureNarinfoNone))
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer ts.Close()
+
+	proxy := testProxy(t)
+	proxy.config.Namespaces[testNamespace].Substituters = []string{ts.URL}
+	// 1 worker, 0 queue: pool is at capacity as soon as the single worker is busy.
+	proxy.cachePool = pond.New(1, 0)
+	blocker := make(chan struct{})
+	proxy.cachePool.Submit(func() { <-blocker })
+	defer close(blocker)
+
+	// GET request finds narinfo upstream and attempts a background cache job.
+	// With blocking Submit the goroutine stays alive until the pool drains.
+	// With TrySubmit the goroutine exits immediately (job dropped, no leak).
+	req, _ := http.NewRequest(http.MethodGet, nsNarinfo, nil)
+	rr := httptest.NewRecorder()
+	proxy.router().ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", rr.Code)
+	}
+
+	// Close idle HTTP connections so their goroutines don't appear in the dump.
+	proxy.httpHeadClient.CloseIdleConnections()
+	proxy.httpGetClient.CloseIdleConnections()
+	runtime.Gosched()
+	time.Sleep(50 * time.Millisecond)
+
+	// A goroutine blocked inside pond.Submit (channel send) is the leak.
+	// With TrySubmit there is no blocking call so this string never appears.
+	buf := make([]byte, 1<<20)
+	n := runtime.Stack(buf, true)
+	dump := string(buf[:n])
+	if strings.Contains(dump, "pond.(*WorkerPool).Submit") {
+		t.Errorf("goroutine blocking on cachePool.Submit (pool is full):\n%s", dump)
 	}
 }
 

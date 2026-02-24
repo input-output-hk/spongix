@@ -8,16 +8,11 @@ import (
 )
 
 var flakeTemplate = template.Must(template.New("flake.nix").Parse(`{
-  outputs = { ... }: let
-    symlinkBin = builtins.fetchClosure {
-      fromPath = "{{ .SymlinkBin.FromPath }}";
-      toPath = "{{ .SymlinkBin.ToPath }}";
-      fromStore = "{{ .SymlinkBin.FromStore }}";
-    };
+  outputs = { self, ... }: let
     symlinkPath = { name, system, path, ... }@args:
       (derivation {
         inherit name system;
-        builder = "''${symlinkBin}/bin/symlink";
+        builder = "${self}/bin/symlink";
         args = [path (placeholder "out")];
         pathToLink = path;
       }) // args;
@@ -42,20 +37,18 @@ var flakeTemplate = template.Must(template.New("flake.nix").Parse(`{
 `))
 
 type flakeData struct {
-	Name       string
-	Version    string
-	Entries    []*store.RegistryEntry
-	SymlinkBin SymlinkBin
+	Name    string
+	Version string
+	Entries []*store.RegistryEntry
 }
 
 // renderFlakeNix renders a flake.nix for the given package version entries.
-func renderFlakeNix(name, version string, entries []*store.RegistryEntry, sb SymlinkBin) ([]byte, error) {
+func renderFlakeNix(name, version string, entries []*store.RegistryEntry) ([]byte, error) {
 	var buf bytes.Buffer
 	err := flakeTemplate.Execute(&buf, flakeData{
-		Name:       name,
-		Version:    version,
-		Entries:    entries,
-		SymlinkBin: sb,
+		Name:    name,
+		Version: version,
+		Entries: entries,
 	})
 	if err != nil {
 		return nil, err

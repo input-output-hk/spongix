@@ -3,7 +3,6 @@ package main
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"fmt"
 	"io"
 	"log"
@@ -11,9 +10,9 @@ import (
 	_ "net/http/pprof"
 	"net/url"
 	"os"
-	"os/exec"
 	"os/signal"
 	"path"
+	"path/filepath"
 	"strings"
 	"syscall"
 	"time"
@@ -168,9 +167,8 @@ func main() {
 		}
 	}()
 
-	// Bootstrap symlink binary in background. The HTTP server must be
-	// listening first so nix copy can push to it.
-	go proxy.bootstrapSymlinkBin()
+	// Load symlink binary for registry tarballs (if configured).
+	proxy.loadSymlinkBin()
 
 	<-sc
 	signal.Stop(sc)
@@ -180,7 +178,7 @@ func main() {
 	defer cancel()
 
 	if err := srv.Shutdown(ctxShutDown); err != nil {
-		proxy.log.Fatal("server shutdown failed", zap.Error(err))
+		proxy.log.Error("server shutdown error", zap.Error(err))
 	}
 
 	// Stop GC ticker before draining pools.
@@ -194,8 +192,13 @@ func main() {
 	proxy.cachePool.StopAndWait()
 	proxy.headPool.StopAndWait()
 
-	// Close Pebble DB if any
+	// Flush Pebble memtable to SSTables, then close.
+	// Critical when WAL is on tmpfs: unflushed memtable data is lost
+	// once the tmpfs is wiped on restart.
 	if proxy.pebbleDB != nil {
+		if err := proxy.pebbleDB.Flush(); err != nil {
+			proxy.log.Error("flushing pebble db", zap.Error(err))
+		}
 		if err := proxy.pebbleDB.Close(); err != nil {
 			proxy.log.Error("closing pebble db", zap.Error(err))
 		}
@@ -220,8 +223,8 @@ type Proxy struct {
 	// pebbleDB is the shared Pebble database for chunks and indices.
 	pebbleDB *store.DB
 
-	signingKey *signature.SecretKey // nil if no key configured
-	symlinkBin *SymlinkBin         // nil until bootstrap completes
+	signingKey     *signature.SecretKey // nil if no key configured
+	symlinkBinData []byte              // raw symlink binary for registry tarballs
 }
 
 func NewProxy(config *config.Config) *Proxy {
@@ -252,14 +255,6 @@ var (
 	buildCommit         = "dirty"
 	symlinkBinStorePath = "" // set by ldflags: store path of the symlink binary
 )
-
-// SymlinkBin holds the resolved content-addressed paths for the symlink binary.
-// These are embedded into generated flake.nix templates.
-type SymlinkBin struct {
-	FromPath  string
-	ToPath    string
-	FromStore string
-}
 
 func (proxy *Proxy) Version() string {
 	return buildVersion + " (" + buildCommit + ")"
@@ -370,10 +365,10 @@ func (proxy *Proxy) defaultStoreOptions() desync.StoreOptions {
 	}
 }
 
-// bootstrapSymlinkBin makes the symlink binary content-addressed and pushes it
-// to registry-enabled namespaces. Must be called after the HTTP server is listening
-// so that nix copy can reach the local endpoint.
-func (proxy *Proxy) bootstrapSymlinkBin() {
+// loadSymlinkBin reads the symlink binary from the Nix store path (injected
+// via ldflags at build time) and caches it in memory. The binary is included
+// directly in registry tarballs so clients don't need a separate fetchClosure.
+func (proxy *Proxy) loadSymlinkBin() {
 	if symlinkBinStorePath == "" {
 		proxy.log.Warn("symlinkBinStorePath not set, registry flakes will not work")
 		return
@@ -391,57 +386,16 @@ func (proxy *Proxy) bootstrapSymlinkBin() {
 		return
 	}
 
-	proxy.log.Info("bootstrapping symlink binary", zap.String("storePath", symlinkBinStorePath))
-
-	// 1. Make content-addressed.
-	cmd := exec.Command("nix", "store", "make-content-addressed", "--json", symlinkBinStorePath)
-	out, err := cmd.Output()
+	binPath := filepath.Join(symlinkBinStorePath, "bin", "symlink")
+	data, err := os.ReadFile(binPath)
 	if err != nil {
-		proxy.log.Error("make-content-addressed failed", zap.Error(err), zap.String("path", symlinkBinStorePath))
-		return
+		proxy.log.Fatal("reading symlink binary", zap.Error(err), zap.String("path", binPath))
 	}
 
-	var caResult struct {
-		Rewrites map[string]string `json:"rewrites"`
-	}
-	if err := json.Unmarshal(out, &caResult); err != nil {
-		proxy.log.Error("parsing make-content-addressed output", zap.Error(err))
-		return
-	}
-
-	toPath, ok := caResult.Rewrites[symlinkBinStorePath]
-	if !ok {
-		proxy.log.Error("symlink binary not found in make-content-addressed rewrites")
-		return
-	}
-
-	// 2. Push the input-addressed path (fromPath) to each registry-enabled namespace.
-	// fetchClosure fetches the fromPath hash, so that's what the cache needs.
-	for name, ns := range proxy.config.Namespaces {
-		if ns.Registry == nil || !ns.Registry.Enable {
-			continue
-		}
-		storeURL := fmt.Sprintf("http://localhost%s/%s?compression=none", proxy.config.Listen, name)
-		copyCmd := exec.Command("nix", "copy", "--to", storeURL, symlinkBinStorePath)
-		if copyOut, err := copyCmd.CombinedOutput(); err != nil {
-			proxy.log.Error("pushing symlink binary to namespace",
-				zap.String("namespace", name),
-				zap.Error(err),
-				zap.String("output", string(copyOut)),
-			)
-		} else {
-			proxy.log.Info("symlink binary pushed to namespace", zap.String("namespace", name))
-		}
-	}
-
-	proxy.symlinkBin = &SymlinkBin{
-		FromPath: symlinkBinStorePath,
-		ToPath:   toPath,
-		// FromStore is set per-namespace when rendering templates.
-	}
-	proxy.log.Info("symlink binary bootstrap complete",
-		zap.String("fromPath", symlinkBinStorePath),
-		zap.String("toPath", toPath),
+	proxy.symlinkBinData = data
+	proxy.log.Info("loaded symlink binary",
+		zap.String("path", binPath),
+		zap.Int("size", len(data)),
 	)
 }
 

@@ -458,6 +458,7 @@ in {
         }
         // lib.optionalAttrs (lib.hasPrefix "/run/spongix" cfg.chunks.pebbleWALDir) {
           RuntimeDirectory = lib.removePrefix "/run/" cfg.chunks.pebbleWALDir;
+          RuntimeDirectoryPreserve = true;
         };
     };
   };

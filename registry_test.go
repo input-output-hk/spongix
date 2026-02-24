@@ -50,11 +50,7 @@ func testRegistryProxy(t *testing.T) *Proxy {
 		pebbleDB:       db,
 		httpHeadClient: &http.Client{},
 		httpGetClient:  &http.Client{},
-		symlinkBin: &SymlinkBin{
-			FromPath:  "/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa1-spongix-symlink-0.1.0",
-			ToPath:    "/nix/store/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb2-spongix-symlink-0.1.0",
-			FromStore: "", // set dynamically per request
-		},
+		symlinkBinData: []byte("fake-symlink-binary"),
 	}
 
 	if err := proxy.config.Prepare(); err != nil {
@@ -138,10 +134,7 @@ func TestRegistryPutNoPinAPI(t *testing.T) {
 		pebbleDB:       db,
 		httpHeadClient: &http.Client{},
 		httpGetClient:  &http.Client{},
-		symlinkBin: &SymlinkBin{
-			FromPath:  "/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa1-spongix-symlink-0.1.0",
-			ToPath:    "/nix/store/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb2-spongix-symlink-0.1.0",
-		},
+		symlinkBinData: []byte("fake-symlink-binary"),
 	}
 	if err := proxy.config.Prepare(); err != nil {
 		t.Fatal(err)
@@ -335,7 +328,7 @@ func TestRegistryFlakeTarball(t *testing.T) {
 		t.Fatal("expected ETag header")
 	}
 
-	// Verify tarball is valid gzip and contains source/flake.nix
+	// Verify tarball is valid gzip and contains source/flake.nix + source/bin/symlink
 	tarData, _ := io.ReadAll(result.Response.Body)
 	gr, err := gzip.NewReader(bytes.NewReader(tarData))
 	if err != nil {
@@ -344,12 +337,14 @@ func TestRegistryFlakeTarball(t *testing.T) {
 	defer gr.Close()
 	tr := tar.NewReader(gr)
 	foundFlake := false
+	foundSymlink := false
 	for {
 		hdr, err := tr.Next()
 		if err != nil {
 			break
 		}
-		if hdr.Name == "source/flake.nix" {
+		switch hdr.Name {
+		case "source/flake.nix":
 			foundFlake = true
 			content, _ := io.ReadAll(tr)
 			if !bytes.Contains(content, []byte("fetchClosure")) {
@@ -358,10 +353,21 @@ func TestRegistryFlakeTarball(t *testing.T) {
 			if !bytes.Contains(content, []byte("test-bin")) {
 				t.Fatal("flake.nix missing mainProgram")
 			}
+			if !bytes.Contains(content, []byte(`${self}/bin/symlink`)) {
+				t.Fatal("flake.nix missing self-referencing symlink builder")
+			}
+		case "source/bin/symlink":
+			foundSymlink = true
+			if hdr.Mode != 0o755 {
+				t.Fatalf("symlink binary should be executable, got mode %o", hdr.Mode)
+			}
 		}
 	}
 	if !foundFlake {
 		t.Fatal("tarball missing source/flake.nix")
+	}
+	if !foundSymlink {
+		t.Fatal("tarball missing source/bin/symlink")
 	}
 }
 

@@ -103,6 +103,12 @@ func recoverMissingWAL(dir string, pOpts *pebble.Options) (*pebble.DB, error) {
 	return nil, fmt.Errorf("too many missing WAL files in %s", pOpts.WALDir)
 }
 
+// Flush flushes the current memtable to L0 SSTables and syncs.
+// Call before Close when the WAL is on volatile storage (e.g. tmpfs).
+func (d *DB) Flush() error {
+	return d.db.Flush()
+}
+
 // Close closes the underlying Pebble database.
 func (d *DB) Close() error {
 	return d.db.Close()

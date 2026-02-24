@@ -169,15 +169,15 @@ func (p *Proxy) registryListPackages(w http.ResponseWriter, r *http.Request) {
 }
 
 // registryFlakeTarball handles GET /{ns}/f/{pkg}/{version}.tar.gz.
-// Serves an immutable tarball containing source/flake.nix.
+// Serves an immutable tarball containing source/flake.nix and source/bin/symlink.
 func (p *Proxy) registryFlakeTarball(w http.ResponseWriter, r *http.Request) {
 	vars := mux.Vars(r)
 	namespace := vars["namespace"]
 	pkg := vars["pkg"]
 	version := vars["version"]
 
-	if p.symlinkBin == nil {
-		answer(w, http.StatusServiceUnavailable, mimeText, "registry not ready: symlink binary not yet bootstrapped")
+	if len(p.symlinkBinData) == 0 {
+		answer(w, http.StatusServiceUnavailable, mimeText, "registry not configured: symlink binary not available")
 		return
 	}
 
@@ -192,22 +192,14 @@ func (p *Proxy) registryFlakeTarball(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Set FromStore for the symlink binary to match the request's namespace.
-	sb := *p.symlinkBin
-	scheme := "http"
-	if r.TLS != nil {
-		scheme = "https"
-	}
-	sb.FromStore = scheme + "://" + r.Host + "/" + namespace
-
-	flakeNix, err := renderFlakeNix(pkg, version, entries, sb)
+	flakeNix, err := renderFlakeNix(pkg, version, entries)
 	if err != nil {
 		p.log.Error("rendering flake.nix", zap.Error(err))
 		answer(w, http.StatusInternalServerError, mimeText, err.Error())
 		return
 	}
 
-	tarball, err := buildFlakeTarball(flakeNix)
+	tarball, err := buildFlakeTarball(flakeNix, p.symlinkBinData)
 	if err != nil {
 		p.log.Error("building tarball", zap.Error(err))
 		answer(w, http.StatusInternalServerError, mimeText, err.Error())
@@ -228,6 +220,10 @@ func (p *Proxy) registryFlakeTarball(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	scheme := "http"
+	if r.TLS != nil {
+		scheme = "https"
+	}
 	immutableURL := fmt.Sprintf("%s://%s/%s/f/%s/%s.tar.gz", scheme, r.Host, namespace, pkg, version)
 
 	w.Header().Set("Content-Type", "application/gzip")
@@ -267,14 +263,14 @@ func (p *Proxy) registryFlakeLatest(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, target, http.StatusTemporaryRedirect)
 }
 
-// buildFlakeTarball creates a gzip-compressed tar archive with source/flake.nix.
-// Nix expects a top-level directory named "source" inside the tarball.
-func buildFlakeTarball(flakeNix []byte) ([]byte, error) {
+// buildFlakeTarball creates a gzip-compressed tar archive with source/flake.nix
+// and source/bin/symlink. Nix expects a top-level directory named "source".
+func buildFlakeTarball(flakeNix, symlinkBin []byte) ([]byte, error) {
 	var buf bytes.Buffer
 	gw := gzip.NewWriter(&buf)
 	tw := tar.NewWriter(gw)
 
-	// Directory entry.
+	// source/ directory.
 	if err := tw.WriteHeader(&tar.Header{
 		Typeflag: tar.TypeDir,
 		Name:     "source/",
@@ -283,17 +279,39 @@ func buildFlakeTarball(flakeNix []byte) ([]byte, error) {
 		return nil, fmt.Errorf("writing tar dir header: %w", err)
 	}
 
-	// flake.nix file.
+	// source/flake.nix
 	if err := tw.WriteHeader(&tar.Header{
 		Typeflag: tar.TypeReg,
 		Name:     "source/flake.nix",
 		Size:     int64(len(flakeNix)),
 		Mode:     0o644,
 	}); err != nil {
-		return nil, fmt.Errorf("writing tar file header: %w", err)
+		return nil, fmt.Errorf("writing flake.nix header: %w", err)
 	}
 	if _, err := tw.Write(flakeNix); err != nil {
-		return nil, fmt.Errorf("writing tar file body: %w", err)
+		return nil, fmt.Errorf("writing flake.nix body: %w", err)
+	}
+
+	// source/bin/ directory.
+	if err := tw.WriteHeader(&tar.Header{
+		Typeflag: tar.TypeDir,
+		Name:     "source/bin/",
+		Mode:     0o755,
+	}); err != nil {
+		return nil, fmt.Errorf("writing bin dir header: %w", err)
+	}
+
+	// source/bin/symlink (executable).
+	if err := tw.WriteHeader(&tar.Header{
+		Typeflag: tar.TypeReg,
+		Name:     "source/bin/symlink",
+		Size:     int64(len(symlinkBin)),
+		Mode:     0o755,
+	}); err != nil {
+		return nil, fmt.Errorf("writing symlink binary header: %w", err)
+	}
+	if _, err := tw.Write(symlinkBin); err != nil {
+		return nil, fmt.Errorf("writing symlink binary body: %w", err)
 	}
 
 	if err := tw.Close(); err != nil {

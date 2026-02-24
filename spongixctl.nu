@@ -60,6 +60,7 @@ def evaluate-all [system: string]: nothing -> record {
     in {
       inherit name;
       value = {
+        outPath = pkg.outPath;
         mainProgram = pkg.meta.mainProgram or attrName;
         version = pkg.version or "0.0.1";
       };
@@ -96,12 +97,12 @@ def "main sync" [
   let results = $pkgs | each {|pkg|
     let attr = $pkg | str replace "capkg-" ""
     let meta = $pkg_meta | get $pkg
-    let rewrite = build-ca $".#($pkg)"
     let existing = registry-lookup $cfg.url $attr $meta.version $system
-    if $existing != null and $existing.fromPath == $rewrite.from {
-      log info $"Skipping ($attr) \(registry match\)"
-      { name: $attr, action: "skipped", fromPath: $rewrite.from }
+    if $existing != null and $existing.fromPath == $meta.outPath {
+      log info $"Skipping ($attr) \(outPath unchanged\)"
+      { name: $attr, action: "skipped", fromPath: $meta.outPath }
     } else {
+      let rewrite = build-ca $".#($pkg)"
       push-to-store $cfg.url $rewrite.from
       let body = {
         fromPath: $rewrite.from, toPath: $rewrite.to,

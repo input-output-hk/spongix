@@ -107,6 +107,58 @@ func TestRegistryPutNoAuth(t *testing.T) {
 		End()
 }
 
+func TestRegistryPutNoPinAPI(t *testing.T) {
+	// When PinAPI is not configured, PUT should succeed without auth.
+	db, err := store.Open(t.TempDir(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+
+	proxy := &Proxy{
+		config: &config.Config{
+			Chunks: &config.Chunks{
+				StoreType: "pebble",
+				PebbleDir: t.TempDir(),
+			},
+			Namespaces: map[string]*config.Namespace{
+				"cache": {
+					Substituters: []string{},
+					StoreType:    "pebble",
+					Registry:     &config.Registry{Enable: true},
+				},
+			},
+			// No PinAPI configured
+		},
+		log:            zap.NewNop(),
+		headPool:       pond.New(1, 10),
+		cachePool:      pond.New(1, 10),
+		chunkStore:     newFakeStore(),
+		indexStores:    map[string]desync.IndexWriteStore{"cache": newFakeIndex()},
+		pebbleDB:       db,
+		httpHeadClient: &http.Client{},
+		httpGetClient:  &http.Client{},
+		symlinkBin: &SymlinkBin{
+			FromPath:  "/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa1-spongix-symlink-0.1.0",
+			ToPath:    "/nix/store/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb2-spongix-symlink-0.1.0",
+		},
+	}
+	if err := proxy.config.Prepare(); err != nil {
+		t.Fatal(err)
+	}
+
+	body := `{"fromPath":"/nix/store/abc00000000000000000000000000001-test-1.0.0","toPath":"/nix/store/xyz00000000000000000000000000002-test-1.0.0","system":"x86_64-linux"}`
+
+	apitest.New().
+		Handler(proxy.router()).
+		Put("/cache/f/test/1.0.0").
+		Header("Content-Type", "application/json").
+		Body(body).
+		Expect(t).
+		Status(http.StatusCreated).
+		End()
+}
+
 func TestRegistryPutWrongToken(t *testing.T) {
 	proxy := testRegistryProxy(t)
 

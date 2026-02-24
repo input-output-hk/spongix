@@ -87,8 +87,15 @@ func (proxy *Proxy) router() *mux.Router {
 
 			f.HandleFunc(matchVer+".tar.gz", proxy.registryFlakeTarball).Methods("GET")
 			f.HandleFunc(matchPkg+"/{version:\\*}.tar.gz", proxy.registryFlakeLatest).Methods("GET")
-			f.HandleFunc(matchVer, proxy.requireBearerToken(proxy.registryPut)).Methods("PUT")
-			f.HandleFunc(matchVer, proxy.requireBearerToken(proxy.registryDelete)).Methods("DELETE")
+
+			// Auth is optional: when PinAPI is enabled, require bearer token;
+			// otherwise allow unauthenticated writes.
+			wrap := func(h http.HandlerFunc) http.HandlerFunc { return h }
+			if proxy.config.PinAPI != nil && proxy.config.PinAPI.Enable {
+				wrap = proxy.requireBearerToken
+			}
+			f.HandleFunc(matchVer, wrap(proxy.registryPut)).Methods("PUT")
+			f.HandleFunc(matchVer, wrap(proxy.registryDelete)).Methods("DELETE")
 			f.HandleFunc(matchVer, proxy.registryGet).Methods("GET")
 			f.HandleFunc(matchPkg, proxy.registryListVersions).Methods("GET")
 			f.HandleFunc("", proxy.registryListPackages).Methods("GET")

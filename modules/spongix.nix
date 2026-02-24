@@ -302,9 +302,9 @@ in {
               default = {};
               description = ''
                 Per-package flake registry. When enabled, serves gzip-compressed
-                tarballs at `/{ns}/f/{owner}/{pkg}/{version}.tar.gz` implementing
-                the Lockable HTTP Tarball Protocol. Requires PinAPI to be enabled
-                for write access (PUT/DELETE).
+                tarballs at `/{ns}/f/{pkg}/{version}.tar.gz` implementing
+                the Lockable HTTP Tarball Protocol. When PinAPI is also enabled,
+                write access (PUT/DELETE) requires bearer token auth.
               '';
               type = lib.types.submodule {
                 options = {

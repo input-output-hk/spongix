@@ -31,6 +31,7 @@ var flakeTemplate = template.Must(template.New("flake.nix").Parse(`{
       shellPath = "/bin/{{ .MainProgram }}";
 {{- end }}
     };
+    packages.{{ .System }}.{{ $.Name }} = self.packages.{{ .System }}.default;
 {{- end }}
   };
 }

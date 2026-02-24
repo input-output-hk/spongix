@@ -519,6 +519,56 @@ func TestRegistryMultiSystem(t *testing.T) {
 	}
 }
 
+func TestRegistryFlakeNamedOutput(t *testing.T) {
+	proxy := testRegistryProxy(t)
+
+	body := `{"fromPath":"/nix/store/abc00000000000000000000000000001-helix-25.1.1","toPath":"/nix/store/xyz00000000000000000000000000002-helix-25.1.1","mainProgram":"hx","system":"x86_64-linux"}`
+	apitest.New().
+		Handler(proxy.router()).
+		Put("/cache/f/helix/25.1.1").
+		Header("Authorization", authHeader(testToken)).
+		Header("Content-Type", "application/json").
+		Body(body).
+		Expect(t).
+		Status(http.StatusCreated).
+		End()
+
+	result := apitest.New().
+		Handler(proxy.router()).
+		Get("/cache/f/helix/25.1.1.tar.gz").
+		Expect(t).
+		Status(http.StatusOK).
+		End()
+
+	tarData, _ := io.ReadAll(result.Response.Body)
+	gr, err := gzip.NewReader(bytes.NewReader(tarData))
+	if err != nil {
+		t.Fatalf("tarball is not valid gzip: %v", err)
+	}
+	defer gr.Close()
+	tr := tar.NewReader(gr)
+	for {
+		hdr, err := tr.Next()
+		if err != nil {
+			break
+		}
+		if hdr.Name == "source/flake.nix" {
+			content, _ := io.ReadAll(tr)
+			if !bytes.Contains(content, []byte("packages.x86_64-linux.default")) {
+				t.Fatal("flake.nix missing packages.x86_64-linux.default")
+			}
+			if !bytes.Contains(content, []byte("packages.x86_64-linux.helix")) {
+				t.Fatal("flake.nix missing packages.x86_64-linux.helix named output")
+			}
+			if !bytes.Contains(content, []byte("packages.x86_64-linux.helix = self.packages.x86_64-linux.default")) {
+				t.Fatal("flake.nix named output should alias default")
+			}
+			return
+		}
+	}
+	t.Fatal("tarball missing source/flake.nix")
+}
+
 func TestRegistryAutoPin(t *testing.T) {
 	proxy := testRegistryProxy(t)
 

@@ -426,6 +426,13 @@ in {
       })
       cfg.namespaces;
 
+    environment.systemPackages = lib.mkIf cfg.pinAPI.enable [pkgs.spongixctl];
+
+    environment.variables = lib.mkIf cfg.pinAPI.enable {
+      SPONGIX_URL = "http://localhost:${toString cfg.port}";
+      SPONGIX_TOKEN_FILE = cfg.pinAPI.bearerTokenFile;
+    };
+
     systemd.services.spongix = {
       wantedBy = ["multi-user.target"];
 

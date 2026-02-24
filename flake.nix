@@ -31,6 +31,8 @@
             symlinkBin = self'.packages.symlink;
           };
 
+          spongixctl = pkgs.callPackage ./spongixctl.nix {};
+
           default = self'.packages.spongix;
 
           # just a derivation to test uploads

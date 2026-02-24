@@ -22,7 +22,7 @@ func TestPinHashRoundTrip(t *testing.T) {
 	}
 
 	// Pin it.
-	if err := db.PinHash(hash); err != nil {
+	if err := db.PinHash(hash, "test-label"); err != nil {
 		t.Fatal(err)
 	}
 
@@ -61,10 +61,10 @@ func TestListPins(t *testing.T) {
 	}
 
 	// Add two pins.
-	if err := db.PinHash("aaaa1111aaaa1111aaaa1111aaaa1111"); err != nil {
+	if err := db.PinHash("aaaa1111aaaa1111aaaa1111aaaa1111", "label-a"); err != nil {
 		t.Fatal(err)
 	}
-	if err := db.PinHash("bbbb2222bbbb2222bbbb2222bbbb2222"); err != nil {
+	if err := db.PinHash("bbbb2222bbbb2222bbbb2222bbbb2222", "label-b"); err != nil {
 		t.Fatal(err)
 	}
 
@@ -72,12 +72,15 @@ func TestListPins(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	sort.Strings(pins)
+	sort.Slice(pins, func(i, j int) bool { return pins[i].Hash < pins[j].Hash })
 	if len(pins) != 2 {
 		t.Fatalf("expected 2 pins, got %d", len(pins))
 	}
-	if pins[0] != "aaaa1111aaaa1111aaaa1111aaaa1111" || pins[1] != "bbbb2222bbbb2222bbbb2222bbbb2222" {
-		t.Fatalf("unexpected pins: %v", pins)
+	if pins[0].Hash != "aaaa1111aaaa1111aaaa1111aaaa1111" || pins[0].Label != "label-a" {
+		t.Fatalf("unexpected pin[0]: %+v", pins[0])
+	}
+	if pins[1].Hash != "bbbb2222bbbb2222bbbb2222bbbb2222" || pins[1].Label != "label-b" {
+		t.Fatalf("unexpected pin[1]: %+v", pins[1])
 	}
 }
 
@@ -134,7 +137,7 @@ func TestGCPebblePinsProtectNarinfos(t *testing.T) {
 	chunkA := makeTestIndex(t, cs, is, hash, []byte("pinned via pebble"), nil)
 
 	// Pin via Pebble (not via file pins).
-	if err := db.PinHash(hash); err != nil {
+	if err := db.PinHash(hash, "gc-test"); err != nil {
 		t.Fatal(err)
 	}
 

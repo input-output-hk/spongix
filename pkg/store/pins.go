@@ -19,9 +19,15 @@ func pinKey(hash string) []byte {
 	return key
 }
 
-// PinHash adds a pin for the given store path hash.
-func (d *DB) PinHash(hash string) error {
-	return d.db.Set(pinKey(hash), nil, pebble.Sync)
+// PinEntry represents a pinned store path hash with an optional label.
+type PinEntry struct {
+	Hash  string `json:"hash"`
+	Label string `json:"label,omitempty"`
+}
+
+// PinHash adds a pin for the given store path hash with an optional label.
+func (d *DB) PinHash(hash, label string) error {
+	return d.db.Set(pinKey(hash), []byte(label), pebble.Sync)
 }
 
 // UnpinHash removes a pin for the given store path hash.
@@ -29,8 +35,8 @@ func (d *DB) UnpinHash(hash string) error {
 	return d.db.Delete(pinKey(hash), pebble.Sync)
 }
 
-// ListPins returns all pinned store path hashes.
-func (d *DB) ListPins() ([]string, error) {
+// ListPins returns all pinned store path hashes with their labels.
+func (d *DB) ListPins() ([]PinEntry, error) {
 	prefix := []byte("p/")
 	iter, err := d.db.NewIter(&pebble.IterOptions{
 		LowerBound: prefix,
@@ -41,10 +47,11 @@ func (d *DB) ListPins() ([]string, error) {
 	}
 	defer func() { _ = iter.Close() }()
 
-	var pins []string
+	var pins []PinEntry
 	for iter.First(); iter.Valid(); iter.Next() {
 		hash := strings.TrimPrefix(string(iter.Key()), "p/")
-		pins = append(pins, hash)
+		label := string(iter.Value())
+		pins = append(pins, PinEntry{Hash: hash, Label: label})
 	}
 	if err := iter.Error(); err != nil {
 		return nil, err

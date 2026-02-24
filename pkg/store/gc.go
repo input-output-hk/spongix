@@ -123,8 +123,8 @@ func sizeEvict(db *DB, cfg GCConfig) (sizeEvictResult, error) {
 	if err != nil {
 		return result, fmt.Errorf("listing pebble pins: %w", err)
 	}
-	for _, h := range pebblePins {
-		allPins[h] = struct{}{}
+	for _, pe := range pebblePins {
+		allPins[pe.Hash] = struct{}{}
 	}
 
 	// Collect remaining (surviving) narinfo indices with timestamps.
@@ -234,8 +234,8 @@ func findRoots(db *DB, cfg GCConfig) (map[string]struct{}, error) {
 	if err != nil {
 		return nil, fmt.Errorf("listing pebble pins: %w", err)
 	}
-	for _, h := range pebblePins {
-		allPins[h] = struct{}{}
+	for _, pe := range pebblePins {
+		allPins[pe.Hash] = struct{}{}
 	}
 
 	prefix := []byte("i/indices/narinfo/")

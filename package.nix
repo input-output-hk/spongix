@@ -5,7 +5,7 @@
   symlinkBin,
 }: let
   # TODO: split into multiple packages for each command.
-  final = package "sha256-DNmG0Zhkr/NDye5IP52FbYwDyepXLvrivg2kcVFxehQ=";
+  final = package "sha256-tXGraMNI2VmtretUcm4yrcbPvIEvg4LVXPjUJJnHb94=";
   package = vendorHash:
     buildGoModule rec {
       pname = "spongix";
@@ -38,7 +38,6 @@
         ];
       };
 
-      proxyVendor = true;
       env.CGO_ENABLED = "0";
 
       ldflags = [

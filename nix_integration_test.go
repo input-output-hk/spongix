@@ -470,10 +470,6 @@ func TestRegistryFlakeAttributes(t *testing.T) {
 		os.WriteFile(target, data, os.FileMode(hdr.Mode))
 	}
 
-	// Log the flake.nix for debugging.
-	flakeContent, _ := os.ReadFile(filepath.Join(flakeDir, "flake.nix"))
-	t.Logf("flake.nix:\n%s", flakeContent)
-
 	// Initialize git repo (required for nix flake eval).
 	gitEnv := append(os.Environ(),
 		"GIT_AUTHOR_NAME=test", "GIT_AUTHOR_EMAIL=test@test",
@@ -501,6 +497,8 @@ func TestRegistryFlakeAttributes(t *testing.T) {
 			hasPassthru = pkg ? passthru;
 			hasShellPath = (pkg.passthru or {}) ? shellPath;
 			shellPath = (pkg.passthru or {}).shellPath or "MISSING";
+			hasTopLevelShellPath = pkg ? shellPath;
+			topLevelShellPath = pkg.shellPath or "MISSING";
 			hasVersion = pkg ? version;
 			version = pkg.version or "MISSING";
 			hasMainProgram = pkg ? mainProgram;
@@ -518,21 +516,22 @@ func TestRegistryFlakeAttributes(t *testing.T) {
 	}
 
 	var result struct {
-		HasPassthru    bool     `json:"hasPassthru"`
-		HasShellPath   bool     `json:"hasShellPath"`
-		ShellPath      string   `json:"shellPath"`
-		HasVersion     bool     `json:"hasVersion"`
-		Version        string   `json:"version"`
-		HasMainProgram bool     `json:"hasMainProgram"`
-		MainProgram    string   `json:"mainProgram"`
-		HasMeta        bool     `json:"hasMeta"`
-		Type           string   `json:"type"`
-		AttrNames      []string `json:"attrNames"`
+		HasPassthru          bool     `json:"hasPassthru"`
+		HasShellPath         bool     `json:"hasShellPath"`
+		ShellPath            string   `json:"shellPath"`
+		HasTopLevelShellPath bool     `json:"hasTopLevelShellPath"`
+		TopLevelShellPath    string   `json:"topLevelShellPath"`
+		HasVersion           bool     `json:"hasVersion"`
+		Version              string   `json:"version"`
+		HasMainProgram       bool     `json:"hasMainProgram"`
+		MainProgram          string   `json:"mainProgram"`
+		HasMeta              bool     `json:"hasMeta"`
+		Type                 string   `json:"type"`
+		AttrNames            []string `json:"attrNames"`
 	}
 	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
 		t.Fatalf("parsing nix eval output: %v\nraw: %s", err, stdout.String())
 	}
-	t.Logf("nix eval result: %+v", result)
 
 	if result.Type != "derivation" {
 		t.Errorf("expected type 'derivation', got %q", result.Type)
@@ -549,6 +548,12 @@ func TestRegistryFlakeAttributes(t *testing.T) {
 		t.Errorf("missing passthru.shellPath; attrNames: %v", result.AttrNames)
 	} else if result.ShellPath != "/bin/nu" {
 		t.Errorf("passthru.shellPath = %q, want %q", result.ShellPath, "/bin/nu")
+	}
+	// types.shellPackage.check requires shellPath as a top-level derivation attribute.
+	if !result.HasTopLevelShellPath {
+		t.Errorf("missing top-level shellPath (required by types.shellPackage.check); attrNames: %v", result.AttrNames)
+	} else if result.TopLevelShellPath != "/bin/nu" {
+		t.Errorf("top-level shellPath = %q, want %q", result.TopLevelShellPath, "/bin/nu")
 	}
 	if !result.HasMainProgram {
 		t.Errorf("missing mainProgram attribute")
@@ -626,7 +631,6 @@ func TestRegistryFlakeAttributesViaTarball(t *testing.T) {
 	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
 		t.Fatalf("parsing nix eval output: %v\nraw: %s", err, stdout.String())
 	}
-	t.Logf("nix eval result: %+v", result)
 
 	if result.Type != "derivation" {
 		t.Errorf("expected type 'derivation', got %q", result.Type)

@@ -426,12 +426,17 @@ in {
       })
       cfg.namespaces;
 
-    environment.systemPackages = lib.mkIf cfg.pinAPI.enable [pkgs.spongixctl];
+    environment.systemPackages = [pkgs.spongixctl];
 
-    environment.variables = lib.mkIf cfg.pinAPI.enable {
-      SPONGIX_URL = "http://localhost:${toString cfg.port}";
-      SPONGIX_TOKEN_FILE = cfg.pinAPI.bearerTokenFile;
-    };
+    environment.variables = let
+      nsNames = builtins.attrNames cfg.namespaces;
+    in
+      lib.optionalAttrs (builtins.length nsNames == 1) {
+        SPONGIX_URL = "http://localhost:${toString cfg.port}/${builtins.head nsNames}";
+      }
+      // lib.optionalAttrs (cfg.pinAPI.enable && cfg.pinAPI.bearerTokenFile != null) {
+        SPONGIX_TOKEN_FILE = cfg.pinAPI.bearerTokenFile;
+      };
 
     systemd.services.spongix = {
       wantedBy = ["multi-user.target"];

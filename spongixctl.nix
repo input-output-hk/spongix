@@ -11,7 +11,10 @@ writeScriptBin "spongixctl" ''
   # --- Config ---
 
   def get-config []: nothing -> record {
-    let url = $env | get -o SPONGIX_URL | default "http://localhost:5000"
+    let url = $env | get -o SPONGIX_URL | default ""
+    if ($url | is-empty) {
+      error make { msg: "SPONGIX_URL not set. Set it to your spongix URL including namespace (e.g. http://localhost:5000/cache)" }
+    }
     let token = if ($env | get -o SPONGIX_TOKEN_FILE | default "" | is-not-empty) {
       open --raw ($env.SPONGIX_TOKEN_FILE) | str trim
     } else {

@@ -62,6 +62,11 @@
           projectRootFile = "flake.nix";
         };
 
+        overlayAttrs = {
+          spongix = self'.packages.spongix;
+          spongixctl = self'.packages.spongixctl;
+        };
+
         checks = lib.optionalAttrs pkgs.stdenv.isLinux {
           e2e = import ./e2e-test.nix {
             inherit pkgs;

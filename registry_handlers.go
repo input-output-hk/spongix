@@ -12,11 +12,10 @@ import (
 	"go.uber.org/zap"
 )
 
-// registryPut handles PUT /{ns}/f/{owner}/{name}/{version}.
+// registryPut handles PUT /{ns}/f/{pkg}/{version}.
 func (p *Proxy) registryPut(w http.ResponseWriter, r *http.Request) {
 	vars := mux.Vars(r)
 	namespace := vars["namespace"]
-	owner := vars["owner"]
 	pkg := vars["pkg"]
 	version := vars["version"]
 
@@ -35,11 +34,14 @@ func (p *Proxy) registryPut(w http.ResponseWriter, r *http.Request) {
 		req.FromStore = scheme + "://" + r.Host + "/" + namespace
 	}
 
-	entry, err := ValidateRegistryPut(owner, pkg, version, req)
+	entry, err := ValidateRegistryPut(pkg, version, req)
 	if err != nil {
 		answer(w, http.StatusBadRequest, mimeText, err.Error())
 		return
 	}
+
+	// Read old entry before overwriting so we can unpin its fromPath if it changed.
+	oldEntry, _ := p.pebbleDB.GetRegistryEntry(namespace, pkg, version, entry.System)
 
 	if err := p.pebbleDB.PutRegistryEntry(namespace, entry); err != nil {
 		p.log.Error("storing registry entry", zap.Error(err))
@@ -50,15 +52,23 @@ func (p *Proxy) registryPut(w http.ResponseWriter, r *http.Request) {
 	// Auto-pin the fromPath hash to prevent GC.
 	fromHash := StorePathHash(entry.FromPath)
 	if fromHash != "" {
-		if err := p.pebbleDB.PinHash(fromHash); err != nil {
+		label := fmt.Sprintf("%s@%s", pkg, version)
+		if err := p.pebbleDB.PinHash(fromHash, label); err != nil {
 			p.log.Error("auto-pinning registry entry", zap.String("hash", fromHash), zap.Error(err))
+		}
+	}
+
+	// Unpin old fromPath if it differs from the new one.
+	if oldEntry != nil {
+		oldHash := StorePathHash(oldEntry.FromPath)
+		if oldHash != "" && oldHash != fromHash {
+			_ = p.pebbleDB.UnpinHash(oldHash)
 		}
 	}
 
 	metricRegistryOps(namespace, "put").Add(1)
 	p.log.Info("registered package",
 		zap.String("namespace", namespace),
-		zap.String("owner", owner),
 		zap.String("pkg", pkg),
 		zap.String("version", version),
 		zap.String("system", entry.System),
@@ -66,15 +76,14 @@ func (p *Proxy) registryPut(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusCreated)
 }
 
-// registryGet handles GET /{ns}/f/{owner}/{name}/{version}.
+// registryGet handles GET /{ns}/f/{pkg}/{version}.
 func (p *Proxy) registryGet(w http.ResponseWriter, r *http.Request) {
 	vars := mux.Vars(r)
 	namespace := vars["namespace"]
-	owner := vars["owner"]
 	pkg := vars["pkg"]
 	version := vars["version"]
 
-	entries, err := p.pebbleDB.GetRegistryEntries(namespace, owner, pkg, version)
+	entries, err := p.pebbleDB.GetRegistryEntries(namespace, pkg, version)
 	if err != nil {
 		p.log.Error("getting registry entries", zap.Error(err))
 		answer(w, http.StatusInternalServerError, mimeText, err.Error())
@@ -90,18 +99,17 @@ func (p *Proxy) registryGet(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewEncoder(w).Encode(entries)
 }
 
-// registryDelete handles DELETE /{ns}/f/{owner}/{name}/{version}.
+// registryDelete handles DELETE /{ns}/f/{pkg}/{version}.
 func (p *Proxy) registryDelete(w http.ResponseWriter, r *http.Request) {
 	vars := mux.Vars(r)
 	namespace := vars["namespace"]
-	owner := vars["owner"]
 	pkg := vars["pkg"]
 	version := vars["version"]
 
 	// Get entries before deleting to unpin.
-	entries, _ := p.pebbleDB.GetRegistryEntries(namespace, owner, pkg, version)
+	entries, _ := p.pebbleDB.GetRegistryEntries(namespace, pkg, version)
 
-	if err := p.pebbleDB.DeleteRegistryVersion(namespace, owner, pkg, version); err != nil {
+	if err := p.pebbleDB.DeleteRegistryVersion(namespace, pkg, version); err != nil {
 		p.log.Error("deleting registry version", zap.Error(err))
 		answer(w, http.StatusInternalServerError, mimeText, err.Error())
 		return
@@ -119,14 +127,13 @@ func (p *Proxy) registryDelete(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
-// registryListVersions handles GET /{ns}/f/{owner}/{name}.
+// registryListVersions handles GET /{ns}/f/{pkg}.
 func (p *Proxy) registryListVersions(w http.ResponseWriter, r *http.Request) {
 	vars := mux.Vars(r)
 	namespace := vars["namespace"]
-	owner := vars["owner"]
 	pkg := vars["pkg"]
 
-	versions, err := p.pebbleDB.ListRegistryVersions(namespace, owner, pkg)
+	versions, err := p.pebbleDB.ListRegistryVersions(namespace, pkg)
 	if err != nil {
 		p.log.Error("listing registry versions", zap.Error(err))
 		answer(w, http.StatusInternalServerError, mimeText, err.Error())
@@ -141,13 +148,12 @@ func (p *Proxy) registryListVersions(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewEncoder(w).Encode(versions)
 }
 
-// registryListPackages handles GET /{ns}/f/{owner}.
+// registryListPackages handles GET /{ns}/f/.
 func (p *Proxy) registryListPackages(w http.ResponseWriter, r *http.Request) {
 	vars := mux.Vars(r)
 	namespace := vars["namespace"]
-	owner := vars["owner"]
 
-	packages, err := p.pebbleDB.ListRegistryPackages(namespace, owner)
+	packages, err := p.pebbleDB.ListRegistryPackages(namespace)
 	if err != nil {
 		p.log.Error("listing registry packages", zap.Error(err))
 		answer(w, http.StatusInternalServerError, mimeText, err.Error())
@@ -162,12 +168,11 @@ func (p *Proxy) registryListPackages(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewEncoder(w).Encode(packages)
 }
 
-// registryFlakeTarball handles GET /{ns}/f/{owner}/{name}/{version}.tar.gz.
+// registryFlakeTarball handles GET /{ns}/f/{pkg}/{version}.tar.gz.
 // Serves an immutable tarball containing source/flake.nix.
 func (p *Proxy) registryFlakeTarball(w http.ResponseWriter, r *http.Request) {
 	vars := mux.Vars(r)
 	namespace := vars["namespace"]
-	owner := vars["owner"]
 	pkg := vars["pkg"]
 	version := vars["version"]
 
@@ -176,7 +181,7 @@ func (p *Proxy) registryFlakeTarball(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	entries, err := p.pebbleDB.GetRegistryEntries(namespace, owner, pkg, version)
+	entries, err := p.pebbleDB.GetRegistryEntries(namespace, pkg, version)
 	if err != nil {
 		p.log.Error("getting registry entries for tarball", zap.Error(err))
 		answer(w, http.StatusInternalServerError, mimeText, err.Error())
@@ -209,7 +214,7 @@ func (p *Proxy) registryFlakeTarball(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	contentHash, err := p.pebbleDB.RegistryContentHash(namespace, owner, pkg, version)
+	contentHash, err := p.pebbleDB.RegistryContentHash(namespace, pkg, version)
 	if err != nil {
 		p.log.Error("computing content hash", zap.Error(err))
 		answer(w, http.StatusInternalServerError, mimeText, err.Error())
@@ -223,7 +228,7 @@ func (p *Proxy) registryFlakeTarball(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	immutableURL := fmt.Sprintf("%s://%s/%s/f/%s/%s/%s.tar.gz", scheme, r.Host, namespace, owner, pkg, version)
+	immutableURL := fmt.Sprintf("%s://%s/%s/f/%s/%s.tar.gz", scheme, r.Host, namespace, pkg, version)
 
 	w.Header().Set("Content-Type", "application/gzip")
 	w.Header().Set("x-nix-is-immutable", "1")
@@ -233,15 +238,14 @@ func (p *Proxy) registryFlakeTarball(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write(tarball)
 }
 
-// registryFlakeLatest handles GET /{ns}/f/{owner}/{name}/*.tar.gz.
+// registryFlakeLatest handles GET /{ns}/f/{pkg}/*.tar.gz.
 // Resolves * to the latest version and redirects with 307.
 func (p *Proxy) registryFlakeLatest(w http.ResponseWriter, r *http.Request) {
 	vars := mux.Vars(r)
 	namespace := vars["namespace"]
-	owner := vars["owner"]
 	pkg := vars["pkg"]
 
-	versions, err := p.pebbleDB.ListRegistryVersions(namespace, owner, pkg)
+	versions, err := p.pebbleDB.ListRegistryVersions(namespace, pkg)
 	if err != nil {
 		p.log.Error("listing versions for latest", zap.Error(err))
 		answer(w, http.StatusInternalServerError, mimeText, err.Error())
@@ -259,7 +263,7 @@ func (p *Proxy) registryFlakeLatest(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	target := fmt.Sprintf("/%s/f/%s/%s/%s.tar.gz", namespace, owner, pkg, latest)
+	target := fmt.Sprintf("/%s/f/%s/%s.tar.gz", namespace, pkg, latest)
 	http.Redirect(w, r, target, http.StatusTemporaryRedirect)
 }
 

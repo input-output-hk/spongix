@@ -41,7 +41,7 @@ func StorePathHash(p string) string {
 }
 
 // ValidateRegistryPut validates a PUT request and returns a RegistryEntry.
-func ValidateRegistryPut(owner, name, version string, req RegistryPutRequest) (*store.RegistryEntry, error) {
+func ValidateRegistryPut(name, version string, req RegistryPutRequest) (*store.RegistryEntry, error) {
 	if req.System == "" {
 		return nil, fmt.Errorf("system is required")
 	}
@@ -52,7 +52,6 @@ func ValidateRegistryPut(owner, name, version string, req RegistryPutRequest) (*
 		return nil, fmt.Errorf("toPath: %w", err)
 	}
 	return &store.RegistryEntry{
-		Owner:       owner,
 		Name:        name,
 		Version:     version,
 		System:      req.System,

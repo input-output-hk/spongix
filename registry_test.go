@@ -75,7 +75,7 @@ func TestRegistryPutAndGet(t *testing.T) {
 
 	apitest.New().
 		Handler(proxy.router()).
-		Put("/cache/f/manveru/claude-code-nix/2.1.45").
+		Put("/cache/f/claude-code-nix/2.1.45").
 		Header("Authorization", authHeader(testToken)).
 		Header("Content-Type", "application/json").
 		Body(body).
@@ -86,7 +86,7 @@ func TestRegistryPutAndGet(t *testing.T) {
 	// GET metadata
 	apitest.New().
 		Handler(proxy.router()).
-		Get("/cache/f/manveru/claude-code-nix/2.1.45").
+		Get("/cache/f/claude-code-nix/2.1.45").
 		Expect(t).
 		Status(http.StatusOK).
 		End()
@@ -99,7 +99,7 @@ func TestRegistryPutNoAuth(t *testing.T) {
 
 	apitest.New().
 		Handler(proxy.router()).
-		Put("/cache/f/manveru/test/1.0.0").
+		Put("/cache/f/test/1.0.0").
 		Header("Content-Type", "application/json").
 		Body(body).
 		Expect(t).
@@ -114,7 +114,7 @@ func TestRegistryPutWrongToken(t *testing.T) {
 
 	apitest.New().
 		Handler(proxy.router()).
-		Put("/cache/f/manveru/test/1.0.0").
+		Put("/cache/f/test/1.0.0").
 		Header("Authorization", authHeader("wrong-token")).
 		Header("Content-Type", "application/json").
 		Body(body).
@@ -130,7 +130,7 @@ func TestRegistryPutInvalidStorePath(t *testing.T) {
 
 	apitest.New().
 		Handler(proxy.router()).
-		Put("/cache/f/manveru/test/1.0.0").
+		Put("/cache/f/test/1.0.0").
 		Header("Authorization", authHeader(testToken)).
 		Header("Content-Type", "application/json").
 		Body(body).
@@ -146,7 +146,7 @@ func TestRegistryPutMissingSystem(t *testing.T) {
 
 	apitest.New().
 		Handler(proxy.router()).
-		Put("/cache/f/manveru/test/1.0.0").
+		Put("/cache/f/test/1.0.0").
 		Header("Authorization", authHeader(testToken)).
 		Header("Content-Type", "application/json").
 		Body(body).
@@ -163,7 +163,7 @@ func TestRegistryDelete(t *testing.T) {
 	// Register
 	apitest.New().
 		Handler(proxy.router()).
-		Put("/cache/f/manveru/test/1.0.0").
+		Put("/cache/f/test/1.0.0").
 		Header("Authorization", authHeader(testToken)).
 		Header("Content-Type", "application/json").
 		Body(body).
@@ -174,7 +174,7 @@ func TestRegistryDelete(t *testing.T) {
 	// Delete
 	apitest.New().
 		Handler(proxy.router()).
-		Delete("/cache/f/manveru/test/1.0.0").
+		Delete("/cache/f/test/1.0.0").
 		Header("Authorization", authHeader(testToken)).
 		Expect(t).
 		Status(http.StatusNoContent).
@@ -183,7 +183,7 @@ func TestRegistryDelete(t *testing.T) {
 	// Verify gone
 	apitest.New().
 		Handler(proxy.router()).
-		Get("/cache/f/manveru/test/1.0.0").
+		Get("/cache/f/test/1.0.0").
 		Expect(t).
 		Status(http.StatusNotFound).
 		End()
@@ -196,7 +196,7 @@ func TestRegistryListVersions(t *testing.T) {
 		body := `{"fromPath":"/nix/store/abc00000000000000000000000000001-test-` + v + `","toPath":"/nix/store/xyz00000000000000000000000000002-test-` + v + `","system":"x86_64-linux"}`
 		apitest.New().
 			Handler(proxy.router()).
-			Put("/cache/f/manveru/test/"+v).
+			Put("/cache/f/test/"+v).
 			Header("Authorization", authHeader(testToken)).
 			Header("Content-Type", "application/json").
 			Body(body).
@@ -207,7 +207,7 @@ func TestRegistryListVersions(t *testing.T) {
 
 	result := apitest.New().
 		Handler(proxy.router()).
-		Get("/cache/f/manveru/test").
+		Get("/cache/f/test").
 		Expect(t).
 		Status(http.StatusOK).
 		End()
@@ -226,7 +226,7 @@ func TestRegistryListPackages(t *testing.T) {
 		body := `{"fromPath":"/nix/store/abc00000000000000000000000000001-` + name + `","toPath":"/nix/store/xyz00000000000000000000000000002-` + name + `","system":"x86_64-linux"}`
 		apitest.New().
 			Handler(proxy.router()).
-			Put("/cache/f/manveru/"+name+"/1.0.0").
+			Put("/cache/f/"+name+"/1.0.0").
 			Header("Authorization", authHeader(testToken)).
 			Header("Content-Type", "application/json").
 			Body(body).
@@ -237,7 +237,7 @@ func TestRegistryListPackages(t *testing.T) {
 
 	result := apitest.New().
 		Handler(proxy.router()).
-		Get("/cache/f/manveru").
+		Get("/cache/f").
 		Expect(t).
 		Status(http.StatusOK).
 		End()
@@ -255,7 +255,7 @@ func TestRegistryFlakeTarball(t *testing.T) {
 	body := `{"fromPath":"/nix/store/abc00000000000000000000000000001-test-1.0.0","toPath":"/nix/store/xyz00000000000000000000000000002-test-1.0.0","mainProgram":"test-bin","system":"x86_64-linux"}`
 	apitest.New().
 		Handler(proxy.router()).
-		Put("/cache/f/manveru/test/1.0.0").
+		Put("/cache/f/test/1.0.0").
 		Header("Authorization", authHeader(testToken)).
 		Header("Content-Type", "application/json").
 		Body(body).
@@ -265,7 +265,7 @@ func TestRegistryFlakeTarball(t *testing.T) {
 
 	result := apitest.New().
 		Handler(proxy.router()).
-		Get("/cache/f/manveru/test/1.0.0.tar.gz").
+		Get("/cache/f/test/1.0.0.tar.gz").
 		Expect(t).
 		Status(http.StatusOK).
 		Header("x-nix-is-immutable", "1").
@@ -320,7 +320,7 @@ func TestRegistryFlakeLatestRedirect(t *testing.T) {
 		body := `{"fromPath":"/nix/store/abc00000000000000000000000000001-test-` + v + `","toPath":"/nix/store/xyz00000000000000000000000000002-test-` + v + `","system":"x86_64-linux"}`
 		apitest.New().
 			Handler(proxy.router()).
-			Put("/cache/f/manveru/test/"+v).
+			Put("/cache/f/test/"+v).
 			Header("Authorization", authHeader(testToken)).
 			Header("Content-Type", "application/json").
 			Body(body).
@@ -331,13 +331,13 @@ func TestRegistryFlakeLatestRedirect(t *testing.T) {
 
 	result := apitest.New().
 		Handler(proxy.router()).
-		Get("/cache/f/manveru/test/*.tar.gz").
+		Get("/cache/f/test/*.tar.gz").
 		Expect(t).
 		Status(http.StatusTemporaryRedirect).
 		End()
 
 	loc := result.Response.Header.Get("Location")
-	expected := "/cache/f/manveru/test/2.0.0.tar.gz"
+	expected := "/cache/f/test/2.0.0.tar.gz"
 	if loc != expected {
 		t.Fatalf("expected redirect to %s, got %s", expected, loc)
 	}
@@ -348,7 +348,7 @@ func TestRegistryFlakeTarballNotFound(t *testing.T) {
 
 	apitest.New().
 		Handler(proxy.router()).
-		Get("/cache/f/manveru/nonexistent/1.0.0.tar.gz").
+		Get("/cache/f/nonexistent/1.0.0.tar.gz").
 		Expect(t).
 		Status(http.StatusNotFound).
 		End()
@@ -359,7 +359,7 @@ func TestRegistryFlakeLatestNotFound(t *testing.T) {
 
 	apitest.New().
 		Handler(proxy.router()).
-		Get("/cache/f/manveru/nonexistent/*.tar.gz").
+		Get("/cache/f/nonexistent/*.tar.gz").
 		Expect(t).
 		Status(http.StatusNotFound).
 		End()
@@ -371,7 +371,7 @@ func TestRegistryETagConditional(t *testing.T) {
 	body := `{"fromPath":"/nix/store/abc00000000000000000000000000001-test-1.0.0","toPath":"/nix/store/xyz00000000000000000000000000002-test-1.0.0","system":"x86_64-linux"}`
 	apitest.New().
 		Handler(proxy.router()).
-		Put("/cache/f/manveru/test/1.0.0").
+		Put("/cache/f/test/1.0.0").
 		Header("Authorization", authHeader(testToken)).
 		Header("Content-Type", "application/json").
 		Body(body).
@@ -382,7 +382,7 @@ func TestRegistryETagConditional(t *testing.T) {
 	// First GET to obtain ETag
 	result := apitest.New().
 		Handler(proxy.router()).
-		Get("/cache/f/manveru/test/1.0.0.tar.gz").
+		Get("/cache/f/test/1.0.0.tar.gz").
 		Expect(t).
 		Status(http.StatusOK).
 		End()
@@ -392,7 +392,7 @@ func TestRegistryETagConditional(t *testing.T) {
 	// Conditional GET with matching ETag
 	apitest.New().
 		Handler(proxy.router()).
-		Get("/cache/f/manveru/test/1.0.0.tar.gz").
+		Get("/cache/f/test/1.0.0.tar.gz").
 		Header("If-None-Match", etag).
 		Expect(t).
 		Status(http.StatusNotModified).
@@ -406,7 +406,7 @@ func TestRegistryMultiSystem(t *testing.T) {
 		body := `{"fromPath":"/nix/store/abc00000000000000000000000000001-test-1.0.0","toPath":"/nix/store/xyz00000000000000000000000000002-test-1.0.0","system":"` + sys + `"}`
 		apitest.New().
 			Handler(proxy.router()).
-			Put("/cache/f/manveru/test/1.0.0").
+			Put("/cache/f/test/1.0.0").
 			Header("Authorization", authHeader(testToken)).
 			Header("Content-Type", "application/json").
 			Body(body).
@@ -418,7 +418,7 @@ func TestRegistryMultiSystem(t *testing.T) {
 	// GET metadata should return 2 entries
 	result := apitest.New().
 		Handler(proxy.router()).
-		Get("/cache/f/manveru/test/1.0.0").
+		Get("/cache/f/test/1.0.0").
 		Expect(t).
 		Status(http.StatusOK).
 		End()
@@ -432,7 +432,7 @@ func TestRegistryMultiSystem(t *testing.T) {
 	// Tarball should contain both systems in flake.nix
 	tarResult := apitest.New().
 		Handler(proxy.router()).
-		Get("/cache/f/manveru/test/1.0.0.tar.gz").
+		Get("/cache/f/test/1.0.0.tar.gz").
 		Expect(t).
 		Status(http.StatusOK).
 		End()
@@ -467,7 +467,7 @@ func TestRegistryAutoPin(t *testing.T) {
 	body := `{"fromPath":"/nix/store/abc00000000000000000000000000001-test-1.0.0","toPath":"/nix/store/xyz00000000000000000000000000002-test-1.0.0","system":"x86_64-linux"}`
 	apitest.New().
 		Handler(proxy.router()).
-		Put("/cache/f/manveru/test/1.0.0").
+		Put("/cache/f/test/1.0.0").
 		Header("Authorization", authHeader(testToken)).
 		Header("Content-Type", "application/json").
 		Body(body).
@@ -475,12 +475,89 @@ func TestRegistryAutoPin(t *testing.T) {
 		Status(http.StatusCreated).
 		End()
 
-	// Verify the fromPath hash was auto-pinned
+	// Verify the fromPath hash was auto-pinned with label.
 	pinned, err := proxy.pebbleDB.IsPinned("abc00000000000000000000000000001")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !pinned {
 		t.Fatal("expected fromPath hash to be auto-pinned")
+	}
+
+	// Verify the pin has the expected label.
+	pins, err := proxy.pebbleDB.ListPins()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(pins) != 1 {
+		t.Fatalf("expected 1 pin, got %d", len(pins))
+	}
+	expectedLabel := "test@1.0.0"
+	if pins[0].Label != expectedLabel {
+		t.Fatalf("expected label %q, got %q", expectedLabel, pins[0].Label)
+	}
+}
+
+func TestRegistryPutOverwriteUnpinsOld(t *testing.T) {
+	proxy := testRegistryProxy(t)
+
+	// Register first entry.
+	bodyA := `{"fromPath":"/nix/store/aaa00000000000000000000000000001-test-1.0.0","toPath":"/nix/store/xxx00000000000000000000000000002-test-1.0.0","system":"x86_64-linux"}`
+	apitest.New().
+		Handler(proxy.router()).
+		Put("/cache/f/test/1.0.0").
+		Header("Authorization", authHeader(testToken)).
+		Header("Content-Type", "application/json").
+		Body(bodyA).
+		Expect(t).
+		Status(http.StatusCreated).
+		End()
+
+	// Verify old hash is pinned.
+	pinned, err := proxy.pebbleDB.IsPinned("aaa00000000000000000000000000001")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !pinned {
+		t.Fatal("expected old fromPath hash to be pinned")
+	}
+
+	// Overwrite with different fromPath.
+	bodyB := `{"fromPath":"/nix/store/bbb00000000000000000000000000001-test-1.0.0","toPath":"/nix/store/yyy00000000000000000000000000002-test-1.0.0","system":"x86_64-linux"}`
+	apitest.New().
+		Handler(proxy.router()).
+		Put("/cache/f/test/1.0.0").
+		Header("Authorization", authHeader(testToken)).
+		Header("Content-Type", "application/json").
+		Body(bodyB).
+		Expect(t).
+		Status(http.StatusCreated).
+		End()
+
+	// Old hash should be unpinned.
+	pinned, err = proxy.pebbleDB.IsPinned("aaa00000000000000000000000000001")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pinned {
+		t.Fatal("expected old fromPath hash to be unpinned after overwrite")
+	}
+
+	// New hash should be pinned.
+	pinned, err = proxy.pebbleDB.IsPinned("bbb00000000000000000000000000001")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !pinned {
+		t.Fatal("expected new fromPath hash to be pinned")
+	}
+
+	// Only one pin should remain.
+	pins, err := proxy.pebbleDB.ListPins()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(pins) != 1 {
+		t.Fatalf("expected 1 pin, got %d", len(pins))
 	}
 }

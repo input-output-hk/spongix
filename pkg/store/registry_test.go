@@ -1,6 +1,7 @@
 package store
 
 import (
+	"encoding/json"
 	"sort"
 	"testing"
 )
@@ -9,7 +10,6 @@ func TestRegistryPutGetRoundTrip(t *testing.T) {
 	db := tempDB(t)
 
 	entry := &RegistryEntry{
-		Owner:       "manveru",
 		Name:        "claude-code-nix",
 		Version:     "2.1.45",
 		System:      "x86_64-linux",
@@ -24,11 +24,11 @@ func TestRegistryPutGetRoundTrip(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	got, err := db.GetRegistryEntry("cache", "manveru", "claude-code-nix", "2.1.45", "x86_64-linux")
+	got, err := db.GetRegistryEntry("cache", "claude-code-nix", "2.1.45", "x86_64-linux")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got.Owner != "manveru" || got.Name != "claude-code-nix" || got.Version != "2.1.45" {
+	if got.Name != "claude-code-nix" || got.Version != "2.1.45" {
 		t.Fatalf("unexpected entry: %+v", got)
 	}
 	if got.System != "x86_64-linux" {
@@ -42,7 +42,7 @@ func TestRegistryPutGetRoundTrip(t *testing.T) {
 func TestRegistryGetNotFound(t *testing.T) {
 	db := tempDB(t)
 
-	_, err := db.GetRegistryEntry("cache", "nobody", "nothing", "0.0.0", "x86_64-linux")
+	_, err := db.GetRegistryEntry("cache", "nothing", "0.0.0", "x86_64-linux")
 	if err != ErrRegistryEntryNotFound {
 		t.Fatalf("expected ErrRegistryEntryNotFound, got %v", err)
 	}
@@ -53,7 +53,6 @@ func TestRegistryGetEntries(t *testing.T) {
 
 	for _, sys := range []string{"x86_64-linux", "aarch64-linux"} {
 		entry := &RegistryEntry{
-			Owner:    "manveru",
 			Name:     "test-pkg",
 			Version:  "1.0.0",
 			System:   sys,
@@ -65,7 +64,7 @@ func TestRegistryGetEntries(t *testing.T) {
 		}
 	}
 
-	entries, err := db.GetRegistryEntries("cache", "manveru", "test-pkg", "1.0.0")
+	entries, err := db.GetRegistryEntries("cache", "test-pkg", "1.0.0")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -79,7 +78,6 @@ func TestRegistryDeleteVersion(t *testing.T) {
 
 	for _, sys := range []string{"x86_64-linux", "aarch64-linux"} {
 		entry := &RegistryEntry{
-			Owner:    "manveru",
 			Name:     "test-pkg",
 			Version:  "1.0.0",
 			System:   sys,
@@ -91,11 +89,11 @@ func TestRegistryDeleteVersion(t *testing.T) {
 		}
 	}
 
-	if err := db.DeleteRegistryVersion("cache", "manveru", "test-pkg", "1.0.0"); err != nil {
+	if err := db.DeleteRegistryVersion("cache", "test-pkg", "1.0.0"); err != nil {
 		t.Fatal(err)
 	}
 
-	entries, err := db.GetRegistryEntries("cache", "manveru", "test-pkg", "1.0.0")
+	entries, err := db.GetRegistryEntries("cache", "test-pkg", "1.0.0")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -109,7 +107,6 @@ func TestRegistryListVersions(t *testing.T) {
 
 	for _, v := range []string{"1.0.0", "1.1.0", "2.0.0"} {
 		entry := &RegistryEntry{
-			Owner:    "manveru",
 			Name:     "test-pkg",
 			Version:  v,
 			System:   "x86_64-linux",
@@ -121,7 +118,7 @@ func TestRegistryListVersions(t *testing.T) {
 		}
 	}
 
-	versions, err := db.ListRegistryVersions("cache", "manveru", "test-pkg")
+	versions, err := db.ListRegistryVersions("cache", "test-pkg")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -139,7 +136,6 @@ func TestRegistryListPackages(t *testing.T) {
 
 	for _, name := range []string{"pkg-a", "pkg-b"} {
 		entry := &RegistryEntry{
-			Owner:    "manveru",
 			Name:     name,
 			Version:  "1.0.0",
 			System:   "x86_64-linux",
@@ -151,7 +147,7 @@ func TestRegistryListPackages(t *testing.T) {
 		}
 	}
 
-	packages, err := db.ListRegistryPackages("cache", "manveru")
+	packages, err := db.ListRegistryPackages("cache")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -168,7 +164,6 @@ func TestRegistryContentHash(t *testing.T) {
 	db := tempDB(t)
 
 	entry := &RegistryEntry{
-		Owner:    "manveru",
 		Name:     "test-pkg",
 		Version:  "1.0.0",
 		System:   "x86_64-linux",
@@ -179,7 +174,7 @@ func TestRegistryContentHash(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	hash1, err := db.RegistryContentHash("cache", "manveru", "test-pkg", "1.0.0")
+	hash1, err := db.RegistryContentHash("cache", "test-pkg", "1.0.0")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -188,7 +183,7 @@ func TestRegistryContentHash(t *testing.T) {
 	}
 
 	// Same content should produce the same hash.
-	hash2, err := db.RegistryContentHash("cache", "manveru", "test-pkg", "1.0.0")
+	hash2, err := db.RegistryContentHash("cache", "test-pkg", "1.0.0")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -201,7 +196,6 @@ func TestRegistryNamespaceIsolation(t *testing.T) {
 	db := tempDB(t)
 
 	entry := &RegistryEntry{
-		Owner:    "manveru",
 		Name:     "test-pkg",
 		Version:  "1.0.0",
 		System:   "x86_64-linux",
@@ -213,8 +207,51 @@ func TestRegistryNamespaceIsolation(t *testing.T) {
 	}
 
 	// Different namespace should not see it.
-	_, err := db.GetRegistryEntry("ns2", "manveru", "test-pkg", "1.0.0", "x86_64-linux")
+	_, err := db.GetRegistryEntry("ns2", "test-pkg", "1.0.0", "x86_64-linux")
 	if err != ErrRegistryEntryNotFound {
 		t.Fatalf("expected not found in different namespace, got %v", err)
+	}
+}
+
+func TestMigrateRegistryDropOwner(t *testing.T) {
+	db := tempDB(t)
+
+	// Write old-format keys directly: reg/{ns}/{owner}/{name}/{version}/{system}
+	oldKey := []byte("reg/cache/manveru/test-pkg/1.0.0/x86_64-linux")
+	oldEntry := &RegistryEntry{
+		Name:     "test-pkg",
+		Version:  "1.0.0",
+		System:   "x86_64-linux",
+		FromPath: "/nix/store/abc00000000000000000000000000001-test-pkg-1.0.0",
+		ToPath:   "/nix/store/xyz00000000000000000000000000002-test-pkg-1.0.0",
+	}
+	val, _ := json.Marshal(oldEntry)
+	if err := db.db.Set(oldKey, val, nil); err != nil {
+		t.Fatal(err)
+	}
+
+	// Run migration.
+	if err := db.MigrateRegistryDropOwner(); err != nil {
+		t.Fatal(err)
+	}
+
+	// New key should exist.
+	got, err := db.GetRegistryEntry("cache", "test-pkg", "1.0.0", "x86_64-linux")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Name != "test-pkg" {
+		t.Fatalf("unexpected name: %s", got.Name)
+	}
+
+	// Old key should be gone.
+	_, _, err = db.db.Get(oldKey)
+	if err == nil {
+		t.Fatal("expected old key to be deleted")
+	}
+
+	// Idempotent: running again should not error.
+	if err := db.MigrateRegistryDropOwner(); err != nil {
+		t.Fatal(err)
 	}
 }

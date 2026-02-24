@@ -316,7 +316,7 @@ func TestRegistryTarballNixFetch(t *testing.T) {
 
 	// Register a package with fake store paths.
 	regBody := `{"fromPath":"/nix/store/abc00000000000000000000000000001-hello-1.0.0","toPath":"/nix/store/xyz00000000000000000000000000002-hello-1.0.0","mainProgram":"hello","system":"x86_64-linux"}`
-	req, _ := http.NewRequest("PUT", srv.URL+"/cache/f/testowner/hello/1.0.0",
+	req, _ := http.NewRequest("PUT", srv.URL+"/cache/f/hello/1.0.0",
 		strings.NewReader(regBody))
 	req.Header.Set("Authorization", "Bearer "+testToken)
 	req.Header.Set("Content-Type", "application/json")
@@ -330,7 +330,7 @@ func TestRegistryTarballNixFetch(t *testing.T) {
 	}
 
 	// Verify the tarball is valid gzip at the HTTP level.
-	tarballURL := srv.URL + "/cache/f/testowner/hello/1.0.0.tar.gz"
+	tarballURL := srv.URL + "/cache/f/hello/1.0.0.tar.gz"
 	tarResp, err := http.Get(tarballURL)
 	if err != nil {
 		t.Fatal("fetching tarball:", err)
@@ -384,7 +384,7 @@ func TestRegistryTarballNixFetch(t *testing.T) {
 	}
 
 	// Test the * redirect: GET *.tar.gz should 307 to versioned URL.
-	latestURL := srv.URL + "/cache/f/testowner/hello/*.tar.gz"
+	latestURL := srv.URL + "/cache/f/hello/*.tar.gz"
 	client := &http.Client{CheckRedirect: func(req *http.Request, via []*http.Request) error {
 		return http.ErrUseLastResponse // don't follow redirects
 	}}
@@ -397,7 +397,7 @@ func TestRegistryTarballNixFetch(t *testing.T) {
 		t.Fatalf("*.tar.gz returned %d, want 307", latestResp.StatusCode)
 	}
 	loc := latestResp.Header.Get("Location")
-	if !strings.HasSuffix(loc, "/cache/f/testowner/hello/1.0.0.tar.gz") {
+	if !strings.HasSuffix(loc, "/cache/f/hello/1.0.0.tar.gz") {
 		t.Errorf("redirect location %q doesn't point to versioned tarball", loc)
 	}
 }
@@ -447,7 +447,6 @@ func TestCapushPushIntegration(t *testing.T) {
 	cacheURL := srv.URL + "/cache"
 	cmd := exec.Command("./scripts/capush.nu", "push", storePath,
 		"--store", cacheURL,
-		"--owner", "test-owner",
 		"--name", "test-pkg",
 		"--version", "1.0.0",
 		"--main-program", "test-bin",
@@ -460,7 +459,7 @@ func TestCapushPushIntegration(t *testing.T) {
 	}
 
 	// Verify registry entry was created
-	resp, err := http.Get(cacheURL + "/f/test-owner/test-pkg/1.0.0")
+	resp, err := http.Get(cacheURL + "/f/test-pkg/1.0.0")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -471,7 +470,7 @@ func TestCapushPushIntegration(t *testing.T) {
 	}
 
 	// Verify tarball is served
-	tarResp, err := http.Get(cacheURL + "/f/test-owner/test-pkg/1.0.0.tar.gz")
+	tarResp, err := http.Get(cacheURL + "/f/test-pkg/1.0.0.tar.gz")
 	if err != nil {
 		t.Fatal(err)
 	}

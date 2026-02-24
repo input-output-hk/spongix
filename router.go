@@ -82,7 +82,7 @@ func (proxy *Proxy) router() *mux.Router {
 		ns := proxy.config.Namespaces[name]
 		if proxy.pebbleDB != nil && ns.Registry != nil && ns.Registry.Enable {
 			f := namespace.PathPrefix("/f").Subrouter()
-			matchPkg := "/{owner:[a-zA-Z0-9_-]+}/{pkg:[a-zA-Z0-9_][a-zA-Z0-9._-]*}"
+			matchPkg := "/{pkg:[a-zA-Z0-9_][a-zA-Z0-9._-]*}"
 			matchVer := matchPkg + "/{version:[0-9][0-9a-zA-Z.*_-]*}"
 
 			f.HandleFunc(matchVer+".tar.gz", proxy.registryFlakeTarball).Methods("GET")
@@ -91,7 +91,7 @@ func (proxy *Proxy) router() *mux.Router {
 			f.HandleFunc(matchVer, proxy.requireBearerToken(proxy.registryDelete)).Methods("DELETE")
 			f.HandleFunc(matchVer, proxy.registryGet).Methods("GET")
 			f.HandleFunc(matchPkg, proxy.registryListVersions).Methods("GET")
-			f.HandleFunc("/{owner:[a-zA-Z0-9_-]+}", proxy.registryListPackages).Methods("GET")
+			f.HandleFunc("", proxy.registryListPackages).Methods("GET")
 		}
 	}
 
@@ -143,7 +143,8 @@ func (p *Proxy) requireBearerToken(next http.HandlerFunc) http.HandlerFunc {
 // The pin persists in Pebble and takes effect on the next GC cycle.
 func (p *Proxy) pinHash(w http.ResponseWriter, r *http.Request) {
 	hash := mux.Vars(r)["hash"]
-	if err := p.pebbleDB.PinHash(hash); err != nil {
+	label, _ := io.ReadAll(r.Body)
+	if err := p.pebbleDB.PinHash(hash, string(label)); err != nil {
 		p.log.Error("pinning hash", zap.String("hash", hash), zap.Error(err))
 		answer(w, http.StatusInternalServerError, mimeText, err.Error())
 		return
@@ -171,7 +172,7 @@ func (p *Proxy) listPins(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if pins == nil {
-		pins = []string{}
+		pins = []store.PinEntry{}
 	}
 	w.Header().Set("Content-Type", mimeJson)
 	w.WriteHeader(http.StatusOK)

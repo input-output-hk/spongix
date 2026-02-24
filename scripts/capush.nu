@@ -2,9 +2,6 @@
 
 use std log
 
-const capkg_prefix = "capkg-"
-const json_file = "capkgs.json"
-
 # Resolve a flag value: use flag if non-empty, else env var, else empty string
 def resolve-env [flag: string, env_name: string]: nothing -> string {
   if $flag != "" { $flag } else { $env | get -o $env_name | default "" }
@@ -15,11 +12,8 @@ def auth-headers [token: string]: nothing -> list {
   if $token == "" { [] } else { [Authorization $"Bearer ($token)"] }
 }
 
-# Build, make content-addressed, and push a single installable
-def process-one [
-  installable: string
-  --store: string
-]: nothing -> record {
+# Build, make content-addressed, and return the rewrite paths (does not push)
+def build-ca [installable: string]: nothing -> record {
   log info $"Building ($installable)..."
   let from_path = ^nix build --no-link --print-out-paths $installable | str trim
 
@@ -30,10 +24,21 @@ def process-one [
   log info $"  from: ($rewrite.from)"
   log info $"  to:   ($rewrite.to)"
 
-  log info $"Pushing to ($store)..."
-  ^nix copy --to $"($store)?compression=none" $rewrite.from
-
   $rewrite
+}
+
+# Copy a store path to the remote cache
+def push-to-store [store: string, path: string]: nothing -> nothing {
+  log info $"Pushing to ($store)..."
+  ^nix copy --to $"($store)?compression=none" $path
+}
+
+# Look up an existing registry entry for a specific system
+def registry-lookup [
+  store: string, pkg: string, version: string, system: string
+]: nothing -> any {
+  let entries = try { http get $"($store)/f/($pkg)/($version)" } catch { [] }
+  $entries | where system == $system | get -o 0
 }
 
 # Discover capkg-* flake outputs and extract metadata in a single nix eval
@@ -59,7 +64,6 @@ def evaluate-all [system: string]: nothing -> record {
 def "main push" [
   installable: string              # Nix installable to build (e.g. .#package)
   --store: string = ""             # Spongix store URL (or set SPONGIX_STORE env)
-  --owner: string                  # package owner
   --name: string                   # package name
   --version: string                # package version
   --main-program (-m): string = "" # override mainProgram auto-detection
@@ -78,7 +82,8 @@ def "main push" [
     }
   }
 
-  let rewrite = process-one $installable --store $store
+  let rewrite = build-ca $installable
+  push-to-store $store $rewrite.from
 
   let system = ^nix eval --raw --impure --expr 'builtins.currentSystem'
   let body = {
@@ -88,7 +93,7 @@ def "main push" [
     system: $system
   }
 
-  let url = $"($store)/f/($owner)/($name)/($version)"
+  let url = $"($store)/f/($name)/($version)"
   log info $"Registering at ($url)..."
   http put --content-type application/json -H (auth-headers $token) $url ($body | to json)
   log info "Done."
@@ -96,9 +101,12 @@ def "main push" [
 }
 
 # Discover capkg-* packages, build/push changed, register all
+#
+# For each package: builds + CA (instant when cached), compares the
+# resulting fromPath against the registry entry. Only pushes and
+# re-registers when the fromPath has changed.
 def "main sync" [
   --store: string = ""    # Spongix store URL (or set SPONGIX_STORE env)
-  --owner: string         # package owner for registry
   --token: string = ""    # bearer token (or set SPONGIX_TOKEN env)
 ] {
   let store = resolve-env $store SPONGIX_STORE
@@ -110,21 +118,21 @@ def "main sync" [
   let pkgs = $pkg_meta | columns
   log info $"Discovered ($pkgs | length) packages: ($pkgs | str join ', ')"
 
-  let old_entries = if ($json_file | path exists) { open $json_file } else { {} }
+  mut pushed = 0
+  mut skipped = 0
 
-  let results = $pkgs | each {|pkg|
-    let attr = $pkg | str replace $capkg_prefix ""
+  for pkg in $pkgs {
+    let attr = $pkg | str replace "capkg-" ""
     let meta = $pkg_meta | get $pkg
-    let hash = $meta.drvPath | hash sha256
 
-    let cached = $old_entries | transpose k v
-      | where {|row| $row.k == $attr and ($row.v | get -o inputHash) == $hash }
+    let rewrite = build-ca $".#($pkg)"
 
-    if ($cached | is-not-empty) {
-      log info $"Skipping ($pkg) \(cached\)"
-      { attr_name: $attr, entry: ($cached | first | get v) }
+    let existing = registry-lookup $store $attr $meta.version $system
+    if $existing != null and $existing.fromPath == $rewrite.from {
+      log info $"Skipping ($attr) \(registry match\)"
+      $skipped += 1
     } else {
-      let rewrite = process-one $".#($pkg)" --store $store
+      push-to-store $store $rewrite.from
 
       let body = {
         fromPath: $rewrite.from
@@ -132,106 +140,64 @@ def "main sync" [
         mainProgram: $meta.mainProgram
         system: $system
       }
-      let url = $"($store)/f/($owner)/($attr)/($meta.version)"
+      let url = $"($store)/f/($attr)/($meta.version)"
       log info $"Registering ($attr) at ($url)..."
       http put --content-type application/json -H (auth-headers $token) $url ($body | to json)
+      $pushed += 1
+    }
+  }
 
-      {
-        attr_name: $attr
-        entry: {
-          fromStore: $store
-          fromPath: $rewrite.from
-          toPath: $rewrite.to
-          mainProgram: $meta.mainProgram
-          version: $meta.version
-          inputHash: $hash
+  log info $"=== Sync Summary: ($pushed) pushed, ($skipped) skipped ==="
+}
+
+# Check cache integrity by walking the registry and re-pushing missing entries
+def "main verify" [
+  --store: string = ""   # Spongix store URL (or set SPONGIX_STORE env)
+  --token: string = ""   # bearer token (or set SPONGIX_TOKEN env)
+] {
+  let store = resolve-env $store SPONGIX_STORE
+  let token = resolve-env $token SPONGIX_TOKEN
+
+  let packages = try { http get $"($store)/f" } catch { [] }
+  if ($packages | is-empty) {
+    log info "No packages found in registry."
+    return
+  }
+
+  mut total = 0
+  mut missing_count = 0
+
+  for pkg in $packages {
+    let versions = try { http get $"($store)/f/($pkg)" } catch { [] }
+
+    for version in $versions {
+      let entries = try { http get $"($store)/f/($pkg)/($version)" } catch { [] }
+
+      for entry in $entries {
+        $total += 1
+        let present = try {
+          ^nix path-info --store $store $entry.fromPath o+e>| ignore
+          true
+        } catch {
+          false
+        }
+
+        if $present {
+          log info $"  OK: ($pkg)/($version) \(($entry.system)\)"
+        } else {
+          log warning $"  MISSING: ($pkg)/($version) \(($entry.system)\) ($entry.fromPath)"
+          $missing_count += 1
+
+          log info $"  Re-pushing ($pkg)/($version)..."
+          ^nix copy --to $"($store)?compression=none" $entry.fromPath
+          log info $"  Pushed ($pkg)/($version)"
         }
       }
     }
   }
 
-  let new_entries = $results | reduce --fold {} {|it, acc| $acc | insert $it.attr_name $it.entry }
-
-  # Diff reporting
-  let old_keys = $old_entries | columns
-  let new_keys = $new_entries | columns
-  let added = $new_keys | where { $in not-in $old_keys }
-  let removed = $old_keys | where { $in not-in $new_keys }
-  let common = $new_keys | where { $in in $old_keys }
-  let changed = $common | where {|k|
-    ($old_entries | get $k | reject -o inputHash) != ($new_entries | get $k | reject -o inputHash)
-  }
-  let unchanged = $common | where {|k|
-    ($old_entries | get $k | reject -o inputHash) == ($new_entries | get $k | reject -o inputHash)
-  }
-
-  let counts = [
-    $"($added | length) added"
-    $"($changed | length) changed"
-    $"($removed | length) removed"
-    $"($unchanged | length) unchanged"
-  ] | str join ', '
-  log info $"=== Sync Summary: ($counts) ==="
-  for a in $added { log info $"+ ($a) ($new_entries | get $a | get -o version | default '')" }
-  for c in $changed {
-    let old_ver = $old_entries | get $c | get -o version | default '?'
-    let new_ver = $new_entries | get $c | get -o version | default '?'
-    log info $"~ ($c) ($old_ver) -> ($new_ver)"
-  }
-  for r in $removed { log warning $"- ($r)" }
-
-  $new_entries | to json --indent 2 | save --force $json_file
-  log info $"Wrote ($json_file)"
-}
-
-# Check cache integrity and re-push missing entries
-def "main verify" [
-  --store: string = ""  # override fromStore in entries (or set SPONGIX_STORE env)
-] {
-  if not ($json_file | path exists) {
-    error make { msg: $"($json_file) not found" }
-  }
-
-  let entries = open $json_file
-  let names = $entries | columns
-  log info $"Verifying ($names | length) entries in cache..."
-
-  mut missing = []
-  for name in $names {
-    let entry = $entries | get $name
-    let check_store = if $store != "" { $store } else { $entry.fromStore }
-    let present = try {
-      ^nix path-info --store $check_store $entry.fromPath o+e>| ignore
-      true
-    } catch {
-      false
-    }
-
-    if $present {
-      log info $"  OK: ($name) \(($entry.fromPath)\)"
-    } else {
-      log warning $"  MISSING: ($name) \(($entry.fromPath)\)"
-      $missing = ($missing | append $name)
-    }
-  }
-
-  if ($missing | is-empty) {
-    log info "All entries present in cache."
-    return
-  }
-
-  log warning $"($missing | length) missing entries, re-pushing..."
-  for name in $missing {
-    let entry = $entries | get $name
-    let check_store = if $store != "" { $store } else { $entry.fromStore }
-    log info $"  Re-pushing ($name)..."
-    ^nix copy --to $"($check_store)?compression=none" $entry.fromPath
-    log info $"  Pushed ($name)"
-  }
-
   log info "=== Verify Summary ==="
-  log info $"  Present: (($names | length) - ($missing | length))/($names | length)"
-  log info $"  Re-pushed: ($missing | str join ', ')"
+  log info $"  Total: ($total), Present: ($total - $missing_count), Re-pushed: ($missing_count)"
 }
 
 # Push content-addressed Nix packages to a Spongix registry.

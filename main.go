@@ -313,6 +313,10 @@ func (proxy *Proxy) setupChunks() {
 		}
 		proxy.pebbleDB = db
 		proxy.chunkStore = store.NewChunkStore(db)
+
+		if err := db.MigrateRegistryDropOwner(); err != nil {
+			proxy.log.Fatal("registry migration failed", zap.Error(err))
+		}
 	}
 }
 

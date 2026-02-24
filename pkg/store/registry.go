@@ -16,7 +16,6 @@ var ErrRegistryEntryNotFound = errors.New("registry entry not found")
 
 // RegistryEntry mirrors the main package's RegistryEntry for storage.
 type RegistryEntry struct {
-	Owner       string `json:"owner"`
 	Name        string `json:"name"`
 	Version     string `json:"version"`
 	System      string `json:"system"`
@@ -27,30 +26,30 @@ type RegistryEntry struct {
 	CreatedAt   int64  `json:"createdAt"`
 }
 
-// registryKey returns: reg/{namespace}/{owner}/{name}/{version}/{system}
-func registryKey(namespace, owner, name, version, system string) []byte {
-	k := "reg/" + namespace + "/" + owner + "/" + name + "/" + version + "/" + system
+// registryKey returns: reg/{namespace}/{name}/{version}/{system}
+func registryKey(namespace, name, version, system string) []byte {
+	k := "reg/" + namespace + "/" + name + "/" + version + "/" + system
 	return []byte(k)
 }
 
-// registryVersionPrefix returns: reg/{namespace}/{owner}/{name}/{version}/
-func registryVersionPrefix(namespace, owner, name, version string) []byte {
-	return []byte("reg/" + namespace + "/" + owner + "/" + name + "/" + version + "/")
+// registryVersionPrefix returns: reg/{namespace}/{name}/{version}/
+func registryVersionPrefix(namespace, name, version string) []byte {
+	return []byte("reg/" + namespace + "/" + name + "/" + version + "/")
 }
 
-// registryPackagePrefix returns: reg/{namespace}/{owner}/{name}/
-func registryPackagePrefix(namespace, owner, name string) []byte {
-	return []byte("reg/" + namespace + "/" + owner + "/" + name + "/")
+// registryPackagePrefix returns: reg/{namespace}/{name}/
+func registryPackagePrefix(namespace, name string) []byte {
+	return []byte("reg/" + namespace + "/" + name + "/")
 }
 
-// registryOwnerPrefix returns: reg/{namespace}/{owner}/
-func registryOwnerPrefix(namespace, owner string) []byte {
-	return []byte("reg/" + namespace + "/" + owner + "/")
+// registryNamespacePrefix returns: reg/{namespace}/
+func registryNamespacePrefix(namespace string) []byte {
+	return []byte("reg/" + namespace + "/")
 }
 
 // PutRegistryEntry stores a registry entry.
 func (d *DB) PutRegistryEntry(namespace string, entry *RegistryEntry) error {
-	key := registryKey(namespace, entry.Owner, entry.Name, entry.Version, entry.System)
+	key := registryKey(namespace, entry.Name, entry.Version, entry.System)
 	val, err := json.Marshal(entry)
 	if err != nil {
 		return fmt.Errorf("marshaling registry entry: %w", err)
@@ -59,8 +58,8 @@ func (d *DB) PutRegistryEntry(namespace string, entry *RegistryEntry) error {
 }
 
 // GetRegistryEntry retrieves a single registry entry by exact key.
-func (d *DB) GetRegistryEntry(namespace, owner, name, version, system string) (*RegistryEntry, error) {
-	key := registryKey(namespace, owner, name, version, system)
+func (d *DB) GetRegistryEntry(namespace, name, version, system string) (*RegistryEntry, error) {
+	key := registryKey(namespace, name, version, system)
 	val, closer, err := d.db.Get(key)
 	if errors.Is(err, pebble.ErrNotFound) {
 		return nil, ErrRegistryEntryNotFound
@@ -80,20 +79,20 @@ func (d *DB) GetRegistryEntry(namespace, owner, name, version, system string) (*
 }
 
 // GetRegistryEntries returns all system entries for a given package version.
-func (d *DB) GetRegistryEntries(namespace, owner, name, version string) ([]*RegistryEntry, error) {
-	prefix := registryVersionPrefix(namespace, owner, name, version)
+func (d *DB) GetRegistryEntries(namespace, name, version string) ([]*RegistryEntry, error) {
+	prefix := registryVersionPrefix(namespace, name, version)
 	return d.iterRegistryEntries(prefix)
 }
 
 // DeleteRegistryEntry deletes a single registry entry.
-func (d *DB) DeleteRegistryEntry(namespace, owner, name, version, system string) error {
-	key := registryKey(namespace, owner, name, version, system)
+func (d *DB) DeleteRegistryEntry(namespace, name, version, system string) error {
+	key := registryKey(namespace, name, version, system)
 	return d.db.Delete(key, pebble.Sync)
 }
 
 // DeleteRegistryVersion deletes all system entries for a package version.
-func (d *DB) DeleteRegistryVersion(namespace, owner, name, version string) error {
-	prefix := registryVersionPrefix(namespace, owner, name, version)
+func (d *DB) DeleteRegistryVersion(namespace, name, version string) error {
+	prefix := registryVersionPrefix(namespace, name, version)
 	iter, err := d.db.NewIter(&pebble.IterOptions{
 		LowerBound: prefix,
 		UpperBound: incrementKey(prefix),
@@ -115,8 +114,8 @@ func (d *DB) DeleteRegistryVersion(namespace, owner, name, version string) error
 }
 
 // ListRegistryVersions returns all unique versions for a package.
-func (d *DB) ListRegistryVersions(namespace, owner, name string) ([]string, error) {
-	prefix := registryPackagePrefix(namespace, owner, name)
+func (d *DB) ListRegistryVersions(namespace, name string) ([]string, error) {
+	prefix := registryPackagePrefix(namespace, name)
 	iter, err := d.db.NewIter(&pebble.IterOptions{
 		LowerBound: prefix,
 		UpperBound: incrementKey(prefix),
@@ -129,7 +128,7 @@ func (d *DB) ListRegistryVersions(namespace, owner, name string) ([]string, erro
 	seen := map[string]struct{}{}
 	var versions []string
 	for iter.First(); iter.Valid(); iter.Next() {
-		// Key: reg/{ns}/{owner}/{name}/{version}/{system}
+		// Key: reg/{ns}/{name}/{version}/{system}
 		key := string(iter.Key())
 		rest := strings.TrimPrefix(key, string(prefix))
 		parts := strings.SplitN(rest, "/", 2)
@@ -147,9 +146,9 @@ func (d *DB) ListRegistryVersions(namespace, owner, name string) ([]string, erro
 	return versions, nil
 }
 
-// ListRegistryPackages returns all unique package names for an owner.
-func (d *DB) ListRegistryPackages(namespace, owner string) ([]string, error) {
-	prefix := registryOwnerPrefix(namespace, owner)
+// ListRegistryPackages returns all unique package names for a namespace.
+func (d *DB) ListRegistryPackages(namespace string) ([]string, error) {
+	prefix := registryNamespacePrefix(namespace)
 	iter, err := d.db.NewIter(&pebble.IterOptions{
 		LowerBound: prefix,
 		UpperBound: incrementKey(prefix),
@@ -162,7 +161,7 @@ func (d *DB) ListRegistryPackages(namespace, owner string) ([]string, error) {
 	seen := map[string]struct{}{}
 	var packages []string
 	for iter.First(); iter.Valid(); iter.Next() {
-		// Key: reg/{ns}/{owner}/{name}/{version}/{system}
+		// Key: reg/{ns}/{name}/{version}/{system}
 		key := string(iter.Key())
 		rest := strings.TrimPrefix(key, string(prefix))
 		parts := strings.SplitN(rest, "/", 2)
@@ -182,8 +181,8 @@ func (d *DB) ListRegistryPackages(namespace, owner string) ([]string, error) {
 
 // RegistryContentHash computes a stable hash over all entries for a package version.
 // Used for ETag headers.
-func (d *DB) RegistryContentHash(namespace, owner, name, version string) (string, error) {
-	entries, err := d.GetRegistryEntries(namespace, owner, name, version)
+func (d *DB) RegistryContentHash(namespace, name, version string) (string, error) {
+	entries, err := d.GetRegistryEntries(namespace, name, version)
 	if err != nil {
 		return "", err
 	}
@@ -196,6 +195,76 @@ func (d *DB) RegistryContentHash(namespace, owner, name, version string) (string
 		h.Write(data)
 	}
 	return hex.EncodeToString(h.Sum(nil))[:16], nil
+}
+
+// MigrateRegistryDropOwner rewrites old 6-segment registry keys
+// (reg/{namespace}/{owner}/{name}/{version}/{system}) to the new 5-segment
+// format (reg/{namespace}/{name}/{version}/{system}). Idempotent: new-format
+// keys are left untouched. Called once at startup.
+func (d *DB) MigrateRegistryDropOwner() error {
+	prefix := []byte("reg/")
+	iter, err := d.db.NewIter(&pebble.IterOptions{
+		LowerBound: prefix,
+		UpperBound: incrementKey(prefix),
+	})
+	if err != nil {
+		return fmt.Errorf("creating migration iterator: %w", err)
+	}
+	defer func() { _ = iter.Close() }()
+
+	batch := d.db.NewBatch()
+	migrated := 0
+
+	for iter.First(); iter.Valid(); iter.Next() {
+		key := string(iter.Key())
+		parts := strings.Split(key, "/")
+		// Old format: reg/{namespace}/{owner}/{name}/{version}/{system} = 6 parts
+		// New format: reg/{namespace}/{name}/{version}/{system} = 5 parts
+		if len(parts) != 6 {
+			continue
+		}
+
+		// parts: [reg, namespace, owner, name, version, system]
+		namespace := parts[1]
+		// owner is parts[2] -- dropped
+		name := parts[3]
+		version := parts[4]
+		system := parts[5]
+
+		// Read the value and strip the owner field from the JSON.
+		val := iter.Value()
+		data := make([]byte, len(val))
+		copy(data, val)
+
+		var entry RegistryEntry
+		if err := json.Unmarshal(data, &entry); err != nil {
+			return fmt.Errorf("unmarshaling old entry %s: %w", key, err)
+		}
+
+		newKey := registryKey(namespace, name, version, system)
+		newVal, err := json.Marshal(&entry)
+		if err != nil {
+			return fmt.Errorf("marshaling migrated entry: %w", err)
+		}
+
+		_ = batch.Set(newKey, newVal, nil)
+		_ = batch.Delete([]byte(key), nil)
+		migrated++
+	}
+	if err := iter.Error(); err != nil {
+		_ = batch.Close()
+		return err
+	}
+
+	if migrated > 0 {
+		if err := batch.Commit(pebble.Sync); err != nil {
+			return fmt.Errorf("committing migration batch: %w", err)
+		}
+	} else {
+		_ = batch.Close()
+	}
+
+	return nil
 }
 
 // iterRegistryEntries iterates over a prefix and returns all registry entries.

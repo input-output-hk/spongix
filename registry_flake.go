@@ -9,17 +9,18 @@ import (
 
 var flakeTemplate = template.Must(template.New("flake.nix").Parse(`{
   outputs = { self, ... }: let
-    symlinkPath = { name, system, path, ... }@args:
+    symlinkPath = { name, system, path, version ? null, ... }@args:
       (derivation {
         inherit name system;
         builder = "${self}/bin/symlink";
         args = [path (placeholder "out")];
         pathToLink = path;
-      }) // args;
+      }) // args // (if version != null then { inherit version; } else {});
   in {
 {{- range .Entries }}
     packages.{{ .System }}.default = symlinkPath {
       name = "{{ $.Name }}-{{ $.Version }}";
+      version = "{{ $.Version }}";
       system = "{{ .System }}";
       path = builtins.fetchClosure {
         fromPath = "{{ .FromPath }}";
@@ -29,6 +30,7 @@ var flakeTemplate = template.Must(template.New("flake.nix").Parse(`{
 {{- if .MainProgram }}
       mainProgram = "{{ .MainProgram }}";
       meta.mainProgram = "{{ .MainProgram }}";
+      passthru.shellPath = "/bin/{{ .MainProgram }}";
 {{- end }}
     };
 {{- end }}

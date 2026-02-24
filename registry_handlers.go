@@ -4,6 +4,8 @@ import (
 	"archive/tar"
 	"bytes"
 	"compress/gzip"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -206,13 +208,10 @@ func (p *Proxy) registryFlakeTarball(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	contentHash, err := p.pebbleDB.RegistryContentHash(namespace, pkg, version)
-	if err != nil {
-		p.log.Error("computing content hash", zap.Error(err))
-		answer(w, http.StatusInternalServerError, mimeText, err.Error())
-		return
-	}
-	etag := `"` + contentHash + `"`
+	// ETag from the actual tarball content (not just registry entries) so that
+	// template or symlink-binary changes also invalidate HTTP caches.
+	tarballHash := sha256.Sum256(tarball)
+	etag := `"` + hex.EncodeToString(tarballHash[:8]) + `"`
 
 	// Handle conditional request.
 	if r.Header.Get("If-None-Match") == etag {

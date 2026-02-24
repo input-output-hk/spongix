@@ -1,7 +1,9 @@
 package main
 
 import (
+	"archive/tar"
 	"bytes"
+	"compress/gzip"
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
@@ -399,6 +401,248 @@ func TestRegistryTarballNixFetch(t *testing.T) {
 	loc := latestResp.Header.Get("Location")
 	if !strings.HasSuffix(loc, "/cache/f/hello/1.0.0.tar.gz") {
 		t.Errorf("redirect location %q doesn't point to versioned tarball", loc)
+	}
+}
+
+// TestRegistryFlakeAttributes verifies that nix eval on a generated registry
+// tarball produces a derivation with version, passthru.shellPath, and
+// meta.mainProgram — the attributes NixOS types.shellPackage requires.
+func TestRegistryFlakeAttributes(t *testing.T) {
+	if _, err := exec.LookPath("nix"); err != nil {
+		t.Skip("nix not in PATH, skipping integration test")
+	}
+
+	proxy := testRegistryProxy(t)
+	srv := httptest.NewServer(proxy.router())
+	defer srv.Close()
+
+	// Register a package with mainProgram set.
+	regBody := `{"fromPath":"/nix/store/abc00000000000000000000000000001-nushell-0.110.1","toPath":"/nix/store/xyz00000000000000000000000000002-nushell-0.110.1","mainProgram":"nu","system":"x86_64-linux"}`
+	req, _ := http.NewRequest("PUT", srv.URL+"/cache/f/nushell/0.110.1",
+		strings.NewReader(regBody))
+	req.Header.Set("Authorization", "Bearer "+testToken)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal("registering package:", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("PUT returned %d, want 201", resp.StatusCode)
+	}
+
+	// Fetch the tarball and extract to a temp dir.
+	tarballURL := srv.URL + "/cache/f/nushell/0.110.1.tar.gz"
+	tarResp, err := http.Get(tarballURL)
+	if err != nil {
+		t.Fatal("fetching tarball:", err)
+	}
+	defer tarResp.Body.Close()
+	tarData, _ := io.ReadAll(tarResp.Body)
+
+	flakeDir := filepath.Join(t.TempDir(), "source")
+	if err := os.MkdirAll(flakeDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	gr, err := gzip.NewReader(bytes.NewReader(tarData))
+	if err != nil {
+		t.Fatalf("invalid gzip: %v", err)
+	}
+	defer gr.Close()
+	tr := tar.NewReader(gr)
+	for {
+		hdr, err := tr.Next()
+		if err != nil {
+			break
+		}
+		// Strip the "source/" prefix from tar entries.
+		name := strings.TrimPrefix(hdr.Name, "source/")
+		if name == "" || name == "source" {
+			continue
+		}
+		target := filepath.Join(flakeDir, name)
+		if hdr.Typeflag == tar.TypeDir {
+			os.MkdirAll(target, 0o755)
+			continue
+		}
+		os.MkdirAll(filepath.Dir(target), 0o755)
+		data, _ := io.ReadAll(tr)
+		os.WriteFile(target, data, os.FileMode(hdr.Mode))
+	}
+
+	// Log the flake.nix for debugging.
+	flakeContent, _ := os.ReadFile(filepath.Join(flakeDir, "flake.nix"))
+	t.Logf("flake.nix:\n%s", flakeContent)
+
+	// Initialize git repo (required for nix flake eval).
+	gitEnv := append(os.Environ(),
+		"GIT_AUTHOR_NAME=test", "GIT_AUTHOR_EMAIL=test@test",
+		"GIT_COMMITTER_NAME=test", "GIT_COMMITTER_EMAIL=test@test",
+		"GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_SYSTEM=/dev/null",
+	)
+	for _, args := range [][]string{
+		{"init"},
+		{"add", "-A"},
+		{"-c", "commit.gpgsign=false", "commit", "-m", "test"},
+	} {
+		cmd := exec.Command("git", args...)
+		cmd.Dir = flakeDir
+		cmd.Env = gitEnv
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %s", args, out)
+		}
+	}
+
+	// Evaluate the flake and check attribute presence.
+	nixCache := t.TempDir()
+	cmd := exec.Command("nix", "eval", "--json",
+		"path:"+flakeDir+"#packages.x86_64-linux.default",
+		"--apply", `pkg: {
+			hasPassthru = pkg ? passthru;
+			hasShellPath = (pkg.passthru or {}) ? shellPath;
+			shellPath = (pkg.passthru or {}).shellPath or "MISSING";
+			hasVersion = pkg ? version;
+			version = pkg.version or "MISSING";
+			hasMainProgram = pkg ? mainProgram;
+			mainProgram = pkg.mainProgram or "MISSING";
+			hasMeta = pkg ? meta;
+			type = pkg.type or "MISSING";
+			attrNames = builtins.attrNames pkg;
+		}`)
+	cmd.Env = append(os.Environ(), "XDG_CACHE_HOME="+nixCache)
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("nix eval failed:\nstdout: %s\nstderr: %s", stdout.String(), stderr.String())
+	}
+
+	var result struct {
+		HasPassthru    bool     `json:"hasPassthru"`
+		HasShellPath   bool     `json:"hasShellPath"`
+		ShellPath      string   `json:"shellPath"`
+		HasVersion     bool     `json:"hasVersion"`
+		Version        string   `json:"version"`
+		HasMainProgram bool     `json:"hasMainProgram"`
+		MainProgram    string   `json:"mainProgram"`
+		HasMeta        bool     `json:"hasMeta"`
+		Type           string   `json:"type"`
+		AttrNames      []string `json:"attrNames"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+		t.Fatalf("parsing nix eval output: %v\nraw: %s", err, stdout.String())
+	}
+	t.Logf("nix eval result: %+v", result)
+
+	if result.Type != "derivation" {
+		t.Errorf("expected type 'derivation', got %q", result.Type)
+	}
+	if !result.HasVersion {
+		t.Errorf("missing version attribute; attrNames: %v", result.AttrNames)
+	} else if result.Version != "0.110.1" {
+		t.Errorf("version = %q, want %q", result.Version, "0.110.1")
+	}
+	if !result.HasPassthru {
+		t.Errorf("missing passthru attribute; attrNames: %v", result.AttrNames)
+	}
+	if !result.HasShellPath {
+		t.Errorf("missing passthru.shellPath; attrNames: %v", result.AttrNames)
+	} else if result.ShellPath != "/bin/nu" {
+		t.Errorf("passthru.shellPath = %q, want %q", result.ShellPath, "/bin/nu")
+	}
+	if !result.HasMainProgram {
+		t.Errorf("missing mainProgram attribute")
+	} else if result.MainProgram != "nu" {
+		t.Errorf("mainProgram = %q, want %q", result.MainProgram, "nu")
+	}
+	if !result.HasMeta {
+		t.Errorf("missing meta attribute")
+	}
+}
+
+// TestRegistryFlakeAttributesViaTarball is the same as TestRegistryFlakeAttributes
+// but evaluates via the tarball URL (the production code path) rather than extracting
+// to a local directory. This catches issues with Nix's tarball fetcher/caching.
+func TestRegistryFlakeAttributesViaTarball(t *testing.T) {
+	if _, err := exec.LookPath("nix"); err != nil {
+		t.Skip("nix not in PATH, skipping integration test")
+	}
+
+	proxy := testRegistryProxy(t)
+	srv := httptest.NewServer(proxy.router())
+	defer srv.Close()
+
+	regBody := `{"fromPath":"/nix/store/abc00000000000000000000000000001-nushell-0.110.1","toPath":"/nix/store/xyz00000000000000000000000000002-nushell-0.110.1","mainProgram":"nu","system":"x86_64-linux"}`
+	req, _ := http.NewRequest("PUT", srv.URL+"/cache/f/nushell/0.110.1",
+		strings.NewReader(regBody))
+	req.Header.Set("Authorization", "Bearer "+testToken)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal("registering package:", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("PUT returned %d, want 201", resp.StatusCode)
+	}
+
+	// Evaluate via the tarball URL — this is how nix flake lock works.
+	tarballURL := srv.URL + "/cache/f/nushell/0.110.1.tar.gz"
+	nixCache := t.TempDir()
+	cmd := exec.Command("nix", "eval", "--json", "--impure",
+		"--expr", fmt.Sprintf(`
+			let
+				flake = builtins.getFlake "tarball+%s";
+				pkg = flake.packages.x86_64-linux.default;
+			in {
+				hasPassthru = pkg ? passthru;
+				hasShellPath = (pkg.passthru or {}) ? shellPath;
+				shellPath = (pkg.passthru or {}).shellPath or "MISSING";
+				hasVersion = pkg ? version;
+				version = pkg.version or "MISSING";
+				mainProgram = pkg.mainProgram or "MISSING";
+				type = pkg.type or "MISSING";
+				attrNames = builtins.attrNames pkg;
+			}
+		`, tarballURL))
+	cmd.Env = append(os.Environ(), "XDG_CACHE_HOME="+nixCache)
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("nix eval failed:\nstdout: %s\nstderr: %s", stdout.String(), stderr.String())
+	}
+
+	var result struct {
+		HasPassthru  bool     `json:"hasPassthru"`
+		HasShellPath bool     `json:"hasShellPath"`
+		ShellPath    string   `json:"shellPath"`
+		HasVersion   bool     `json:"hasVersion"`
+		Version      string   `json:"version"`
+		MainProgram  string   `json:"mainProgram"`
+		Type         string   `json:"type"`
+		AttrNames    []string `json:"attrNames"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+		t.Fatalf("parsing nix eval output: %v\nraw: %s", err, stdout.String())
+	}
+	t.Logf("nix eval result: %+v", result)
+
+	if result.Type != "derivation" {
+		t.Errorf("expected type 'derivation', got %q", result.Type)
+	}
+	if !result.HasVersion {
+		t.Errorf("missing version attribute; attrNames: %v", result.AttrNames)
+	} else if result.Version != "0.110.1" {
+		t.Errorf("version = %q, want %q", result.Version, "0.110.1")
+	}
+	if !result.HasPassthru {
+		t.Errorf("missing passthru attribute; attrNames: %v", result.AttrNames)
+	}
+	if !result.HasShellPath {
+		t.Errorf("missing passthru.shellPath; attrNames: %v", result.AttrNames)
+	} else if result.ShellPath != "/bin/nu" {
+		t.Errorf("passthru.shellPath = %q, want %q", result.ShellPath, "/bin/nu")
 	}
 }
 

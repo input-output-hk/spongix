@@ -184,6 +184,16 @@ func sizeEvict(db *DB, cfg GCConfig) (sizeEvictResult, error) {
 		hash := extractStorePathHash(cand.path)
 		_ = batch.Delete(narRefKey(hash), nil)
 
+		// Delete nh/ and nhr/ entries if present.
+		nhrKey := narHashReverseKey(hash)
+		if nhrVal, nhrCloser, nhrErr := db.db.Get(nhrKey); nhrErr == nil {
+			nh52 := make([]byte, len(nhrVal))
+			copy(nh52, nhrVal)
+			_ = nhrCloser.Close()
+			_ = batch.Delete(narHashKey(string(nh52)), nil)
+			_ = batch.Delete(nhrKey, nil)
+		}
+
 		// Read index to delete cr/ entries and orphaned chunks.
 		idxVal, idxCloser, idxErr := db.db.Get(indexKey(cand.path))
 		if idxErr == nil {
@@ -392,6 +402,16 @@ func deleteUnreachableIndices(db *DB, reachable map[string]struct{}, dryRun bool
 		_ = batch.Delete(timestampKey(indexPath), nil)
 		// Delete NAR refs (if any)
 		_ = batch.Delete(narRefKey(hash), nil)
+
+		// Delete nh/ and nhr/ entries if present.
+		nhrKey := narHashReverseKey(hash)
+		if nhrVal, nhrCloser, nhrErr := db.db.Get(nhrKey); nhrErr == nil {
+			nh52 := make([]byte, len(nhrVal))
+			copy(nh52, nhrVal)
+			_ = nhrCloser.Close()
+			_ = batch.Delete(narHashKey(string(nh52)), nil)
+			_ = batch.Delete(nhrKey, nil)
+		}
 
 		// Read the index to get chunk IDs for cr/ cleanup
 		idx, err := desync.IndexFromReader(strings.NewReader(string(iter.Value())))

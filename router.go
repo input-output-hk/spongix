@@ -632,19 +632,21 @@ func (p *Proxy) rewriteNarinfo(body []byte) ([]byte, error) {
 		return nil, fmt.Errorf("parsing narinfo: %w", err)
 	}
 
-	// Rewrite compression fields if the NAR was stored compressed.
+	// Normalize compression fields to uncompressed.
 	if info.Compression != "none" && info.Compression != "" {
 		info.Compression = "none"
 		info.FileHash = info.NarHash
 		info.FileSize = info.NarSize
+	}
 
-		// Strip compression extension from URL.
-		for _, ext := range []string{".xz", ".zst", ".bz2", ".br"} {
-			if strings.HasSuffix(info.URL, ext) {
-				info.URL = strings.TrimSuffix(info.URL, ext)
-				break
-			}
-		}
+	// Always normalize URL to nar/{narHash}.nar, regardless of compression.
+	// Upstream URLs use the compressed file hash (e.g., nar/{compressedHash}.nar.xz),
+	// but spongix stores NARs keyed by NarHash. Without this normalization,
+	// the URL hash and storage key diverge, causing 404s on cache misses.
+	narHashStr := info.NarHash.String() // "sha256:base32hash"
+	parts := strings.SplitN(narHashStr, ":", 2)
+	if len(parts) == 2 {
+		info.URL = "nar/" + parts[1] + ".nar"
 	}
 
 	// Append our signature if a signing key is configured and not already present.

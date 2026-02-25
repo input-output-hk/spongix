@@ -259,6 +259,45 @@ func TestNarinfoRewriteCompression(t *testing.T) {
 			End()
 	})
 
+	t.Run("xz URL hash differs from NarHash", func(tt *testing.T) {
+		proxy := testProxy(tt)
+
+		// Simulate cache.nixos.org: URL contains the compressed file hash,
+		// which differs from NarHash.
+		compressedHash := "0rjb49w7dldq79d3ax30gw279bnbn48w9q925g3lr0rhrl0ycxvs"
+		inputNarinfo := fmt.Sprintf(`StorePath: /nix/store/hyhrnrnpsz9fw5p9dk85a58y31ink18c-test
+URL: nar/%s.nar.xz
+Compression: xz
+FileHash: sha256:%s
+FileSize: 224
+NarHash: sha256:%s
+NarSize: 512
+References: 5b4cprjhjw35wyzvgmgvqay4hjf59h7x-test
+Deriver: 914ivbx6hfpgczwphndm0vc4z6q2c8a1-test.drv
+Sig: kappa:sn5s/RrqEI+YG6/PjwdbPjcAC7rcta7sJU4mFOawGvJBLsWkyLtBrT2EuFt/LJjWkTZ+ZWOI9NTtjo/woMdvAg==
+`, compressedHash, compressedHash, narHash)
+
+		apitest.New().
+			Handler(proxy.router()).
+			Method(http.MethodPut).
+			URL(nsNarinfo).
+			Body(inputNarinfo).
+			Expect(tt).
+			Status(http.StatusCreated).
+			End()
+
+		// The URL must use NarHash, NOT the compressed file hash
+		apitest.New().
+			Handler(proxy.router()).
+			Method(http.MethodGet).
+			URL(nsNarinfo).
+			Expect(tt).
+			Status(http.StatusOK).
+			Assert(narinfoFieldEquals(tt, "URL", "nar/"+narHash+".nar")).
+			Assert(narinfoFieldEquals(tt, "Compression", "none")).
+			End()
+	})
+
 	t.Run("none unchanged", func(tt *testing.T) {
 		proxy := testProxy(tt)
 

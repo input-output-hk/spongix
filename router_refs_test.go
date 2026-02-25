@@ -63,6 +63,23 @@ NarSize: 512
 	}
 }
 
+func TestParseNarinfoNarHash52(t *testing.T) {
+	body := []byte("StorePath: /nix/store/hyhrnrnpsz9fw5p9dk85a58y31ink18c-test\nURL: nar/1h6m2q7f8zq5z4kvn8j5wiz05jdic77df1x68dfwqg149jsy7gyp.nar\nCompression: none\nNarHash: sha256:1h6m2q7f8zq5z4kvn8j5wiz05jdic77df1x68dfwqg149jsy7gyp\nNarSize: 512\n")
+	got := parseNarinfoNarHash52(body)
+	want := "1h6m2q7f8zq5z4kvn8j5wiz05jdic77df1x68dfwqg149jsy7gyp"
+	if got != want {
+		t.Fatalf("parseNarinfoNarHash52 = %q, want %q", got, want)
+	}
+}
+
+func TestParseNarinfoNarHash52Missing(t *testing.T) {
+	body := []byte("StorePath: /nix/store/hyhrnrnpsz9fw5p9dk85a58y31ink18c-test\nURL: nar/hash.nar\nCompression: none\nNarSize: 512\n")
+	got := parseNarinfoNarHash52(body)
+	if got != "" {
+		t.Fatalf("expected empty for missing NarHash, got %q", got)
+	}
+}
+
 func TestParseNarinfoReferencesNoDash(t *testing.T) {
 	body := []byte(`StorePath: /nix/store/hyhrnrnpsz9fw5p9dk85a58y31ink18c-test
 References: nodashhere validhash-withname anothernodash

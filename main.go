@@ -448,42 +448,48 @@ func (proxy *Proxy) doCache(req *cacheRequest) {
 			baseURL := extractBaseURL(req.url)
 			narURL := baseURL + "/" + info.URL
 
-			// 4. Extract NAR hash for index location
-			narHash := extractNarHash(info.URL)
-			narLocation := fmt.Sprintf("indices/nar/%s/%s", narHash[:4], narHash)
+			// 4. Compute NAR storage location from NarHash (not URL's compressed file hash)
+			narHashStr := info.NarHash.String() // "sha256:base32hash"
+			narHashParts := strings.SplitN(narHashStr, ":", 2)
+			if len(narHashParts) != 2 {
+				proxy.log.Error("malformed NarHash in narinfo", zap.String("narhash", narHashStr))
+			} else {
+				narHash52 := narHashParts[1]
+				narLocation := fmt.Sprintf("indices/nar/%s/%s", narHash52[:4], narHash52)
 
-			// 5. Download NAR from upstream
-			narReq, err := http.NewRequestWithContext(ctx, "GET", narURL, nil)
-			if err == nil {
-				narResp, err := proxy.httpGetClient.Do(narReq)
+				// 5. Download NAR from upstream
+				narReq, err := http.NewRequestWithContext(ctx, "GET", narURL, nil)
 				if err == nil {
-					defer func() { _ = narResp.Body.Close() }()
-					if narResp.StatusCode == http.StatusOK {
-						// 6. Decompress
-						ext := narExtFromURL(info.URL)
-						rc, err := decompressReader(ext, narResp.Body)
-						if err == nil {
-							defer func() {
-								if err := rc.Close(); err != nil {
-									proxy.log.Warn("closing decompressor", zap.Error(err))
+					narResp, err := proxy.httpGetClient.Do(narReq)
+					if err == nil {
+						defer func() { _ = narResp.Body.Close() }()
+						if narResp.StatusCode == http.StatusOK {
+							// 6. Decompress
+							ext := narExtFromURL(info.URL)
+							rc, err := decompressReader(ext, narResp.Body)
+							if err == nil {
+								defer func() {
+									if err := rc.Close(); err != nil {
+										proxy.log.Warn("closing decompressor", zap.Error(err))
+									}
+								}()
+								// 7. Insert decompressed NAR at NarHash location
+								if err := proxy.insert(ctx, req.namespace, narLocation, rc); err != nil {
+									proxy.log.Error("failed caching NAR",
+										zap.String("url", narURL),
+										zap.Error(err))
 								}
-							}()
-							// 7. Insert decompressed NAR
-							if err := proxy.insert(ctx, req.namespace, narLocation, rc); err != nil {
-								proxy.log.Error("failed caching NAR",
+							} else {
+								proxy.log.Error("decompressing NAR",
 									zap.String("url", narURL),
 									zap.Error(err))
 							}
-						} else {
-							proxy.log.Error("decompressing NAR",
-								zap.String("url", narURL),
-								zap.Error(err))
 						}
+					} else {
+						proxy.log.Error("downloading NAR",
+							zap.String("url", narURL),
+							zap.Error(err))
 					}
-				} else {
-					proxy.log.Error("downloading NAR",
-						zap.String("url", narURL),
-						zap.Error(err))
 				}
 			}
 		}
@@ -546,14 +552,3 @@ func narExtFromURL(u string) string {
 	return ""
 }
 
-// extractNarHash extracts the NAR hash from a NAR URL path like "nar/abc123.nar.xz".
-func extractNarHash(narURL string) string {
-	base := path.Base(narURL)
-	// Strip known compression extensions
-	for _, ext := range []string{".xz", ".zst", ".bz2", ".br"} {
-		base = strings.TrimSuffix(base, ext)
-	}
-	// Strip .nar extension
-	base = strings.TrimSuffix(base, ".nar")
-	return base
-}

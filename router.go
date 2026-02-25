@@ -567,8 +567,9 @@ func (p *Proxy) insert(ctx context.Context, namespace, location string, body io.
 		return fmt.Errorf("namespace '%s' not found", namespace)
 	}
 
-	// For narinfos, buffer the body to parse References for reference tracking.
+	// For narinfos, buffer the body to parse References and NarHash for reference tracking.
 	var narRefs []string
+	var narHash52 string
 	isNarinfo := strings.HasPrefix(location, "indices/narinfo/")
 	if isNarinfo {
 		bodyBytes, err := io.ReadAll(body)
@@ -580,6 +581,7 @@ func (p *Proxy) insert(ctx context.Context, namespace, location string, body io.
 			return fmt.Errorf("failed rewriting narinfo: %w", err)
 		}
 		narRefs = parseNarinfoReferences(bodyBytes)
+		narHash52 = parseNarinfoNarHash52(bodyBytes)
 		body = bytes.NewReader(bodyBytes)
 	}
 
@@ -594,7 +596,7 @@ func (p *Proxy) insert(ctx context.Context, namespace, location string, body io.
 		if err != nil {
 			return fmt.Errorf("failed chunking: %w", err)
 		}
-		if err := batcher.CommitWithIndex(location, index, narRefs, ""); err != nil {
+		if err := batcher.CommitWithIndex(location, index, narRefs, narHash52); err != nil {
 			return fmt.Errorf("failed committing batch: %w", err)
 		}
 		p.log.Info("stored", zap.String("location", location), zap.Int("chunks", len(index.Chunks)))
@@ -670,6 +672,22 @@ func (p *Proxy) rewriteNarinfo(body []byte) ([]byte, error) {
 	}
 
 	return []byte(info.String()), nil
+}
+
+// parseNarinfoNarHash52 extracts the 52-char nix-base32 NarHash from narinfo bytes.
+func parseNarinfoNarHash52(body []byte) string {
+	scanner := bufio.NewScanner(bytes.NewReader(body))
+	for scanner.Scan() {
+		line := scanner.Text()
+		if strings.HasPrefix(line, "NarHash:") {
+			val := strings.TrimSpace(strings.TrimPrefix(line, "NarHash:"))
+			parts := strings.SplitN(val, ":", 2)
+			if len(parts) == 2 {
+				return parts[1]
+			}
+		}
+	}
+	return ""
 }
 
 // parseNarinfoReferences extracts store path hashes from a narinfo's References field.

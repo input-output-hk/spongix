@@ -651,11 +651,11 @@ func TestRegistryFlakeAttributesViaTarball(t *testing.T) {
 }
 
 func TestCapushPushIntegration(t *testing.T) {
-	if _, err := exec.LookPath("nu"); err != nil {
-		t.Skip("nu not in PATH, skipping capush integration test")
-	}
 	if _, err := exec.LookPath("nix-store"); err != nil {
 		t.Skip("nix-store not in PATH, skipping integration test")
+	}
+	if _, err := exec.LookPath("nix"); err != nil {
+		t.Skip("nix not in PATH, skipping integration test")
 	}
 
 	proxy := testRegistryProxy(t)
@@ -675,38 +675,72 @@ func TestCapushPushIntegration(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(nixConf, "nix.conf"), []byte(conf), 0o644); err != nil {
 		t.Fatal(err)
 	}
+	nixEnv := append(os.Environ(), "NIX_CONF_DIR="+nixConf)
 
-	// Add a test file to the chroot store
+	// 1. Add a test file to the chroot store.
 	testFile := filepath.Join(root, "test-file")
 	if err := os.WriteFile(testFile, []byte("capush test\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
 	addCmd := exec.Command("nix-store", "--store", storeSpec, "--add", testFile)
-	addCmd.Env = append(os.Environ(), "NIX_CONF_DIR="+nixConf)
+	addCmd.Env = nixEnv
 	addOut, err := addCmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("nix-store --add: %s", addOut)
 	}
-	storePath := strings.TrimSpace(string(addOut))
-	t.Logf("store path: %s", storePath)
+	fromPath := strings.TrimSpace(string(addOut))
+	t.Logf("fromPath (input-addressed): %s", fromPath)
 
-	// Run capush push — NIX_CONF_DIR makes all nix commands use the chroot
-	cacheURL := srv.URL + "/cache"
-	cmd := exec.Command("./scripts/capush.nu", "push", storePath,
-		"--store", cacheURL,
-		"--name", "test-pkg",
-		"--version", "1.0.0",
-		"--main-program", "test-bin",
-		"--token", testToken)
-	cmd.Env = append(os.Environ(), "NIX_CONF_DIR="+nixConf)
-	out, err := cmd.CombinedOutput()
-	t.Logf("capush output:\n%s", out)
+	// 2. Make content-addressed.
+	caCmd := exec.Command("nix", "store", "make-content-addressed", "--json", fromPath)
+	caCmd.Env = nixEnv
+	caOut, err := caCmd.Output()
 	if err != nil {
-		t.Fatalf("capush push failed: %v", err)
+		t.Fatalf("nix store make-content-addressed: %v", err)
+	}
+	var caResult struct {
+		Rewrites map[string]string `json:"rewrites"`
+	}
+	if err := json.Unmarshal(caOut, &caResult); err != nil {
+		t.Fatalf("parsing CA output: %v\n%s", err, caOut)
+	}
+	toPath, ok := caResult.Rewrites[fromPath]
+	if !ok {
+		t.Fatalf("fromPath %s not in rewrites: %s", fromPath, caOut)
+	}
+	t.Logf("toPath (content-addressed): %s", toPath)
+
+	// 3. nix copy the fromPath to spongix (matches fetchClosure protocol).
+	cacheURL := srv.URL + "/cache"
+	copyCmd := exec.Command("nix", "copy", "--to", cacheURL+"?compression=none", fromPath)
+	copyCmd.Env = nixEnv
+	copyOut, err := copyCmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("nix copy: %s", copyOut)
 	}
 
-	// Verify registry entry was created
+	// 4. Register via PUT (what capush.nu / spongixctl.nu push does).
+	regBody, _ := json.Marshal(RegistryPutRequest{
+		FromPath:    fromPath,
+		ToPath:      toPath,
+		MainProgram: "test-bin",
+		System:      "x86_64-linux",
+	})
+	req, _ := http.NewRequest("PUT", cacheURL+"/f/test-pkg/1.0.0", bytes.NewReader(regBody))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+testToken)
+	regResp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer regResp.Body.Close()
+	if regResp.StatusCode != http.StatusCreated {
+		body, _ := io.ReadAll(regResp.Body)
+		t.Fatalf("registry PUT: expected 201, got %d: %s", regResp.StatusCode, body)
+	}
+
+	// Verify registry entry was created.
 	resp, err := http.Get(cacheURL + "/f/test-pkg/1.0.0")
 	if err != nil {
 		t.Fatal(err)
@@ -717,7 +751,7 @@ func TestCapushPushIntegration(t *testing.T) {
 		t.Fatalf("expected 200, got %d: %s", resp.StatusCode, body)
 	}
 
-	// Verify tarball is served
+	// Verify tarball is served with immutable header.
 	tarResp, err := http.Get(cacheURL + "/f/test-pkg/1.0.0.tar.gz")
 	if err != nil {
 		t.Fatal(err)

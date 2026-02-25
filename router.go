@@ -594,7 +594,7 @@ func (p *Proxy) insert(ctx context.Context, namespace, location string, body io.
 		if err != nil {
 			return fmt.Errorf("failed chunking: %w", err)
 		}
-		if err := batcher.CommitWithIndex(location, index, narRefs); err != nil {
+		if err := batcher.CommitWithIndex(location, index, narRefs, ""); err != nil {
 			return fmt.Errorf("failed committing batch: %w", err)
 		}
 		p.log.Info("stored", zap.String("location", location), zap.Int("chunks", len(index.Chunks)))

@@ -71,7 +71,8 @@ func (s *IndexStore) GetIndexReader(name string) (io.ReadCloser, error) {
 }
 
 // addIndexEntries adds index, chunk-ref, NAR-ref, and timestamp keys to an existing batch.
-func addIndexEntries(batch *pebble.Batch, name string, idx desync.Index, narRefs []string) error {
+// When narHash52 is non-empty, it also writes nh/ and nhr/ entries for NarHash->storePath mapping.
+func addIndexEntries(batch *pebble.Batch, name string, idx desync.Index, narRefs []string, narHash52 string) error {
 	buf := &bytes.Buffer{}
 	if _, err := idx.WriteTo(buf); err != nil {
 		return fmt.Errorf("serializing index: %w", err)
@@ -92,13 +93,22 @@ func addIndexEntries(batch *pebble.Batch, name string, idx desync.Index, narRefs
 
 	_ = batch.Set(timestampKey(name), encodeTimestamp(time.Now()), nil)
 
+	// Store NarHash -> storePathHash reverse mapping for proxyNar fallback.
+	if narHash52 != "" {
+		storePathHash := extractStorePathHash(name)
+		if storePathHash != "" {
+			_ = batch.Set(narHashKey(narHash52), []byte(storePathHash), nil)
+			_ = batch.Set(narHashReverseKey(storePathHash), []byte(narHash52), nil)
+		}
+	}
+
 	return nil
 }
 
 func (s *IndexStore) StoreIndex(name string, idx desync.Index) error {
 	batch := s.db.db.NewBatch()
 	defer func() { _ = batch.Close() }()
-	if err := addIndexEntries(batch, name, idx, nil); err != nil {
+	if err := addIndexEntries(batch, name, idx, nil, ""); err != nil {
 		return err
 	}
 	return batch.Commit(pebble.NoSync)
@@ -109,7 +119,7 @@ func (s *IndexStore) StoreIndex(name string, idx desync.Index) error {
 func (s *IndexStore) StoreIndexWithRefs(name string, idx desync.Index, narRefs []string) error {
 	batch := s.db.db.NewBatch()
 	defer func() { _ = batch.Close() }()
-	if err := addIndexEntries(batch, name, idx, narRefs); err != nil {
+	if err := addIndexEntries(batch, name, idx, narRefs, ""); err != nil {
 		return err
 	}
 	return batch.Commit(pebble.Sync)

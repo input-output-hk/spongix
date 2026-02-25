@@ -43,7 +43,7 @@ func TestBatchingRoundTrip(t *testing.T) {
 
 	idx := makeBatchTestIndex(chunk)
 	name := "indices/narinfo/test/testroundtrip"
-	if err := batcher.CommitWithIndex(name, idx, nil); err != nil {
+	if err := batcher.CommitWithIndex(name, idx, nil, ""); err != nil {
 		t.Fatal(err)
 	}
 
@@ -151,7 +151,7 @@ func TestBatchingNARRefs(t *testing.T) {
 	idx := makeBatchTestIndex(chunk)
 	name := "indices/narinfo/hyhr/hyhrnrnpsz9fw5p9dk85a58y31ink18c"
 	narRefs := []string{"5b4cprjhjw35wyzvgmgvqay4hjf59h7x"}
-	if err := batcher.CommitWithIndex(name, idx, narRefs); err != nil {
+	if err := batcher.CommitWithIndex(name, idx, narRefs, ""); err != nil {
 		t.Fatal(err)
 	}
 
@@ -201,7 +201,7 @@ func TestBatchingStaysBuffered(t *testing.T) {
 
 	// After commit, chunk should be in Pebble.
 	idx := makeBatchTestIndex(chunk)
-	if err := batcher.CommitWithIndex("indices/nar/test/buffered", idx, nil); err != nil {
+	if err := batcher.CommitWithIndex("indices/nar/test/buffered", idx, nil, ""); err != nil {
 		t.Fatal(err)
 	}
 
@@ -231,7 +231,7 @@ func TestBatchingTriggersFlush(t *testing.T) {
 
 	// CommitWithIndex should only write index entries.
 	idx := makeBatchTestIndex(chunk)
-	if err := batcher.CommitWithIndex("indices/nar/test/flushed", idx, nil); err != nil {
+	if err := batcher.CommitWithIndex("indices/nar/test/flushed", idx, nil, ""); err != nil {
 		t.Fatal(err)
 	}
 
@@ -282,7 +282,7 @@ func TestBatchingMidStreamTransition(t *testing.T) {
 
 	// CommitWithIndex should still work correctly.
 	idx := makeBatchTestIndex(chunk1, chunk2)
-	if err := batcher.CommitWithIndex("indices/nar/test/midstream", idx, nil); err != nil {
+	if err := batcher.CommitWithIndex("indices/nar/test/midstream", idx, nil, ""); err != nil {
 		t.Fatal(err)
 	}
 }

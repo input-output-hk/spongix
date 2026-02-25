@@ -497,80 +497,14 @@ func (p *Proxy) proxyNarViaUpstreamNarinfo(namespace, storePathHash, location st
 	narinfoPath := storePathHash + ".narinfo"
 
 	for _, substituter := range ns.Substituters {
-		base, err := url.ParseRequestURI(substituter)
-		if err != nil {
+		buf, ok := p.tryFetchNarFromSubstituter(substituter, narinfoPath, r.Context())
+		if !ok {
 			continue
 		}
 
-		niURL := *base
-		niURL.Path = filepath.Join(base.Path, narinfoPath)
-		niURLStr := niURL.String()
-
+		// Store locally.
 		ctx, cancel := context.WithTimeout(r.Context(), 5*time.Minute)
 		defer cancel()
-
-		niReq, err := http.NewRequestWithContext(ctx, "GET", niURLStr, nil)
-		if err != nil {
-			continue
-		}
-		niResp, err := p.httpGetClient.Do(niReq)
-		if err != nil || niResp.StatusCode != http.StatusOK {
-			if niResp != nil {
-				_ = niResp.Body.Close()
-			}
-			continue
-		}
-
-		niBody, err := io.ReadAll(niResp.Body)
-		_ = niResp.Body.Close()
-		if err != nil {
-			continue
-		}
-
-		info, err := narinfo.Parse(bytes.NewReader(niBody))
-		if err != nil {
-			p.log.Warn("parsing upstream narinfo for fallback", zap.Error(err))
-			continue
-		}
-
-		narURL := *base
-		narURL.Path = filepath.Join(base.Path, info.URL)
-		narURLStr := narURL.String()
-
-		narReq, err := http.NewRequestWithContext(ctx, "GET", narURLStr, nil)
-		if err != nil {
-			continue
-		}
-		narResp, err := p.httpGetClient.Do(narReq)
-		if err != nil {
-			continue
-		}
-		if narResp.StatusCode != http.StatusOK {
-			_ = narResp.Body.Close()
-			continue
-		}
-		defer func() { _ = narResp.Body.Close() }()
-
-		// Decompress if needed
-		var body io.Reader = narResp.Body
-		ext := narExtFromURL(info.URL)
-		if ext != "" {
-			rc, err := decompressReader(ext, narResp.Body)
-			if err != nil {
-				p.log.Error("decompressing NAR in fallback", zap.String("ext", ext), zap.Error(err))
-				continue
-			}
-			defer func() { _ = rc.Close() }()
-			body = rc
-		}
-
-		buf, err := io.ReadAll(body)
-		if err != nil {
-			p.log.Error("reading NAR body in fallback", zap.String("url", narURLStr), zap.Error(err))
-			return false
-		}
-
-		// Store locally
 		if err := p.insert(ctx, namespace, location, bytes.NewReader(buf)); err != nil {
 			p.log.Error("storing proxied NAR via fallback", zap.String("location", location), zap.Error(err))
 		}
@@ -583,6 +517,81 @@ func (p *Proxy) proxyNarViaUpstreamNarinfo(namespace, storePathHash, location st
 	}
 
 	return false
+}
+
+// tryFetchNarFromSubstituter attempts to fetch a NAR from a single substituter by
+// looking up its narinfo, extracting the compressed NAR URL, downloading and
+// decompressing. Returns the raw NAR bytes and true on success.
+func (p *Proxy) tryFetchNarFromSubstituter(substituter, narinfoPath string, parentCtx context.Context) ([]byte, bool) {
+	base, err := url.ParseRequestURI(substituter)
+	if err != nil {
+		return nil, false
+	}
+
+	ctx, cancel := context.WithTimeout(parentCtx, 5*time.Minute)
+	defer cancel()
+
+	// Fetch narinfo.
+	niURL := *base
+	niURL.Path = filepath.Join(base.Path, narinfoPath)
+	niReq, err := http.NewRequestWithContext(ctx, "GET", niURL.String(), nil)
+	if err != nil {
+		return nil, false
+	}
+	niResp, err := p.httpGetClient.Do(niReq)
+	if err != nil || niResp.StatusCode != http.StatusOK {
+		if niResp != nil {
+			_ = niResp.Body.Close()
+		}
+		return nil, false
+	}
+	niBody, err := io.ReadAll(niResp.Body)
+	_ = niResp.Body.Close()
+	if err != nil {
+		return nil, false
+	}
+
+	info, err := narinfo.Parse(bytes.NewReader(niBody))
+	if err != nil {
+		p.log.Warn("parsing upstream narinfo for fallback", zap.Error(err))
+		return nil, false
+	}
+
+	// Fetch NAR.
+	narURL := *base
+	narURL.Path = filepath.Join(base.Path, info.URL)
+	narReq, err := http.NewRequestWithContext(ctx, "GET", narURL.String(), nil)
+	if err != nil {
+		return nil, false
+	}
+	narResp, err := p.httpGetClient.Do(narReq)
+	if err != nil {
+		return nil, false
+	}
+	defer func() { _ = narResp.Body.Close() }()
+	if narResp.StatusCode != http.StatusOK {
+		return nil, false
+	}
+
+	// Decompress if needed.
+	var body io.Reader = narResp.Body
+	ext := narExtFromURL(info.URL)
+	if ext != "" {
+		rc, err := decompressReader(ext, narResp.Body)
+		if err != nil {
+			p.log.Error("decompressing NAR in fallback", zap.String("ext", ext), zap.Error(err))
+			return nil, false
+		}
+		defer func() { _ = rc.Close() }()
+		body = rc
+	}
+
+	buf, err := io.ReadAll(body)
+	if err != nil {
+		p.log.Error("reading NAR body in fallback", zap.String("url", narURL.String()), zap.Error(err))
+		return nil, false
+	}
+	return buf, true
 }
 
 func (p *Proxy) largeHeadAndGet(prefix, mime string) func(w http.ResponseWriter, r *http.Request) {
@@ -764,6 +773,8 @@ func (p *Proxy) rewriteNarinfo(body []byte) ([]byte, error) {
 	parts := strings.SplitN(narHashStr, ":", 2)
 	if len(parts) == 2 {
 		info.URL = "nar/" + parts[1] + ".nar"
+	} else {
+		p.log.Warn("malformed NarHash in narinfo, URL not normalized", zap.String("narhash", narHashStr))
 	}
 
 	// Append our signature if a signing key is configured and not already present.

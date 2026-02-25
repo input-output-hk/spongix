@@ -161,3 +161,36 @@ func TestDecodeTimestampInvalid(t *testing.T) {
 		t.Fatal("expected zero time for invalid data")
 	}
 }
+
+func TestNarHashMapping(t *testing.T) {
+	db := tempDB(t)
+
+	narHash52 := "1h6m2q7f8zq5z4kvn8j5wiz05jdic77df1x68dfwqg149jsy7gyp"
+	storePathHash := "hyhrnrnpsz9fw5p9dk85a58y31ink18c"
+
+	// Store mapping directly via batch
+	batch := db.NewBatch()
+	_ = batch.Set(narHashKey(narHash52), []byte(storePathHash), nil)
+	if err := batch.Commit(pebble.Sync); err != nil {
+		t.Fatal(err)
+	}
+	_ = batch.Close()
+
+	// Lookup
+	got, err := db.GetStorePathByNarHash(narHash52)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != storePathHash {
+		t.Fatalf("GetStorePathByNarHash = %q, want %q", got, storePathHash)
+	}
+
+	// Not found
+	got, err = db.GetStorePathByNarHash("nonexistent")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != "" {
+		t.Fatalf("expected empty for missing, got %q", got)
+	}
+}

@@ -8,6 +8,10 @@
 //	i/<indexPath>                -> serialized desync.Index
 //	r/<storePathHash>            -> newline-separated storePathHashes (narinfo References)
 //	cr/<chunkID>/<indexPath>     -> {} (reverse: chunk -> which indices use it)
+//	t/<indexPath>                -> timestamp (8 bytes, big-endian UnixNano)
+//	p/<storePathHash>            -> pin label
+//	nh/<narHash52>               -> storePathHash32 (NarHash -> store path for proxyNar fallback)
+//	nhr/<storePathHash32>        -> narHash52 (reverse of nh/, for GC cleanup)
 package store
 
 import (
@@ -116,6 +120,22 @@ func (d *DB) Close() error {
 
 // NewBatch creates a new Pebble write batch.
 func (d *DB) NewBatch() *pebble.Batch { return d.db.NewBatch() }
+
+// GetStorePathByNarHash looks up the store path hash for a 52-char NarHash.
+func (d *DB) GetStorePathByNarHash(narHash52 string) (string, error) {
+	key := narHashKey(narHash52)
+	val, closer, err := d.db.Get(key)
+	if errors.Is(err, pebble.ErrNotFound) {
+		return "", nil
+	}
+	if err != nil {
+		return "", fmt.Errorf("getting store path for NarHash %s: %w", narHash52, err)
+	}
+	data := make([]byte, len(val))
+	copy(data, val)
+	_ = closer.Close()
+	return string(data), nil
+}
 
 // chunkKey returns the Pebble key for a chunk: c/<chunkID hex>
 func chunkKey(id desync.ChunkID) []byte {

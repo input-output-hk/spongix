@@ -42,6 +42,26 @@ func narRefKey(storePathHash string) []byte {
 	return key
 }
 
+// narHashKey returns the Pebble key for a NarHash mapping: nh/<narHash52>
+// Maps a 52-char nix-base32 NarHash to a 32-char store path hash.
+func narHashKey(narHash52 string) []byte {
+	key := make([]byte, 3+len(narHash52))
+	key[0] = 'n'
+	key[1] = 'h'
+	key[2] = '/'
+	copy(key[3:], narHash52)
+	return key
+}
+
+// narHashReverseKey returns the Pebble key: nhr/<storePathHash32>
+// Reverse of nh/, enabling GC to efficiently find and delete nh/ entries.
+func narHashReverseKey(storePathHash string) []byte {
+	key := make([]byte, 4+len(storePathHash))
+	copy(key, "nhr/")
+	copy(key[4:], storePathHash)
+	return key
+}
+
 // encodeNARRefs encodes a list of store path hashes as newline-separated bytes.
 func encodeNARRefs(refs []string) []byte {
 	return []byte(strings.Join(refs, "\n"))

@@ -192,10 +192,39 @@ def "main verify" [
     $versions | each {|ver|
       let entries = try { http get $"($cfg.url)/f/($pkg)/($ver)" } catch { [] }
       $entries | each {|e|
-        let ok = try { ^nix path-info --store $cfg.url $e.fromPath o+e>| ignore; true } catch { false }
-        if not $ok {
-          log warning $"MISSING: ($pkg)/($ver) \(($e.system)\)"
-          ^nix copy --to $"($cfg.url)?compression=none" $e.fromPath
+        # nix path-info --store only checks narinfo presence, not actual NAR data.
+        # Fetch the narinfo to get the NAR URL, then HEAD the NAR directly.
+        let hash = extract-hash $e.fromPath
+        let narinfo_text = try { http get $"($cfg.url)/($hash).narinfo" } catch { null }
+        let nar_line = if $narinfo_text != null {
+          $narinfo_text | lines | where { $in | str starts-with "URL: " } | get 0?
+        } else { null }
+        let nar_ok = if $nar_line == null { false } else {
+          let nar_path = $nar_line | str trim | str replace "URL: " ""
+          try { http head $"($cfg.url)/($nar_path)" | ignore; true } catch { false }
+        }
+        if not $nar_ok {
+          log warning $"MISSING NAR: ($pkg)/($ver) \(($e.system)\)"
+          if $nar_line != null {
+            # narinfo exists but NAR is missing: nix copy skips paths when narinfo
+            # is present (it treats narinfo as proof the data is already uploaded).
+            # Directly PUT the NAR bytes instead.
+            let nar_path = $nar_line | str trim | str replace "URL: " ""
+            let nar_url = $"($cfg.url)/($nar_path)"
+            log info $"Uploading NAR directly to ($nar_url)..."
+            try {
+              ^nix-store --dump $e.fromPath | http put --content-type application/x-nix-nar $nar_url
+            } catch {|err|
+              log error $"Failed to upload NAR for ($pkg)/($ver): ($err.msg)"
+            }
+          } else {
+            # narinfo also missing: full re-push via nix copy
+            try {
+              ^nix copy --to $"($cfg.url)?compression=none" $e.fromPath
+            } catch {|err|
+              log error $"Failed to re-push ($pkg)/($ver): ($err.msg)"
+            }
+          }
           { name: $pkg, version: $ver, system: $e.system, status: "repushed", fromPath: $e.fromPath }
         } else {
           { name: $pkg, version: $ver, system: $e.system, status: "ok", fromPath: $e.fromPath }

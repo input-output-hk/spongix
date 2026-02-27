@@ -889,3 +889,101 @@ func TestRedirectToUpstreamGroupWaitBlocking(t *testing.T) {
 			"making the 500ms timeout additive not concurrent)", elapsed)
 	}
 }
+
+// TestDoCacheStoresNarinfoWhenNarFails proves that doCache stores the narinfo
+// even when the NAR download fails, creating inconsistent state where narinfo
+// returns HIT but the NAR doesn't exist.
+func TestDoCacheStoresNarinfoWhenNarFails(t *testing.T) {
+	// Upstream serves narinfo but returns 500 for all NAR downloads.
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, ".narinfo") {
+			w.Header().Set("Content-Type", mimeNarinfo)
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(fixtureNarinfoXzUpstream))
+			return
+		}
+		// NAR download always fails
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer ts.Close()
+
+	proxy := testProxy(t)
+	proxy.config.Namespaces[testNamespace].Substituters = []string{ts.URL}
+	fakeIdx := newFakeIndex()
+	proxy.indexStores[testNamespace] = fakeIdx
+
+	// Run doCache -- NAR download will fail, but narinfo should NOT be stored.
+	proxy.doCache(&cacheRequest{
+		namespace: testNamespace,
+		url:       ts.URL + fNarinfo,
+		location:  "indices/narinfo/hyhr/hyhrnrnpsz9fw5p9dk85a58y31ink18c",
+	})
+
+	// BUG: narinfo IS stored despite NAR caching failure.
+	narinfoLocation := "indices/narinfo/hyhr/hyhrnrnpsz9fw5p9dk85a58y31ink18c"
+	_, err := fakeIdx.GetIndex(narinfoLocation)
+	if err == nil {
+		t.Fatal("BUG: narinfo was stored even though NAR caching failed. " +
+			"This creates inconsistent state where narinfo HIT points to a missing NAR.")
+	}
+	// If this test passes, the bug is fixed: narinfo is NOT stored when NAR fails.
+}
+
+// TestNarinfoHitButNarMissing reproduces the user's exact scenario:
+// narinfo returns HIT but the NAR is missing, causing "NAR is incomplete".
+func TestNarinfoHitButNarMissing(t *testing.T) {
+	// Upstream: serves narinfo and compressed NAR.
+	narServed := false
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.HasSuffix(r.URL.Path, ".narinfo"):
+			w.Header().Set("Content-Type", mimeNarinfo)
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(fixtureNarinfoXzUpstream))
+		case strings.HasSuffix(r.URL.Path, ".nar.xz"):
+			if !narServed {
+				// First NAR request (from doCache): fail
+				narServed = true
+				w.WriteHeader(http.StatusInternalServerError)
+			} else {
+				// Subsequent NAR requests: serve normally
+				w.Header().Set("Content-Type", "application/x-xz")
+				w.WriteHeader(http.StatusOK)
+				_, _ = w.Write(fixtureNarXz)
+			}
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer ts.Close()
+
+	proxy := testProxy(t)
+	proxy.config.Namespaces[testNamespace].Substituters = []string{ts.URL}
+	router := proxy.router()
+
+	// Step 1: GET narinfo -- triggers proxyNarinfo + doCache.
+	// doCache's NAR download will fail (first .nar.xz request returns 500).
+	rr1 := httptest.NewRecorder()
+	req1, _ := http.NewRequest(http.MethodGet, nsNarinfo, nil)
+	router.ServeHTTP(rr1, req1)
+	assert.Equal(t, rr1.Code, http.StatusOK)
+
+	// Drain cachePool so doCache completes.
+	proxy.cachePool.StopAndWait()
+	proxy.cachePool = pond.New(10, 1000)
+
+	// Step 2: GET narinfo again -- after the fix, narinfo should NOT be cached
+	// since the NAR failed. So it should proxy from upstream again (MISS).
+	rr2 := httptest.NewRecorder()
+	req2, _ := http.NewRequest(http.MethodGet, nsNarinfo, nil)
+	router.ServeHTTP(rr2, req2)
+	assert.Equal(t, rr2.Code, http.StatusOK)
+
+	// After fix: narinfo is NOT cached when NAR fails, so this should be MISS.
+	// Before fix: narinfo IS cached (HIT) despite NAR being missing.
+	cacheHeader := rr2.Header().Get(headerCache)
+	if cacheHeader == headerCacheHit {
+		t.Fatal("BUG: narinfo returned HIT even though the NAR was never cached. " +
+			"This means doCache stored the narinfo despite NAR download failure.")
+	}
+}

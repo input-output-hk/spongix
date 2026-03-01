@@ -81,7 +81,7 @@ func CompressHandlerLevel(h http.Handler, level int) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// detect what encoding to use
 		var encoding string
-		for _, curEnc := range strings.Split(r.Header.Get(acceptEncoding), ",") {
+		for curEnc := range strings.SplitSeq(r.Header.Get(acceptEncoding), ",") {
 			curEnc = strings.TrimSpace(curEnc)
 			if curEnc == zstdEncoding || curEnc == gzipEncoding || curEnc == flateEncoding {
 				encoding = curEnc
@@ -104,7 +104,6 @@ func CompressHandlerLevel(h http.Handler, level int) http.Handler {
 			return
 		}
 
-		// wrap the ResponseWriter with the writer for the chosen encoding
 		// wrap the ResponseWriter with the writer for the chosen encoding
 		var encWriter io.WriteCloser
 		switch encoding {

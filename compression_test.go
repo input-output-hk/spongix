@@ -78,9 +78,9 @@ Sig: kappa:sn5s/RrqEI+YG6/PjwdbPjcAC7rcta7sJU4mFOawGvJBLsWkyLtBrT2EuFt/LJjWkTZ+Z
 
 // parseNarinfoField extracts a single field value from a narinfo string.
 func parseNarinfoField(narinfo, field string) string {
-	for _, line := range strings.Split(narinfo, "\n") {
-		if strings.HasPrefix(line, field+":") {
-			return strings.TrimSpace(strings.TrimPrefix(line, field+":"))
+	for line := range strings.SplitSeq(narinfo, "\n") {
+		if val, ok := strings.CutPrefix(line, field+":"); ok {
+			return strings.TrimSpace(val)
 		}
 	}
 	return ""

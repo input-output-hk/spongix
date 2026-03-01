@@ -454,7 +454,13 @@ func (proxy *Proxy) doCache(req *cacheRequest) {
 
 			// 3. Derive upstream base URL + full NAR URL
 			baseURL := extractBaseURL(req.url)
-			narURL := baseURL + "/" + info.URL
+			narURL, err := url.JoinPath(baseURL, info.URL)
+			if err != nil {
+				proxy.log.Error("constructing NAR URL",
+					zap.String("base", baseURL),
+					zap.String("narPath", info.URL),
+					zap.Error(err))
+			}
 
 			// 4. Compute NAR storage location from NarHash (not URL's compressed file hash)
 			narHashStr := info.NarHash.String() // "sha256:base32hash"
@@ -471,7 +477,11 @@ func (proxy *Proxy) doCache(req *cacheRequest) {
 					narResp, err := proxy.httpGetClient.Do(narReq)
 					if err == nil {
 						defer func() { _ = narResp.Body.Close() }()
-						if narResp.StatusCode == http.StatusOK {
+						if narResp.StatusCode != http.StatusOK {
+							proxy.log.Warn("upstream NAR returned non-200",
+								zap.String("url", narURL),
+								zap.Int("status", narResp.StatusCode))
+						} else {
 							// 6. Decompress
 							ext := narExtFromURL(info.URL)
 							rc, err := decompressReader(ext, narResp.Body)

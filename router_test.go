@@ -856,6 +856,92 @@ func TestDoCacheEagerNarCachingWithPathPrefix(t *testing.T) {
 	}
 }
 
+// TestDoCacheEagerNarCachingRootURL verifies that doCache constructs the
+// correct NAR download URL when the substituter is at the root of the host
+// (no path prefix). Exposes a double-slash bug: extractBaseURL returns a
+// trailing slash for root-level URLs, and doCache concatenates another slash,
+// producing "https://host//nar/..." which many CDNs reject with 404.
+func TestDoCacheEagerNarCachingRootURL(t *testing.T) {
+	var narRequested bool
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.HasSuffix(r.URL.Path, ".narinfo"):
+			w.Header().Set("Content-Type", mimeNarinfo)
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(fixtureNarinfoXzUpstream))
+
+		case strings.HasSuffix(r.URL.Path, ".nar.xz"):
+			// The NAR URL must NOT have a double slash.
+			if strings.Contains(r.URL.Path, "//") {
+				t.Errorf("NAR request has double slash: %s", r.URL.Path)
+				w.WriteHeader(http.StatusNotFound)
+				return
+			}
+			narRequested = true
+			w.Header().Set("Content-Type", "application/x-xz")
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write(fixtureNarXz)
+
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer ts.Close()
+
+	proxy := testProxy(t)
+	// Root-level substituter: no path prefix (the production case).
+	proxy.config.Namespaces[testNamespace].Substituters = []string{ts.URL}
+
+	router := proxy.router()
+
+	// Step 1: GET narinfo triggers proxyNarinfo + background doCache
+	rr1 := httptest.NewRecorder()
+	req1, _ := http.NewRequest(http.MethodGet, nsNarinfo, nil)
+	router.ServeHTTP(rr1, req1)
+
+	if rr1.Code != http.StatusOK {
+		t.Fatalf("narinfo proxy: expected 200, got %d: %s", rr1.Code, rr1.Body.String())
+	}
+
+	// Step 2: Drain cachePool so doCache completes
+	time.Sleep(200 * time.Millisecond)
+	proxy.cachePool.StopAndWait()
+	proxy.cachePool = pond.New(10, 1000)
+
+	if !narRequested {
+		t.Fatal("doCache never requested the NAR from upstream (double-slash URL bug)")
+	}
+
+	// Step 3: Shut down upstream -- everything after must come from cache
+	ts.Close()
+
+	// Step 4: GET narinfo -- should be cache HIT
+	rr2 := httptest.NewRecorder()
+	req2, _ := http.NewRequest(http.MethodGet, nsNarinfo, nil)
+	router.ServeHTTP(rr2, req2)
+
+	if rr2.Code != http.StatusOK {
+		t.Fatalf("narinfo from cache: expected 200, got %d: %s", rr2.Code, rr2.Body.String())
+	}
+	if rr2.Header().Get(headerCache) != headerCacheHit {
+		t.Errorf("expected X-Cache: HIT, got %s", rr2.Header().Get(headerCache))
+	}
+
+	// Step 5: GET NAR -- should be cache HIT from doCache's eager caching.
+	rr3 := httptest.NewRecorder()
+	req3, _ := http.NewRequest(http.MethodGet, nsNar, nil)
+	router.ServeHTTP(rr3, req3)
+
+	if rr3.Code != http.StatusOK {
+		t.Fatalf("NAR from cache: expected 200, got %d.\n"+
+			"double-slash bug: extractBaseURL returns trailing slash for root URLs, "+
+			"doCache adds another, producing host//nar/... which upstream rejects.", rr3.Code)
+	}
+	if !bytes.Equal(rr3.Body.Bytes(), fixtureNar) {
+		t.Error("NAR body does not match expected decompressed content")
+	}
+}
+
 func TestRedirectToUpstreamGroupWaitBlocking(t *testing.T) {
 	// Start a test server that sleeps 800ms then returns 404
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

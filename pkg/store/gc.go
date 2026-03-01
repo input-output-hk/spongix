@@ -178,35 +178,7 @@ func sizeEvict(db *DB, cfg GCConfig) (sizeEvictResult, error) {
 		}
 
 		batch := db.db.NewBatch()
-		_ = batch.Delete(indexKey(cand.path), nil)
-		_ = batch.Delete(timestampKey(cand.path), nil)
-
-		hash := extractStorePathHash(cand.path)
-		_ = batch.Delete(narRefKey(hash), nil)
-
-		// Delete nh/ and nhr/ entries if present.
-		nhrKey := narHashReverseKey(hash)
-		if nhrVal, nhrCloser, nhrErr := db.db.Get(nhrKey); nhrErr == nil {
-			nh52 := make([]byte, len(nhrVal))
-			copy(nh52, nhrVal)
-			_ = nhrCloser.Close()
-			_ = batch.Delete(narHashKey(string(nh52)), nil)
-			_ = batch.Delete(nhrKey, nil)
-		}
-
-		// Read index to delete cr/ entries and orphaned chunks.
-		idxVal, idxCloser, idxErr := db.db.Get(indexKey(cand.path))
-		if idxErr == nil {
-			data := make([]byte, len(idxVal))
-			copy(data, idxVal)
-			_ = idxCloser.Close()
-			idx, parseErr := desync.IndexFromReader(strings.NewReader(string(data)))
-			if parseErr == nil {
-				for _, chunk := range idx.Chunks {
-					_ = batch.Delete(chunkRefKey(chunk.ID, cand.path), nil)
-				}
-			}
-		}
+		idxBytes := addEvictionDeletes(db, batch, cand)
 
 		if err := batch.Commit(pebble.Sync); err != nil {
 			_ = batch.Close()
@@ -214,7 +186,7 @@ func sizeEvict(db *DB, cfg GCConfig) (sizeEvictResult, error) {
 		}
 
 		result.evicted++
-		result.bytes += uint64(len(idxVal))
+		result.bytes += uint64(idxBytes)
 	}
 
 	// Run orphan chunk cleanup again after eviction to reclaim chunk storage.
@@ -227,6 +199,46 @@ func sizeEvict(db *DB, cfg GCConfig) (sizeEvictResult, error) {
 	}
 
 	return result, nil
+}
+
+// addEvictionDeletes adds all deletion keys for a single narinfo to the batch:
+// the index, timestamp, refs, nh/nhr mappings, and chunk references.
+// It returns the byte length of the index value (0 if the index was not found).
+func addEvictionDeletes(db *DB, batch *pebble.Batch, cand timestampedIndex) int {
+	_ = batch.Delete(indexKey(cand.path), nil)
+	_ = batch.Delete(timestampKey(cand.path), nil)
+
+	hash := extractStorePathHash(cand.path)
+	_ = batch.Delete(narRefKey(hash), nil)
+
+	// Delete nh/ and nhr/ entries if present.
+	nhrKey := narHashReverseKey(hash)
+	nhrVal, nhrCloser, nhrErr := db.db.Get(nhrKey)
+	if nhrErr == nil {
+		nh52 := make([]byte, len(nhrVal))
+		copy(nh52, nhrVal)
+		_ = nhrCloser.Close()
+		_ = batch.Delete(narHashKey(string(nh52)), nil)
+		_ = batch.Delete(nhrKey, nil)
+	}
+
+	// Delete cr/ entries for each chunk in the index.
+	idxVal, idxCloser, idxErr := db.db.Get(indexKey(cand.path))
+	if idxErr != nil {
+		return 0
+	}
+	data := make([]byte, len(idxVal))
+	copy(data, idxVal)
+	_ = idxCloser.Close()
+
+	idx, parseErr := desync.IndexFromReader(strings.NewReader(string(data)))
+	if parseErr != nil {
+		return len(data)
+	}
+	for _, chunk := range idx.Chunks {
+		_ = batch.Delete(chunkRefKey(chunk.ID, cand.path), nil)
+	}
+	return len(data)
 }
 
 // findRoots scans all narinfo indices and returns store path hashes that

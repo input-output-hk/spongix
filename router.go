@@ -264,78 +264,89 @@ func decompressReader(ext string, body io.Reader) (io.ReadCloser, error) {
 }
 
 func (p *Proxy) nixCacheInfo(w http.ResponseWriter, r *http.Request) {
-	if namespace, ok := mux.Vars(r)["namespace"]; !ok {
+	namespace, ok := mux.Vars(r)["namespace"]
+	if !ok {
 		p.log.Warn("namespace not given", zap.String("url", r.URL.String()))
 		serveNotFound(w, r)
-	} else if ns, ok := p.config.Namespaces[namespace]; !ok {
+		return
+	}
+	ns, ok := p.config.Namespaces[namespace]
+	if !ok {
 		p.log.Warn("namespace not found", zap.String("namespace", namespace))
 		serveNotFound(w, r)
-	} else if r.Method == http.MethodHead {
+		return
+	}
+	if r.Method == http.MethodHead {
 		w.Header().Set(headerContentType, mimeNixCacheInfo)
 		w.WriteHeader(http.StatusOK)
-	} else {
-		answer(w, http.StatusOK, mimeNixCacheInfo, `StoreDir: /nix/store
+		return
+	}
+	answer(w, http.StatusOK, mimeNixCacheInfo, `StoreDir: /nix/store
 WantMassQuery: 1
 Priority: `+strconv.FormatUint(ns.CacheInfoPriority, 10))
-	}
 }
 
 func (p *Proxy) redirectToUpstream(prefix, location string, w http.ResponseWriter, r *http.Request) {
-	if namespace, ok := mux.Vars(r)["namespace"]; !ok {
+	namespace, ok := mux.Vars(r)["namespace"]
+	if !ok {
 		p.log.Warn("namespace not given", zap.String("url", r.URL.String()))
 		serveNotFound(w, r)
-	} else if ns, ok := p.config.Namespaces[namespace]; !ok {
+		return
+	}
+	ns, ok := p.config.Namespaces[namespace]
+	if !ok {
 		p.log.Warn("namespace not found", zap.String("namespace", namespace))
 		serveNotFound(w, r)
-	} else {
-		group := p.headPool.Group()
-		first := make(chan string, len(ns.Substituters))
+		return
+	}
 
-		for _, substituter := range ns.Substituters {
-			substituterUrl, err := url.ParseRequestURI(substituter)
-			if err != nil {
-				p.log.Error("parsing substituterUrl", zap.String("substituter", substituter), zap.Error(err))
-				continue
-			}
+	group := p.headPool.Group()
+	first := make(chan string, len(ns.Substituters))
 
-			group.Submit(func() {
-				substituterUrl.Path = filepath.Join(substituterUrl.Path, strings.TrimPrefix(r.URL.Path, "/"+namespace))
-				substituterUrlString := substituterUrl.String()
+	for _, substituter := range ns.Substituters {
+		substituterUrl, err := url.ParseRequestURI(substituter)
+		if err != nil {
+			p.log.Error("parsing substituterUrl", zap.String("substituter", substituter), zap.Error(err))
+			continue
+		}
 
-				if response, err := p.httpHeadClient.Head(substituterUrlString); err == nil {
-					defer func() { _ = response.Body.Close() }()
-					if response.StatusCode == http.StatusOK {
-						first <- substituterUrlString
-					}
+		group.Submit(func() {
+			substituterUrl.Path = filepath.Join(substituterUrl.Path, strings.TrimPrefix(r.URL.Path, "/"+namespace))
+			substituterUrlString := substituterUrl.String()
+
+			if response, err := p.httpHeadClient.Head(substituterUrlString); err == nil {
+				defer func() { _ = response.Body.Close() }()
+				if response.StatusCode == http.StatusOK {
+					first <- substituterUrlString
 				}
-			})
-		}
-
-		done := make(chan struct{})
-		go func() {
-			group.Wait()
-			close(done)
-		}()
-
-		select {
-		case found := <-first:
-			p.cachePool.TrySubmit(func() {
-				p.doCache(&cacheRequest{namespace: namespace, url: found, location: location, ext: mux.Vars(r)["ext"]})
-			})
-
-			// Narinfos must be proxied so we can rewrite compression
-			// fields before the client sees them. Other content types
-			// can redirect directly to the upstream URL.
-			if prefix == narinfoPrefix {
-				p.proxyNarinfo(found, w, r)
-			} else {
-				http.Redirect(w, r, found, http.StatusFound)
 			}
-		case <-done:
-			serveNotFound(w, r)
-		case <-time.After(500 * time.Millisecond):
-			serveNotFound(w, r)
+		})
+	}
+
+	done := make(chan struct{})
+	go func() {
+		group.Wait()
+		close(done)
+	}()
+
+	select {
+	case found := <-first:
+		p.cachePool.TrySubmit(func() {
+			p.doCache(&cacheRequest{namespace: namespace, url: found, location: location, ext: mux.Vars(r)["ext"]})
+		})
+
+		// Narinfos must be proxied so we can rewrite compression
+		// fields before the client sees them. Other content types
+		// can redirect directly to the upstream URL.
+		if prefix == narinfoPrefix {
+			p.proxyNarinfo(found, w, r)
+		} else {
+			http.Redirect(w, r, found, http.StatusFound)
 		}
+	case <-done:
+		serveNotFound(w, r)
+	case <-time.After(500 * time.Millisecond):
+		serveNotFound(w, r)
 	}
 }
 
@@ -609,9 +620,14 @@ func (p *Proxy) largeHeadAndGet(prefix, mime string) func(w http.ResponseWriter,
 		namespace := mux.Vars(r)["namespace"]
 		defer metricRequestDuration(namespace, prefix).AddSince(start)
 
-		if indices, ok := p.indexStores[namespace]; !ok {
+		indices, ok := p.indexStores[namespace]
+		if !ok {
 			serveNotFound(w, r)
-		} else if index, err := indices.GetIndex(location); err != nil {
+			return
+		}
+
+		index, err := indices.GetIndex(location)
+		if err != nil {
 			if errors.Is(err, store.ErrIndexNotFound) {
 				metricRequests(namespace, prefix, "miss").Add(1)
 				if prefix == narPrefix {
@@ -624,34 +640,37 @@ func (p *Proxy) largeHeadAndGet(prefix, mime string) func(w http.ResponseWriter,
 				p.log.Error("getting index", zap.String("index", location), zap.Error(err))
 				answer(w, http.StatusInternalServerError, mimeText, err.Error())
 			}
-		} else {
-			metricRequests(namespace, prefix, "hit").Add(1)
-			w.Header().Set("Content-Type", mime)
-			w.Header().Set(headerCache, headerCacheHit)
-
-			// Narinfos may have been stored with Compression: xz/zst before
-			// we enforced uncompressed-only. Rewrite on the fly so clients
-			// get URLs pointing to plain .nar files.
-			if prefix == narinfoPrefix {
-				rd := desync.NewIndexReadSeeker(index, p.chunkStore)
-				body, err := io.ReadAll(rd)
-				if err != nil {
-					p.log.Error("reading narinfo", zap.String("index", location), zap.Error(err))
-					answer(w, http.StatusInternalServerError, mimeText, err.Error())
-					return
-				}
-				body, err = p.rewriteNarinfo(body)
-				if err != nil {
-					p.log.Error("rewriting narinfo", zap.String("index", location), zap.Error(err))
-					answer(w, http.StatusInternalServerError, mimeText, err.Error())
-					return
-				}
-				http.ServeContent(w, r, r.URL.Path, time.Now(), bytes.NewReader(body))
-			} else {
-				rd := desync.NewIndexReadSeeker(index, p.chunkStore)
-				http.ServeContent(w, r, r.URL.Path, time.Now(), rd)
-			}
+			return
 		}
+
+		// Cache hit.
+		metricRequests(namespace, prefix, "hit").Add(1)
+		w.Header().Set("Content-Type", mime)
+		w.Header().Set(headerCache, headerCacheHit)
+
+		// Narinfos may have been stored with Compression: xz/zst before
+		// we enforced uncompressed-only. Rewrite on the fly so clients
+		// get URLs pointing to plain .nar files.
+		if prefix == narinfoPrefix {
+			rd := desync.NewIndexReadSeeker(index, p.chunkStore)
+			body, err := io.ReadAll(rd)
+			if err != nil {
+				p.log.Error("reading narinfo", zap.String("index", location), zap.Error(err))
+				answer(w, http.StatusInternalServerError, mimeText, err.Error())
+				return
+			}
+			body, err = p.rewriteNarinfo(body)
+			if err != nil {
+				p.log.Error("rewriting narinfo", zap.String("index", location), zap.Error(err))
+				answer(w, http.StatusInternalServerError, mimeText, err.Error())
+				return
+			}
+			http.ServeContent(w, r, r.URL.Path, time.Now(), bytes.NewReader(body))
+			return
+		}
+
+		rd := desync.NewIndexReadSeeker(index, p.chunkStore)
+		http.ServeContent(w, r, r.URL.Path, time.Now(), rd)
 	}
 }
 

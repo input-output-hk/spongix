@@ -429,132 +429,139 @@ func (proxy *Proxy) doCache(req *cacheRequest) {
 	}
 	defer func() { _ = response.Body.Close() }()
 
-	if strings.HasPrefix(req.location, "indices/narinfo/") {
-		// 1. Buffer the narinfo body
-		body, err := io.ReadAll(response.Body)
-		if err != nil {
-			metricCacheJobs("error").Add(1)
-			proxy.log.Error("reading narinfo response", zap.Error(err))
-			return
-		}
+	if !strings.HasPrefix(req.location, "indices/narinfo/") {
+		proxy.doCacheNonNarinfo(ctx, req, response.Body)
+		return
+	}
 
-		// Track whether the NAR was successfully cached. Only store the
-		// narinfo if the NAR is also cached, preventing inconsistent state
-		// where narinfo returns HIT but the NAR doesn't exist.
-		narCached := true
+	// Narinfo path: buffer body, optionally cache the upstream NAR first.
+	body, err := io.ReadAll(response.Body)
+	if err != nil {
+		metricCacheJobs("error").Add(1)
+		proxy.log.Error("reading narinfo response", zap.Error(err))
+		return
+	}
 
-		// 2. Parse original narinfo to extract upstream NAR URL
-		info, err := narinfo.Parse(bytes.NewReader(body))
-		if err != nil {
-			proxy.log.Warn("parsing narinfo for eager caching", zap.Error(err))
-			// Can't determine if NAR needs caching; skip narinfo too.
-			narCached = false
-		} else if info.Compression != "none" && info.URL != "" {
-			narCached = false // Assume failure until proven otherwise.
+	info, err := narinfo.Parse(bytes.NewReader(body))
+	if err != nil {
+		proxy.log.Warn("parsing narinfo for eager caching", zap.Error(err))
+		metricCacheJobs("error").Add(1)
+		proxy.log.Warn("skipping narinfo cache: NAR was not cached",
+			zap.String("location", req.location))
+		return
+	}
 
-			// 3. Derive upstream base URL + full NAR URL
-			baseURL := extractBaseURL(req.url)
-			narURL, err := url.JoinPath(baseURL, info.URL)
-			if err != nil {
-				proxy.log.Error("constructing NAR URL",
-					zap.String("base", baseURL),
-					zap.String("narPath", info.URL),
-					zap.Error(err))
-			}
-
-			// 4. Compute NAR storage location from NarHash (not URL's compressed file hash)
-			narHashStr := info.NarHash.String() // "sha256:base32hash"
-			narHashParts := strings.SplitN(narHashStr, ":", 2)
-			if len(narHashParts) != 2 {
-				proxy.log.Error("malformed NarHash in narinfo", zap.String("narhash", narHashStr))
-			} else {
-				narHash52 := narHashParts[1]
-				narLocation := fmt.Sprintf("indices/nar/%s/%s", narHash52[:4], narHash52)
-
-				// 5. Download NAR from upstream
-				narReq, err := http.NewRequestWithContext(ctx, "GET", narURL, nil)
-				if err == nil {
-					narResp, err := proxy.httpGetClient.Do(narReq)
-					if err == nil {
-						defer func() { _ = narResp.Body.Close() }()
-						if narResp.StatusCode != http.StatusOK {
-							proxy.log.Warn("upstream NAR returned non-200",
-								zap.String("url", narURL),
-								zap.Int("status", narResp.StatusCode))
-						} else {
-							// 6. Decompress
-							ext := narExtFromURL(info.URL)
-							rc, err := decompressReader(ext, narResp.Body)
-							if err == nil {
-								defer func() {
-									if err := rc.Close(); err != nil {
-										proxy.log.Warn("closing decompressor", zap.Error(err))
-									}
-								}()
-								// 7. Insert decompressed NAR at NarHash location
-								if err := proxy.insert(ctx, req.namespace, narLocation, rc); err != nil {
-									proxy.log.Error("failed caching NAR",
-										zap.String("url", narURL),
-										zap.Error(err))
-								} else {
-									narCached = true
-								}
-							} else {
-								proxy.log.Error("decompressing NAR",
-									zap.String("url", narURL),
-									zap.Error(err))
-							}
-						}
-					} else {
-						proxy.log.Error("downloading NAR",
-							zap.String("url", narURL),
-							zap.Error(err))
-					}
-				}
-			}
-		}
-
-		// 8. Only insert narinfo if the NAR was successfully cached (or
-		// Compression was already "none", meaning no NAR download needed).
-		if !narCached {
+	// If the upstream NAR is compressed, download and cache it first.
+	if info.Compression != "none" && info.URL != "" {
+		if !proxy.cacheNarFromUpstream(ctx, info, req.url, req.namespace) {
 			metricCacheJobs("error").Add(1)
 			proxy.log.Warn("skipping narinfo cache: NAR was not cached",
 				zap.String("location", req.location))
 			return
 		}
-		if err := proxy.insert(ctx, req.namespace, req.location, bytes.NewReader(body)); err != nil {
-			metricCacheJobs("error").Add(1)
-			proxy.log.Error("failed caching narinfo",
-				zap.String("location", req.location),
+	}
+
+	// NAR is cached (or was already uncompressed); now store the narinfo.
+	if err := proxy.insert(ctx, req.namespace, req.location, bytes.NewReader(body)); err != nil {
+		metricCacheJobs("error").Add(1)
+		proxy.log.Error("failed caching narinfo",
+			zap.String("location", req.location),
+			zap.Error(err))
+		return
+	}
+	metricCacheJobs("success").Add(1)
+}
+
+// cacheNarFromUpstream downloads a compressed NAR from the upstream URL derived
+// from the narinfo, decompresses it, and inserts it into the local store.
+// Returns true if the NAR was successfully cached.
+func (proxy *Proxy) cacheNarFromUpstream(ctx context.Context, info *narinfo.NarInfo, reqURL, namespace string) bool {
+	baseURL := extractBaseURL(reqURL)
+	narURL, err := url.JoinPath(baseURL, info.URL)
+	if err != nil {
+		proxy.log.Error("constructing NAR URL",
+			zap.String("base", baseURL),
+			zap.String("narPath", info.URL),
+			zap.Error(err))
+		return false
+	}
+
+	narHashStr := info.NarHash.String()
+	narHashParts := strings.SplitN(narHashStr, ":", 2)
+	if len(narHashParts) != 2 {
+		proxy.log.Error("malformed NarHash in narinfo", zap.String("narhash", narHashStr))
+		return false
+	}
+
+	narHash52 := narHashParts[1]
+	narLocation := fmt.Sprintf("indices/nar/%s/%s", narHash52[:4], narHash52)
+
+	narReq, err := http.NewRequestWithContext(ctx, "GET", narURL, nil)
+	if err != nil {
+		proxy.log.Error("creating NAR request", zap.String("url", narURL), zap.Error(err))
+		return false
+	}
+
+	narResp, err := proxy.httpGetClient.Do(narReq)
+	if err != nil {
+		proxy.log.Error("downloading NAR", zap.String("url", narURL), zap.Error(err))
+		return false
+	}
+	defer func() { _ = narResp.Body.Close() }()
+
+	if narResp.StatusCode != http.StatusOK {
+		proxy.log.Warn("upstream NAR returned non-200",
+			zap.String("url", narURL),
+			zap.Int("status", narResp.StatusCode))
+		return false
+	}
+
+	ext := narExtFromURL(info.URL)
+	rc, err := decompressReader(ext, narResp.Body)
+	if err != nil {
+		proxy.log.Error("decompressing NAR", zap.String("url", narURL), zap.Error(err))
+		return false
+	}
+	defer func() {
+		if err := rc.Close(); err != nil {
+			proxy.log.Warn("closing decompressor", zap.Error(err))
+		}
+	}()
+
+	if err := proxy.insert(ctx, namespace, narLocation, rc); err != nil {
+		proxy.log.Error("failed caching NAR", zap.String("url", narURL), zap.Error(err))
+		return false
+	}
+
+	return true
+}
+
+// doCacheNonNarinfo handles caching of non-narinfo content (NARs, realisations, logs).
+func (proxy *Proxy) doCacheNonNarinfo(ctx context.Context, req *cacheRequest, responseBody io.Reader) {
+	var body io.Reader = responseBody
+	if strings.HasPrefix(req.location, "indices/nar/") && req.ext != "" {
+		rc, err := decompressReader(req.ext, responseBody)
+		if err != nil {
+			proxy.log.Error("decompressing cached NAR",
+				zap.String("ext", req.ext),
 				zap.Error(err))
+			// Fall through with original body — insert will likely fail
+			// but that matches the original behavior.
 		} else {
-			metricCacheJobs("success").Add(1)
-		}
-	} else {
-		// Non-narinfo: decompress if NAR with ext
-		var body io.Reader = response.Body
-		if strings.HasPrefix(req.location, "indices/nar/") && req.ext != "" {
-			rc, err := decompressReader(req.ext, response.Body)
-			if err == nil {
-				defer func() {
-					if err := rc.Close(); err != nil {
-						proxy.log.Warn("closing decompressor", zap.Error(err))
-					}
-				}()
-				body = rc
-			} else {
-				proxy.log.Error("decompressing cached NAR",
-					zap.String("ext", req.ext),
-					zap.Error(err))
-			}
-		}
-		if err := proxy.insert(ctx, req.namespace, req.location, body); err != nil {
-			metricCacheJobs("error").Add(1)
-			proxy.log.Error("inserting", zap.String("location", req.location), zap.Error(err))
-		} else {
-			metricCacheJobs("success").Add(1)
+			defer func() {
+				if err := rc.Close(); err != nil {
+					proxy.log.Warn("closing decompressor", zap.Error(err))
+				}
+			}()
+			body = rc
 		}
 	}
+	if err := proxy.insert(ctx, req.namespace, req.location, body); err != nil {
+		metricCacheJobs("error").Add(1)
+		proxy.log.Error("inserting", zap.String("location", req.location), zap.Error(err))
+		return
+	}
+	metricCacheJobs("success").Add(1)
 }
 
 // extractBaseURL returns the base URL from a narinfo URL, preserving any path

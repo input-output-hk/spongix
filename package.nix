@@ -1,13 +1,12 @@
 {
   lib,
   buildGoModule,
-  rev,
   symlinkBin,
 }: let
   # TODO: split into multiple packages for each command.
   final = package "sha256-tXGraMNI2VmtretUcm4yrcbPvIEvg4LVXPjUJJnHb94=";
   package = vendorHash:
-    buildGoModule rec {
+    buildGoModule {
       pname = "spongix";
       version = "2025.01.01.001";
       inherit vendorHash;
@@ -43,7 +42,6 @@
       ldflags = [
         "-s"
         "-w"
-        "-X main.buildVersion=${version} -X main.buildCommit=${rev}"
         "-X main.symlinkBinStorePath=${symlinkBin}"
       ];
     };

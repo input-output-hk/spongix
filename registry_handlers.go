@@ -92,7 +92,7 @@ func (p *Proxy) registryGet(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if len(entries) == 0 {
-		serveNotFound(w, r)
+		serveNotFound(w)
 		return
 	}
 
@@ -190,7 +190,7 @@ func (p *Proxy) registryFlakeTarball(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if len(entries) == 0 {
-		serveNotFound(w, r)
+		serveNotFound(w)
 		return
 	}
 
@@ -247,7 +247,7 @@ func (p *Proxy) registryFlakeLatest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if len(versions) == 0 {
-		serveNotFound(w, r)
+		serveNotFound(w)
 		return
 	}
 

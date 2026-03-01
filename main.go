@@ -250,15 +250,7 @@ func NewProxy(config *config.Config) *Proxy {
 	}
 }
 
-var (
-	buildVersion        = "dev"
-	buildCommit         = "dirty"
-	symlinkBinStorePath = "" // set by ldflags: store path of the symlink binary
-)
-
-func (proxy *Proxy) Version() string {
-	return buildVersion + " (" + buildCommit + ")"
-}
+var symlinkBinStorePath = "" // set by ldflags: store path of the symlink binary
 
 func (proxy *Proxy) setupChunks() {
 	switch proxy.config.Chunks.StoreType {

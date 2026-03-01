@@ -209,17 +209,17 @@ type Chunk struct {
 
 type notAllowed struct{}
 
-func (n notAllowed) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+func (notAllowed) ServeHTTP(w http.ResponseWriter, _ *http.Request) {
 	w.WriteHeader(http.StatusMethodNotAllowed)
 }
 
 type notFound struct{}
 
-func (n notFound) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	serveNotFound(w, r)
+func (notFound) ServeHTTP(w http.ResponseWriter, _ *http.Request) {
+	serveNotFound(w)
 }
 
-func serveNotFound(w http.ResponseWriter, r *http.Request) {
+func serveNotFound(w http.ResponseWriter) {
 	w.Header().Set(headerContentType, mimeText)
 	w.Header().Set(headerCache, headerCacheMiss)
 	w.WriteHeader(http.StatusNotFound)
@@ -267,13 +267,13 @@ func (p *Proxy) nixCacheInfo(w http.ResponseWriter, r *http.Request) {
 	namespace, ok := mux.Vars(r)["namespace"]
 	if !ok {
 		p.log.Warn("namespace not given", zap.String("url", r.URL.String()))
-		serveNotFound(w, r)
+		serveNotFound(w)
 		return
 	}
 	ns, ok := p.config.Namespaces[namespace]
 	if !ok {
 		p.log.Warn("namespace not found", zap.String("namespace", namespace))
-		serveNotFound(w, r)
+		serveNotFound(w)
 		return
 	}
 	if r.Method == http.MethodHead {
@@ -290,13 +290,13 @@ func (p *Proxy) redirectToUpstream(prefix, location string, w http.ResponseWrite
 	namespace, ok := mux.Vars(r)["namespace"]
 	if !ok {
 		p.log.Warn("namespace not given", zap.String("url", r.URL.String()))
-		serveNotFound(w, r)
+		serveNotFound(w)
 		return
 	}
 	ns, ok := p.config.Namespaces[namespace]
 	if !ok {
 		p.log.Warn("namespace not found", zap.String("namespace", namespace))
-		serveNotFound(w, r)
+		serveNotFound(w)
 		return
 	}
 
@@ -339,30 +339,30 @@ func (p *Proxy) redirectToUpstream(prefix, location string, w http.ResponseWrite
 		// fields before the client sees them. Other content types
 		// can redirect directly to the upstream URL.
 		if prefix == narinfoPrefix {
-			p.proxyNarinfo(found, w, r)
+			p.proxyNarinfo(found, w)
 		} else {
 			http.Redirect(w, r, found, http.StatusFound)
 		}
 	case <-done:
-		serveNotFound(w, r)
+		serveNotFound(w)
 	case <-time.After(500 * time.Millisecond):
-		serveNotFound(w, r)
+		serveNotFound(w)
 	}
 }
 
 // proxyNarinfo fetches a narinfo from an upstream URL, rewrites compression
 // fields to reflect uncompressed storage, and serves it to the client.
-func (p *Proxy) proxyNarinfo(upstreamURL string, w http.ResponseWriter, r *http.Request) {
+func (p *Proxy) proxyNarinfo(upstreamURL string, w http.ResponseWriter) {
 	resp, err := p.httpGetClient.Get(upstreamURL)
 	if err != nil {
 		p.log.Error("fetching narinfo from upstream", zap.String("url", upstreamURL), zap.Error(err))
-		serveNotFound(w, r)
+		serveNotFound(w)
 		return
 	}
 	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
-		serveNotFound(w, r)
+		serveNotFound(w)
 		return
 	}
 
@@ -393,12 +393,12 @@ func (p *Proxy) proxyNarinfo(upstreamURL string, w http.ResponseWriter, r *http.
 func (p *Proxy) proxyNar(location string, w http.ResponseWriter, r *http.Request) {
 	namespace, ok := mux.Vars(r)["namespace"]
 	if !ok {
-		serveNotFound(w, r)
+		serveNotFound(w)
 		return
 	}
 	ns, ok := p.config.Namespaces[namespace]
 	if !ok {
-		serveNotFound(w, r)
+		serveNotFound(w)
 		return
 	}
 
@@ -460,7 +460,7 @@ func (p *Proxy) proxyNar(location string, w http.ResponseWriter, r *http.Request
 			buf, err := io.ReadAll(body)
 			if err != nil {
 				p.log.Error("reading NAR body", zap.String("url", tryURLStr), zap.Error(err))
-				serveNotFound(w, r)
+				serveNotFound(w)
 				return
 			}
 
@@ -493,7 +493,7 @@ func (p *Proxy) proxyNar(location string, w http.ResponseWriter, r *http.Request
 		}
 	}
 
-	serveNotFound(w, r)
+	serveNotFound(w)
 }
 
 // proxyNarViaUpstreamNarinfo fetches the narinfo from upstream using the store path
@@ -611,7 +611,7 @@ func (p *Proxy) largeHeadAndGet(prefix, mime string) func(w http.ResponseWriter,
 		// variant (.nar.xz, .nar.zst, etc.), return 404 so it falls back
 		// to the plain .nar URL.
 		if prefix == narPrefix && mux.Vars(r)["ext"] != "" {
-			serveNotFound(w, r)
+			serveNotFound(w)
 			return
 		}
 
@@ -622,7 +622,7 @@ func (p *Proxy) largeHeadAndGet(prefix, mime string) func(w http.ResponseWriter,
 
 		indices, ok := p.indexStores[namespace]
 		if !ok {
-			serveNotFound(w, r)
+			serveNotFound(w)
 			return
 		}
 

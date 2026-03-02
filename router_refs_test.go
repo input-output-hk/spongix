@@ -80,6 +80,23 @@ func TestParseNarinfoNarHash52Missing(t *testing.T) {
 	}
 }
 
+func TestParseNarinfoStorePathHash(t *testing.T) {
+	body := []byte("StorePath: /nix/store/hyhrnrnpsz9fw5p9dk85a58y31ink18c-test\nURL: nar/hash.nar\nNarSize: 512\n")
+	got := parseNarinfoStorePathHash(body)
+	want := "hyhrnrnpsz9fw5p9dk85a58y31ink18c"
+	if got != want {
+		t.Fatalf("parseNarinfoStorePathHash = %q, want %q", got, want)
+	}
+}
+
+func TestParseNarinfoStorePathHashMissing(t *testing.T) {
+	body := []byte("URL: nar/hash.nar\nNarSize: 512\n")
+	got := parseNarinfoStorePathHash(body)
+	if got != "" {
+		t.Fatalf("expected empty for missing StorePath, got %q", got)
+	}
+}
+
 func TestParseNarinfoReferencesNoDash(t *testing.T) {
 	body := []byte(`StorePath: /nix/store/hyhrnrnpsz9fw5p9dk85a58y31ink18c-test
 References: nodashhere validhash-withname anothernodash

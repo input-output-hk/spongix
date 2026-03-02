@@ -10,12 +10,14 @@ import (
 	"reflect"
 	"runtime"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/alitto/pond"
 	"github.com/folbricht/desync"
 	"github.com/input-output-hk/spongix/pkg/config"
+	"github.com/input-output-hk/spongix/pkg/store"
 	"github.com/smarty/assertions"
 	"github.com/steinfletcher/apitest"
 	"gotest.tools/v3/assert"
@@ -1071,5 +1073,200 @@ func TestNarinfoHitButNarMissing(t *testing.T) {
 	if cacheHeader == headerCacheHit {
 		t.Fatal("BUG: narinfo returned HIT even though the NAR was never cached. " +
 			"This means doCache stored the narinfo despite NAR download failure.")
+	}
+}
+
+// fixtureNarinfoFileHashURL is a narinfo where the URL uses the compressed FileHash
+// (not NarHash), matching real cache.nixos.org behavior. proxyNar cannot find
+// the NAR by appending compression extensions to the NarHash-based URL because
+// upstream stores it at the FileHash-based path.
+var fixtureNarinfoFileHashURL = fmt.Sprintf(`StorePath: /nix/store/hyhrnrnpsz9fw5p9dk85a58y31ink18c-test
+URL: nar/0rjb49w7dldq79d3ax30gw279bnbn48w9q925g3lr0rhrl0ycxvs.nar.xz
+Compression: xz
+FileHash: sha256:0rjb49w7dldq79d3ax30gw279bnbn48w9q925g3lr0rhrl0ycxvs
+FileSize: %d
+NarHash: sha256:1h6m2q7f8zq5z4kvn8j5wiz05jdic77df1x68dfwqg149jsy7gyp
+NarSize: %d
+References: 5b4cprjhjw35wyzvgmgvqay4hjf59h7x-test
+Deriver: 914ivbx6hfpgczwphndm0vc4z6q2c8a1-test.drv
+Sig: kappa:sn5s/RrqEI+YG6/PjwdbPjcAC7rcta7sJU4mFOawGvJBLsWkyLtBrT2EuFt/LJjWkTZ+ZWOI9NTtjo/woMdvAg==
+`, len(fixtureNarXz), len(fixtureNar))
+
+// TestNarRaceConditionFileHashURL reproduces the production bug where:
+// 1. Upstream narinfo URL uses FileHash (not NarHash) — matching cache.nixos.org behavior
+// 2. proxyNarinfo rewrites URL to nar/{narHash}.nar and serves to client
+// 3. doCache hasn't completed yet (pool saturated)
+// 4. Client immediately requests nar/{narHash}.nar
+// 5. proxyNar tries nar/{narHash}.nar.xz on upstream → 404 (wrong hash)
+// 6. Fallback via nh/ mapping → empty (doCache never stored it)
+// 7. Result: 404 even though the NAR is available upstream
+//
+// The fix: proxyNarinfo must store the nh/ mapping (narHash→storePathHash)
+// before serving the rewritten narinfo, so proxyNar's fallback can look up the
+// upstream narinfo and discover the correct FileHash-based URL.
+func TestNarRaceConditionFileHashURL(t *testing.T) {
+	fileHash := "0rjb49w7dldq79d3ax30gw279bnbn48w9q925g3lr0rhrl0ycxvs"
+	narHash := "1h6m2q7f8zq5z4kvn8j5wiz05jdic77df1x68dfwqg149jsy7gyp"
+	storePathHash := "hyhrnrnpsz9fw5p9dk85a58y31ink18c"
+
+	// Upstream that strictly serves NAR only at the FileHash path.
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.HasSuffix(r.URL.Path, ".narinfo"):
+			w.Header().Set("Content-Type", mimeNarinfo)
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(fixtureNarinfoFileHashURL))
+
+		case r.URL.Path == "/nar/"+fileHash+".nar.xz":
+			// Only serve NAR at the FileHash path (realistic upstream)
+			w.Header().Set("Content-Type", "application/x-xz")
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write(fixtureNarXz)
+
+		default:
+			// Any other NAR URL (including narHash-based) → 404
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer ts.Close()
+
+	// Create proxy with pebbleDB for nh/ mapping support.
+	db, err := store.Open(t.TempDir(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+
+	proxy := testProxy(t)
+	proxy.config.Namespaces[testNamespace].Substituters = []string{ts.URL}
+	proxy.pebbleDB = db
+
+	// Saturate the cache pool so doCache never runs.
+	proxy.cachePool = pond.New(1, 1)
+	blocker := make(chan struct{})
+	proxy.cachePool.Submit(func() { <-blocker })
+	proxy.cachePool.TrySubmit(func() { <-blocker })
+	defer close(blocker)
+
+	router := proxy.router()
+
+	// Step 1: GET narinfo — proxied from upstream, rewritten to use NarHash URL.
+	rr1 := httptest.NewRecorder()
+	req1, _ := http.NewRequest(http.MethodGet, nsNarinfo, nil)
+	router.ServeHTTP(rr1, req1)
+
+	if rr1.Code != http.StatusOK {
+		t.Fatalf("narinfo: expected 200, got %d: %s", rr1.Code, rr1.Body.String())
+	}
+	body := rr1.Body.String()
+	if !strings.Contains(body, "Compression: none") {
+		t.Fatalf("narinfo not rewritten to Compression: none:\n%s", body)
+	}
+	if !strings.Contains(body, "URL: nar/"+narHash+".nar") {
+		t.Fatalf("narinfo URL not rewritten to NarHash:\n%s", body)
+	}
+
+	// Verify: nh/ mapping should exist now (stored during proxyNarinfo).
+	gotSPH, err := db.GetStorePathByNarHash(narHash)
+	if err != nil {
+		t.Fatalf("GetStorePathByNarHash: %v", err)
+	}
+	if gotSPH != storePathHash {
+		t.Fatalf("nh/ mapping: got %q, want %q", gotSPH, storePathHash)
+	}
+
+	// Step 2: GET NAR — doCache hasn't run (pool blocked), so NAR isn't cached.
+	// proxyNar must use the nh/ fallback to fetch from upstream via FileHash URL.
+	rr2 := httptest.NewRecorder()
+	req2, _ := http.NewRequest(http.MethodGet, nsNar, nil)
+	router.ServeHTTP(rr2, req2)
+
+	if rr2.Code != http.StatusOK {
+		t.Fatalf("NAR: expected 200, got %d.\n"+
+			"Race condition: proxyNar tried nar/%s.nar.xz on upstream (wrong hash, 404),\n"+
+			"then fallback via nh/ mapping failed because proxyNarinfo didn't store it.\n"+
+			"Upstream only serves NAR at nar/%s.nar.xz (FileHash path).",
+			rr2.Code, narHash, fileHash)
+	}
+	if !bytes.Equal(rr2.Body.Bytes(), fixtureNar) {
+		t.Error("NAR body does not match expected decompressed content")
+	}
+
+	_ = storePathHash // used in assertion above
+}
+
+// TestProxyNarFallbackBeforeHEAD verifies that when the nh/ mapping exists,
+// proxyNar uses the fallback (fetch upstream narinfo → get correct NAR URL)
+// BEFORE trying the slow HEAD-scan of all substituters with compression variants.
+// Without this optimization, every NAR cache miss does 15 failed HEAD requests
+// (3 substituters × 5 extensions) before reaching the fallback that actually works.
+func TestProxyNarFallbackBeforeHEAD(t *testing.T) {
+	fileHash := "0rjb49w7dldq79d3ax30gw279bnbn48w9q925g3lr0rhrl0ycxvs"
+	storePathHash := "hyhrnrnpsz9fw5p9dk85a58y31ink18c"
+	narHash := "1h6m2q7f8zq5z4kvn8j5wiz05jdic77df1x68dfwqg149jsy7gyp"
+
+	var headCount int32
+
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == "HEAD" && strings.Contains(r.URL.Path, "/nar/"):
+			// Count HEAD requests to NAR paths — the optimization should skip these.
+			atomic.AddInt32(&headCount, 1)
+			w.WriteHeader(http.StatusNotFound)
+
+		case strings.HasSuffix(r.URL.Path, ".narinfo"):
+			w.Header().Set("Content-Type", mimeNarinfo)
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(fixtureNarinfoFileHashURL))
+
+		case r.URL.Path == "/nar/"+fileHash+".nar.xz":
+			w.Header().Set("Content-Type", "application/x-xz")
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write(fixtureNarXz)
+
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer ts.Close()
+
+	db, err := store.Open(t.TempDir(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+
+	proxy := testProxy(t)
+	proxy.config.Namespaces[testNamespace].Substituters = []string{ts.URL}
+	proxy.pebbleDB = db
+
+	// Pre-populate the nh/ mapping (simulating proxyNarinfo having stored it).
+	batch := db.NewBatch()
+	if err := batch.Set([]byte("nh/"+narHash), []byte(storePathHash), nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := batch.Commit(nil); err != nil {
+		t.Fatal(err)
+	}
+
+	router := proxy.router()
+
+	// GET NAR — nh/ mapping exists, so fallback should succeed without HEAD scan.
+	rr := httptest.NewRecorder()
+	req, _ := http.NewRequest(http.MethodGet, nsNar, nil)
+	router.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("NAR: expected 200, got %d", rr.Code)
+	}
+	if !bytes.Equal(rr.Body.Bytes(), fixtureNar) {
+		t.Error("NAR body does not match expected decompressed content")
+	}
+
+	// The optimization: with nh/ lookup first, zero HEAD requests to /nar/ paths.
+	heads := atomic.LoadInt32(&headCount)
+	if heads > 0 {
+		t.Errorf("proxyNar made %d HEAD requests before fallback; "+
+			"should check nh/ mapping first to avoid slow HEAD scan", heads)
 	}
 }

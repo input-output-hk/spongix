@@ -137,6 +137,17 @@ func (d *DB) GetStorePathByNarHash(narHash52 string) (string, error) {
 	return string(data), nil
 }
 
+// SetNarHashMapping stores the bidirectional mapping between a 52-char NarHash
+// and a 32-char store path hash. This is called eagerly during narinfo proxy
+// so that proxyNar's fallback can resolve NarHash→storePathHash before doCache
+// completes.
+func (d *DB) SetNarHashMapping(narHash52, storePathHash string) error {
+	batch := d.db.NewBatch()
+	_ = batch.Set(narHashKey(narHash52), []byte(storePathHash), nil)
+	_ = batch.Set(narHashReverseKey(storePathHash), []byte(narHash52), nil)
+	return batch.Commit(pebble.Sync)
+}
+
 // chunkKey returns the Pebble key for a chunk: c/<chunkID hex>
 func chunkKey(id desync.ChunkID) []byte {
 	hex := id.String()

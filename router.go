@@ -380,6 +380,19 @@ func (p *Proxy) proxyNarinfo(upstreamURL string, w http.ResponseWriter) {
 		return
 	}
 
+	// Store NarHash→storePathHash mapping eagerly so proxyNar's fallback
+	// can resolve the mapping before doCache completes. Without this, NAR
+	// requests arriving before doCache finishes return 404.
+	if p.pebbleDB != nil {
+		narHash52 := parseNarinfoNarHash52(body)
+		storePathHash := parseNarinfoStorePathHash(body)
+		if narHash52 != "" && storePathHash != "" {
+			if err := p.pebbleDB.SetNarHashMapping(narHash52, storePathHash); err != nil {
+				p.log.Error("storing NarHash mapping", zap.Error(err))
+			}
+		}
+	}
+
 	w.Header().Set(headerContentType, mimeNarinfo)
 	w.Header().Set(headerCache, headerCacheMiss)
 	w.WriteHeader(http.StatusOK)
@@ -402,6 +415,25 @@ func (p *Proxy) proxyNar(location string, w http.ResponseWriter, r *http.Request
 		return
 	}
 
+	// Fast path: if the nh/ mapping exists (stored by proxyNarinfo), use it
+	// to fetch the NAR via the upstream narinfo's original (FileHash-based) URL.
+	// This avoids the slow HEAD scan below, which tries NarHash-based URLs that
+	// don't exist on upstream caches like cache.nixos.org.
+	if p.pebbleDB != nil {
+		narHash := mux.Vars(r)["hash"] // 52-char nix-base32 hash from URL
+		storePathHash, err := p.pebbleDB.GetStorePathByNarHash(narHash)
+		if err != nil {
+			p.log.Error("looking up NarHash mapping", zap.String("narHash", narHash), zap.Error(err))
+		} else if storePathHash != "" {
+			if p.proxyNarViaUpstreamNarinfo(namespace, storePathHash, location, w, r) {
+				return
+			}
+		}
+	}
+
+	// Slow path: try the NarHash-based URL with each compression extension
+	// on every substituter. This works when upstream happens to use NarHash
+	// in its URLs (uncommon), or for uncompressed NARs.
 	narPath := strings.TrimPrefix(r.URL.Path, "/"+namespace)
 	compressionExts := []string{"", ".xz", ".zst", ".bz2", ".br"}
 
@@ -475,21 +507,6 @@ func (p *Proxy) proxyNar(location string, w http.ResponseWriter, r *http.Request
 			w.WriteHeader(http.StatusOK)
 			_, _ = w.Write(buf)
 			return
-		}
-	}
-
-	// Fallback: the NAR URL uses NarHash (from rewriteNarinfo), but upstream
-	// stores the NAR at the compressed file hash. Look up the original
-	// narinfo via the nh/ reverse mapping to get the upstream compressed URL.
-	if p.pebbleDB != nil {
-		narHash := mux.Vars(r)["hash"] // 52-char nix-base32 hash from URL
-		storePathHash, err := p.pebbleDB.GetStorePathByNarHash(narHash)
-		if err != nil {
-			p.log.Error("looking up NarHash mapping", zap.String("narHash", narHash), zap.Error(err))
-		} else if storePathHash != "" {
-			if p.proxyNarViaUpstreamNarinfo(namespace, storePathHash, location, w, r) {
-				return
-			}
 		}
 	}
 
@@ -829,6 +846,24 @@ func parseNarinfoNarHash52(body []byte) string {
 			parts := strings.SplitN(val, ":", 2)
 			if len(parts) == 2 {
 				return parts[1]
+			}
+		}
+	}
+	return ""
+}
+
+// parseNarinfoStorePathHash extracts the 32-char store path hash from a narinfo's StorePath field.
+// StorePath looks like "/nix/store/hyhrnrnpsz9fw5p9dk85a58y31ink18c-test".
+func parseNarinfoStorePathHash(body []byte) string {
+	scanner := bufio.NewScanner(bytes.NewReader(body))
+	for scanner.Scan() {
+		line := scanner.Text()
+		if strings.HasPrefix(line, "StorePath:") {
+			storePath := strings.TrimSpace(strings.TrimPrefix(line, "StorePath:"))
+			// Extract hash from "/nix/store/{hash}-{name}"
+			storePath = strings.TrimPrefix(storePath, "/nix/store/")
+			if idx := strings.IndexByte(storePath, '-'); idx >= 32 {
+				return storePath[:32]
 			}
 		}
 	}

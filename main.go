@@ -436,15 +436,34 @@ func (proxy *Proxy) doCache(req *cacheRequest) {
 
 	info, err := narinfo.Parse(bytes.NewReader(body))
 	if err != nil {
-		proxy.log.Warn("parsing narinfo for eager caching", zap.Error(err))
 		metricCacheJobs("error").Add(1)
-		proxy.log.Warn("skipping narinfo cache: NAR was not cached",
-			zap.String("location", req.location))
+		proxy.log.Warn("skipping narinfo cache: failed to parse narinfo",
+			zap.String("location", req.location),
+			zap.Error(err))
 		return
 	}
 
-	// If the upstream NAR is compressed, download and cache it first.
-	if info.Compression != "none" && info.URL != "" {
+	// Always ensure NAR is cached before storing narinfo.
+	narHashStr := info.NarHash.String()
+	narHashParts := strings.SplitN(narHashStr, ":", 2)
+	if len(narHashParts) != 2 {
+		metricCacheJobs("error").Add(1)
+		proxy.log.Error("malformed NarHash in narinfo, cannot verify NAR",
+			zap.String("narhash", narHashStr),
+			zap.String("location", req.location))
+		return
+	}
+	narHash52 := narHashParts[1]
+	narLocation := fmt.Sprintf("indices/nar/%s/%s", narHash52[:4], narHash52)
+
+	narCached := false
+	if indices, ok := proxy.indexStores[req.namespace]; ok {
+		if _, getErr := indices.GetIndex(narLocation); getErr == nil {
+			narCached = true
+		}
+	}
+
+	if !narCached && info.URL != "" {
 		if !proxy.cacheNarFromUpstream(ctx, info, req.url, req.namespace) {
 			metricCacheJobs("error").Add(1)
 			proxy.log.Warn("skipping narinfo cache: NAR was not cached",
@@ -453,7 +472,7 @@ func (proxy *Proxy) doCache(req *cacheRequest) {
 		}
 	}
 
-	// NAR is cached (or was already uncompressed); now store the narinfo.
+	// NAR is cached; now store the narinfo.
 	if err := proxy.insert(ctx, req.namespace, req.location, bytes.NewReader(body)); err != nil {
 		metricCacheJobs("error").Add(1)
 		proxy.log.Error("failed caching narinfo",

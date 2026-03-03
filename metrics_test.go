@@ -42,7 +42,9 @@ func TestMetricsEndpoint(t *testing.T) {
 func TestMetricsRequestHit(t *testing.T) {
 	proxy := testProxy(t)
 
-	// PUT a narinfo so we get a cache hit on the subsequent GET
+	// PUT the companion NAR first, then narinfo, so the consistency check passes
+	putFixtureNar(t, proxy)
+
 	apitest.New().
 		Handler(proxy.router()).
 		Put(nsNarinfo).

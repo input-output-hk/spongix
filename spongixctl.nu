@@ -41,9 +41,35 @@ def build-ca [installable: string]: nothing -> record {
   $ca.rewrites | transpose from to | get 0
 }
 
+# Check whether the NAR for a store path actually exists on the server.
+# Returns true only if both the narinfo and the NAR file respond to HEAD.
+def nar-exists [store: string, path: string]: nothing -> bool {
+  let hash = extract-hash $path
+  let narinfo_text = try { http get $"($store)/($hash).narinfo" } catch { null }
+  if $narinfo_text == null { return false }
+  let nar_line = $narinfo_text | lines | where { $in | str starts-with "URL: " } | get 0?
+  if $nar_line == null { return false }
+  let nar_path = $nar_line | str trim | str replace "URL: " ""
+  try { http head $"($store)/($nar_path)" | ignore; true } catch { false }
+}
+
 def push-to-store [store: string, path: string]: nothing -> nothing {
   log info $"Pushing to ($store)..."
   ^nix copy --to $"($store)?compression=none" $path
+  # nix copy treats narinfo presence as proof the data is uploaded.
+  # If the NAR is still missing (stale narinfo), upload it directly.
+  if not (nar-exists $store $path) {
+    log warning "nix copy skipped (stale narinfo). Uploading NAR directly..."
+    let hash = extract-hash $path
+    let narinfo_text = try { http get $"($store)/($hash).narinfo" } catch { null }
+    if $narinfo_text != null {
+      let nar_line = $narinfo_text | lines | where { $in | str starts-with "URL: " } | get 0?
+      if $nar_line != null {
+        let nar_path = $nar_line | str trim | str replace "URL: " ""
+        ^nix-store --dump $path | http put --content-type application/x-nix-nar $"($store)/($nar_path)"
+      }
+    }
+  }
 }
 
 def current-system []: nothing -> string {
@@ -98,7 +124,7 @@ def "main sync" [
     let attr = $pkg | str replace "capkg-" ""
     let meta = $pkg_meta | get $pkg
     let existing = registry-lookup $cfg.url $attr $meta.version $system
-    if $existing != null and $existing.fromPath == $meta.storePath {
+    if $existing != null and $existing.fromPath == $meta.storePath and (nar-exists $cfg.url $existing.fromPath) {
       log info $"Skipping ($attr) \(outPath unchanged\)"
       { name: $attr, action: "skipped", fromPath: $meta.storePath }
     } else {
@@ -205,27 +231,26 @@ def "main verify" [
         }
         if not $nar_ok {
           log warning $"MISSING NAR: ($pkg)/($ver) \(($e.system)\)"
-          if $nar_line != null {
+          let repair_ok = if $nar_line != null {
             # narinfo exists but NAR is missing: nix copy skips paths when narinfo
             # is present (it treats narinfo as proof the data is already uploaded).
             # Directly PUT the NAR bytes instead.
             let nar_path = $nar_line | str trim | str replace "URL: " ""
             let nar_url = $"($cfg.url)/($nar_path)"
             log info $"Uploading NAR directly to ($nar_url)..."
-            try {
-              ^nix-store --dump $e.fromPath | http put --content-type application/x-nix-nar $nar_url
-            } catch {|err|
+            try { ^nix-store --dump $e.fromPath | http put --content-type application/x-nix-nar $nar_url; true } catch {|err|
               log error $"Failed to upload NAR for ($pkg)/($ver): ($err.msg)"
+              false
             }
           } else {
             # narinfo also missing: full re-push via nix copy
-            try {
-              ^nix copy --to $"($cfg.url)?compression=none" $e.fromPath
-            } catch {|err|
+            try { ^nix copy --to $"($cfg.url)?compression=none" $e.fromPath; true } catch {|err|
               log error $"Failed to re-push ($pkg)/($ver): ($err.msg)"
+              false
             }
           }
-          { name: $pkg, version: $ver, system: $e.system, status: "repushed", fromPath: $e.fromPath }
+          let status = if $repair_ok { "repushed" } else { "failed" }
+          { name: $pkg, version: $ver, system: $e.system, status: $status, fromPath: $e.fromPath }
         } else {
           { name: $pkg, version: $ver, system: $e.system, status: "ok", fromPath: $e.fromPath }
         }
@@ -235,9 +260,14 @@ def "main verify" [
 
   if $json { $results | to json } else {
     let ok = $results | where status == "ok" | length
-    let bad = $results | where status == "repushed" | length
+    let repushed = $results | where status == "repushed" | length
+    let failed = $results | where status == "failed" | length
     $results | where status != "ok" | table
-    log info $"=== Verify: ($ok) ok, ($bad) repushed ==="
+    if $failed > 0 {
+      log error $"=== Verify: ($ok) ok, ($repushed) repushed, ($failed) failed ==="
+    } else {
+      log info $"=== Verify: ($ok) ok, ($repushed) repushed ==="
+    }
   }
 }
 

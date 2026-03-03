@@ -161,6 +161,20 @@ func mockGet(url string, status int) *apitest.MockResponse {
 	return apitest.NewMock().Get(url).RespondWith().Status(status)
 }
 
+// putFixtureNar PUTs the fixture NAR into the test proxy so that narinfo
+// consistency checks (which verify companion NAR existence) pass.
+func putFixtureNar(t *testing.T, proxy *Proxy) {
+	t.Helper()
+	apitest.New().
+		Handler(proxy.router()).
+		Method(http.MethodPut).
+		URL(nsNar).
+		Body(string(fixtureNar)).
+		Expect(t).
+		Status(http.StatusCreated).
+		End()
+}
+
 func testProxy(t *testing.T) *Proxy {
 	proxy := NewProxy(&config.Config{
 		Chunks: &config.Chunks{
@@ -237,6 +251,8 @@ func TestRouterNarinfoHead(t *testing.T) {
 
 	t.Run("found local", func(tt *testing.T) {
 		proxy := testProxy(tt)
+
+		putFixtureNar(tt, proxy)
 
 		apitest.New().
 			Handler(proxy.router()).
@@ -392,6 +408,8 @@ func TestRouterNarinfoGet(t *testing.T) {
 func TestRouterNarinfoPut(t *testing.T) {
 	t.Run("upload success", func(tt *testing.T) {
 		proxy := testProxy(tt)
+
+		putFixtureNar(tt, proxy)
 
 		apitest.New().
 			Handler(proxy.router()).
@@ -978,10 +996,10 @@ func TestRedirectToUpstreamGroupWaitBlocking(t *testing.T) {
 	}
 }
 
-// TestDoCacheStoresNarinfoWhenNarFails proves that doCache stores the narinfo
-// even when the NAR download fails, creating inconsistent state where narinfo
-// returns HIT but the NAR doesn't exist.
-func TestDoCacheStoresNarinfoWhenNarFails(t *testing.T) {
+// TestDoCacheBlocksNarinfoOnNarFailure proves that doCache does NOT store the
+// narinfo when the NAR download fails, preventing inconsistent state where
+// narinfo returns HIT but the NAR doesn't exist.
+func TestDoCacheBlocksNarinfoOnNarFailure(t *testing.T) {
 	// Upstream serves narinfo but returns 500 for all NAR downloads.
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if strings.HasSuffix(r.URL.Path, ".narinfo") {
@@ -1268,5 +1286,87 @@ func TestProxyNarFallbackBeforeHEAD(t *testing.T) {
 	if heads > 0 {
 		t.Errorf("proxyNar made %d HEAD requests before fallback; "+
 			"should check nh/ mapping first to avoid slow HEAD scan", heads)
+	}
+}
+
+// TestNarinfoNotServedWhenNARMissing exercises the serving-layer consistency
+// check in largeHeadAndGet: when a narinfo IS in storage but its companion
+// NAR is NOT, the narinfo should be treated as a miss (not served as a HIT).
+func TestNarinfoNotServedWhenNARMissing(t *testing.T) {
+	proxy := testProxy(t)
+
+	// PUT only the narinfo (skip the NAR).
+	apitest.New().
+		Handler(proxy.router()).
+		Method(http.MethodPut).
+		URL(nsNarinfo).
+		Body(fixtureNarinfoNone).
+		Expect(t).
+		Status(http.StatusCreated).
+		End()
+
+	// GET the narinfo. The narinfo index exists, but the companion NAR index
+	// at indices/nar/1h6m/1h6m2q7f8zq5z4kvn8j5wiz05jdic77df1x68dfwqg149jsy7gyp
+	// does NOT. With the consistency fix in largeHeadAndGet, this should be
+	// treated as a miss and NOT return X-Cache: HIT.
+	rr := httptest.NewRecorder()
+	req, _ := http.NewRequest(http.MethodGet, nsNarinfo, nil)
+	proxy.router().ServeHTTP(rr, req)
+
+	cacheHeader := rr.Header().Get(headerCache)
+	if cacheHeader == headerCacheHit {
+		t.Fatal("BUG: narinfo returned HIT even though the companion NAR is missing. " +
+			"largeHeadAndGet should verify NAR index exists before serving narinfo as a hit.")
+	}
+
+	// With no upstreams that respond (testProxy's upstream is example.com which
+	// won't respond through apitest), the result should be a 404.
+	if rr.Code != http.StatusNotFound {
+		t.Logf("response status: %d, cache header: %q (expected 404 or non-HIT)", rr.Code, cacheHeader)
+	}
+}
+
+// TestDoCacheSkipsNarinfoWhenNARNotCached exercises the doCache consistency
+// check: when the upstream serves a narinfo with Compression: none and the
+// NAR URL returns 404, doCache should NOT store the narinfo.
+func TestDoCacheSkipsNarinfoWhenNARNotCached(t *testing.T) {
+	// Upstream: serves narinfo with Compression: none, but returns 404 for all NARs.
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.HasSuffix(r.URL.Path, ".narinfo"):
+			w.Header().Set("Content-Type", mimeNarinfo)
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(fixtureNarinfoNoneUpstream))
+		default:
+			// All NAR requests return 404.
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer ts.Close()
+
+	proxy := testProxy(t)
+	proxy.config.Namespaces[testNamespace].Substituters = []string{ts.URL}
+	router := proxy.router()
+
+	// Step 1: GET narinfo -- triggers redirectToUpstream -> proxyNarinfo + doCache.
+	rr1 := httptest.NewRecorder()
+	req1, _ := http.NewRequest(http.MethodGet, nsNarinfo, nil)
+	router.ServeHTTP(rr1, req1)
+	assert.Equal(t, rr1.Code, http.StatusOK)
+
+	// Drain cachePool so doCache completes.
+	proxy.cachePool.StopAndWait()
+	proxy.cachePool = pond.New(10, 1000)
+
+	// Step 2: GET narinfo again. If doCache correctly skipped storing the
+	// narinfo (because the NAR was never available), this should NOT be a HIT.
+	rr2 := httptest.NewRecorder()
+	req2, _ := http.NewRequest(http.MethodGet, nsNarinfo, nil)
+	router.ServeHTTP(rr2, req2)
+
+	cacheHeader := rr2.Header().Get(headerCache)
+	if cacheHeader == headerCacheHit {
+		t.Fatal("BUG: narinfo returned HIT even though the NAR was never available (404). " +
+			"doCache should not store narinfo when the upstream NAR returns 404.")
 	}
 }

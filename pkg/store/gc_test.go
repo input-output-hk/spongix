@@ -20,7 +20,7 @@ func setupGCTestDB(t *testing.T) (*DB, *ChunkStore, *IndexStore) {
 // defaultFeatureFlags for test indices — desync requires CaFormatSHA512256.
 const testFeatureFlags = desync.CaFormatExcludeNoDump | desync.CaFormatSHA512256
 
-func makeTestIndex(t *testing.T, cs *ChunkStore, is *IndexStore, hash string, data []byte, narRefs []string) desync.ChunkID {
+func makeTestIndexKind(t *testing.T, cs *ChunkStore, is *IndexStore, kind, hash string, data []byte, narRefs []string) desync.ChunkID {
 	t.Helper()
 	chunk := desync.NewChunk(data)
 	if err := cs.StoreChunk(chunk); err != nil {
@@ -41,12 +41,17 @@ func makeTestIndex(t *testing.T, cs *ChunkStore, is *IndexStore, hash string, da
 	if len(hash) > 4 {
 		prefix = hash[0:4]
 	}
-	name := "indices/narinfo/" + prefix + "/" + hash
+	name := "indices/" + kind + "/" + prefix + "/" + hash
 
 	if err := is.StoreIndexWithRefs(name, idx, narRefs); err != nil {
 		t.Fatal(err)
 	}
 	return chunk.ID()
+}
+
+func makeTestIndex(t *testing.T, cs *ChunkStore, is *IndexStore, hash string, data []byte, narRefs []string) desync.ChunkID {
+	t.Helper()
+	return makeTestIndexKind(t, cs, is, "narinfo", hash, data, narRefs)
 }
 
 func TestGCPreservesReachable(t *testing.T) {
@@ -584,5 +589,203 @@ func TestGCBatchOverflow(t *testing.T) {
 	}
 	if stats.DeletedChunks != 1050 {
 		t.Errorf("expected 1050 deleted chunks, got %d", stats.DeletedChunks)
+	}
+}
+
+func TestGCNeverDeletesPinnedChunks(t *testing.T) {
+	db, cs, is := setupGCTestDB(t)
+
+	pinnedHash := "aaaa1111aaaa1111aaaa1111aaaa1111"
+	unpinnedHash := "bbbb2222bbbb2222bbbb2222bbbb2222"
+
+	// Create pinned narinfo + companion NAR index (same hash, different indices/ prefix)
+	pinnedNarinfoChunk := makeTestIndex(t, cs, is, pinnedHash, []byte("pinned narinfo"), nil)
+	pinnedNARChunk := makeTestIndexKind(t, cs, is, "nar", pinnedHash, []byte("pinned nar data"), nil)
+
+	// Create expired unpinned narinfo
+	unpinnedChunk := makeTestIndex(t, cs, is, unpinnedHash, []byte("unpinned narinfo"), nil)
+
+	// Backdate the unpinned narinfo to 2 hours ago so it's expired
+	unpinnedPath := "indices/narinfo/bbbb/" + unpinnedHash
+	oldTime := time.Now().Add(-2 * time.Hour)
+	if err := db.db.Set(timestampKey(unpinnedPath), encodeTimestamp(oldTime), pebble.Sync); err != nil {
+		t.Fatal(err)
+	}
+
+	// Run GC with 1-hour retention; pin the pinned hash
+	stats, err := GC(db, GCConfig{
+		RetentionPeriod: 1 * time.Hour,
+		PinnedHashes: map[string]struct{}{
+			pinnedHash: {},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Pinned narinfo's chunk should survive
+	has, err := cs.HasChunk(pinnedNarinfoChunk)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !has {
+		t.Fatal("pinned narinfo's chunk should survive GC")
+	}
+
+	// Pinned NAR's chunk should survive
+	has, err = cs.HasChunk(pinnedNARChunk)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !has {
+		t.Fatal("pinned NAR's chunk should survive GC")
+	}
+
+	// Pinned narinfo index should still exist
+	_, err = is.GetIndex("indices/narinfo/aaaa/" + pinnedHash)
+	if err != nil {
+		t.Fatal("pinned narinfo should survive:", err)
+	}
+
+	// Pinned NAR index should still exist
+	_, err = is.GetIndex("indices/nar/aaaa/" + pinnedHash)
+	if err != nil {
+		t.Fatal("pinned NAR index should survive:", err)
+	}
+
+	// Unpinned expired narinfo should be deleted
+	_, err = is.GetIndex(unpinnedPath)
+	if err == nil {
+		t.Fatal("unpinned expired narinfo should have been deleted")
+	}
+
+	// Verify GC stats reflect the deletion
+	if stats.DeletedIndices != 1 {
+		t.Errorf("expected 1 deleted index (unpinned narinfo), got %d", stats.DeletedIndices)
+	}
+
+	// Unpinned narinfo's chunk should have been deleted (orphaned after index deletion)
+	has, err = cs.HasChunk(unpinnedChunk)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if has {
+		t.Fatal("unpinned narinfo's chunk should have been deleted")
+	}
+}
+
+func TestGCSizeEvictionRespectsPins(t *testing.T) {
+	db, cs, is := setupGCTestDB(t)
+
+	pinnedHash := "aaaa1111aaaa1111aaaa1111aaaa1111"
+
+	// Create 1 pinned narinfo
+	pinnedChunk := makeTestIndex(t, cs, is, pinnedHash, []byte("pinned narinfo data"), nil)
+
+	// Create 20 unpinned narinfos
+	for i := 0; i < 20; i++ {
+		hash := fmt.Sprintf("bbbb%028x", i)
+		data := []byte(fmt.Sprintf("unpinned-%d", i))
+		makeTestIndex(t, cs, is, hash, data, nil)
+	}
+
+	// Pin the pinned hash, run GC with MaxBytes: 1 to force size-based eviction
+	stats, err := GC(db, GCConfig{
+		PinnedHashes: map[string]struct{}{
+			pinnedHash: {},
+		},
+		MaxBytes: 1, // force eviction of everything possible
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// The 20 unpinned narinfos should have been deleted in phase 3 (not pinned)
+	if stats.DeletedIndices != 20 {
+		t.Errorf("expected 20 deleted indices (all unpinned), got %d", stats.DeletedIndices)
+	}
+
+	// Pinned narinfo should survive even under extreme size pressure
+	_, err = is.GetIndex("indices/narinfo/aaaa/" + pinnedHash)
+	if err != nil {
+		t.Fatal("pinned narinfo should survive size eviction:", err)
+	}
+
+	// Phase 5 should be a no-op: all unpinned narinfos were already deleted in phase 3,
+	// so there are no candidates left for size-based eviction.
+	if stats.SizeEvictedIndices != 0 {
+		t.Errorf("expected 0 size-evicted indices (all unpinned already deleted in phase 3), got %d", stats.SizeEvictedIndices)
+	}
+
+	// Pinned narinfo's chunk should survive
+	has, err := cs.HasChunk(pinnedChunk)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !has {
+		t.Fatal("pinned chunk should survive size eviction")
+	}
+}
+
+func TestGCCleansUpNarinfoWhenNARDeleted(t *testing.T) {
+	db, cs, is := setupGCTestDB(t)
+
+	hash := "aaaa1111aaaa1111aaaa1111aaaa1111"
+
+	// Create narinfo + NAR pair (same hash)
+	narinfoChunk := makeTestIndex(t, cs, is, hash, []byte("narinfo data"), nil)
+	narChunk := makeTestIndexKind(t, cs, is, "nar", hash, []byte("nar data"), nil)
+
+	// Simulate a crash during deletion: delete only the NAR i/ key,
+	// leaving its t/ and cr/ entries intact (stale references).
+	narIndexPath := "indices/nar/aaaa/" + hash
+	if err := db.db.Delete(indexKey(narIndexPath), pebble.Sync); err != nil {
+		t.Fatal(err)
+	}
+
+	// Run GC with no pins: narinfo is unreachable, so it gets deleted.
+	// The NAR i/ key is already gone, so phase 3 won't find it to clean up
+	// its cr/ entries. The stale cr/ ref keeps the NAR chunk alive.
+	stats, err := GC(db, GCConfig{})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Narinfo should be deleted (unreachable — no pins)
+	narinfoPath := "indices/narinfo/aaaa/" + hash
+	_, err = is.GetIndex(narinfoPath)
+	if err == nil {
+		t.Fatal("narinfo should have been deleted (no pins)")
+	}
+
+	// Only the narinfo index was found and deleted by phase 3
+	// (the NAR i/ key was already gone before GC ran)
+	if stats.DeletedIndices != 1 {
+		t.Errorf("expected 1 deleted index (narinfo only), got %d", stats.DeletedIndices)
+	}
+
+	// Narinfo's chunk should be orphaned and deleted (its cr/ was removed in phase 3)
+	has, err := cs.HasChunk(narinfoChunk)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if has {
+		t.Fatal("narinfo chunk should have been deleted (orphaned after narinfo index deletion)")
+	}
+
+	// NAR chunk survives: its stale cr/ ref (from the manually deleted NAR index)
+	// was never cleaned up because phase 3 only removes cr/ entries for indices
+	// it discovers during its i/ scan. The NAR i/ key was already gone.
+	has, err = cs.HasChunk(narChunk)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !has {
+		t.Fatal("NAR chunk should survive (stale cr/ ref prevents orphan detection)")
+	}
+
+	// Only the narinfo chunk is orphaned; NAR chunk is protected by stale cr/
+	if stats.DeletedChunks != 1 {
+		t.Errorf("expected 1 deleted chunk (narinfo only), got %d", stats.DeletedChunks)
 	}
 }

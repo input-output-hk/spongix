@@ -661,7 +661,6 @@ func (p *Proxy) largeHeadAndGet(prefix, mime string) func(w http.ResponseWriter,
 		}
 
 		// Cache hit.
-		metricRequests(namespace, prefix, "hit").Add(1)
 		w.Header().Set("Content-Type", mime)
 		w.Header().Set(headerCache, headerCacheHit)
 
@@ -682,15 +681,35 @@ func (p *Proxy) largeHeadAndGet(prefix, mime string) func(w http.ResponseWriter,
 				answer(w, http.StatusInternalServerError, mimeText, err.Error())
 				return
 			}
+
+			// Verify companion NAR index exists before serving.
+			narHash52 := parseNarinfoNarHash52(body)
+			if narHash52 != "" && len(narHash52) > 4 {
+				narLocation := fmt.Sprintf("indices/nar/%s/%s", narHash52[:4], narHash52)
+				if _, narErr := indices.GetIndex(narLocation); narErr != nil {
+					p.log.Warn("narinfo cached but NAR missing, treating as miss",
+						zap.String("narinfo", location), zap.String("nar", narLocation))
+					metricRequests(namespace, prefix, "miss").Add(1)
+					p.redirectToUpstream(prefix, location, w, r)
+					return
+				}
+			}
+			metricRequests(namespace, prefix, "hit").Add(1)
 			http.ServeContent(w, r, r.URL.Path, time.Now(), bytes.NewReader(body))
 			return
 		}
 
+		metricRequests(namespace, prefix, "hit").Add(1)
 		rd := desync.NewIndexReadSeeker(index, p.chunkStore)
 		http.ServeContent(w, r, r.URL.Path, time.Now(), rd)
 	}
 }
 
+// largePut handles PUT requests for narinfos, NARs, realisations, and logs.
+// PUT does not enforce narinfo-before-NAR ordering; nix copy always sends
+// NAR before narinfo. Consistency is enforced at the serving layer
+// (largeHeadAndGet verifies NAR exists before serving narinfo) and the
+// caching layer (doCache verifies NAR is cached before storing narinfo).
 func (p *Proxy) largePut(prefix string) func(w http.ResponseWriter, r *http.Request) {
 	return func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()

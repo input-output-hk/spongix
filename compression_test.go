@@ -199,6 +199,7 @@ func TestNarinfoRewriteCompression(t *testing.T) {
 
 	t.Run("xz", func(tt *testing.T) {
 		proxy := testProxy(tt)
+		putFixtureNar(tt, proxy)
 
 		inputNarinfo := makeNarinfoXz(narHash, 512, "0rjb49w7dldq79d3ax30gw279bnbn48w9q925g3lr0rhrl0ycxvs", 220)
 
@@ -231,6 +232,7 @@ func TestNarinfoRewriteCompression(t *testing.T) {
 
 	t.Run("zstd", func(tt *testing.T) {
 		proxy := testProxy(tt)
+		putFixtureNar(tt, proxy)
 
 		inputNarinfo := makeNarinfoZstd(narHash, 512, "0mn3yn1dh5l065jjrj7b3gc8sn3kbji32w16dwgcs6yqgada09jv", 192)
 
@@ -261,6 +263,7 @@ func TestNarinfoRewriteCompression(t *testing.T) {
 
 	t.Run("xz URL hash differs from NarHash", func(tt *testing.T) {
 		proxy := testProxy(tt)
+		putFixtureNar(tt, proxy)
 
 		// Simulate cache.nixos.org: URL contains the compressed file hash,
 		// which differs from NarHash.
@@ -300,6 +303,7 @@ Sig: kappa:sn5s/RrqEI+YG6/PjwdbPjcAC7rcta7sJU4mFOawGvJBLsWkyLtBrT2EuFt/LJjWkTZ+Z
 
 	t.Run("none unchanged", func(tt *testing.T) {
 		proxy := testProxy(tt)
+		putFixtureNar(tt, proxy)
 
 		// Upload narinfo with Compression: none -- should be stored as-is
 		apitest.New().
@@ -329,6 +333,7 @@ Sig: kappa:sn5s/RrqEI+YG6/PjwdbPjcAC7rcta7sJU4mFOawGvJBLsWkyLtBrT2EuFt/LJjWkTZ+Z
 // (StorePath, NarHash, NarSize, References) is unchanged by compression rewriting.
 func TestNarinfoSignaturePreservedOnRewrite(t *testing.T) {
 	proxy := testProxy(t)
+	putFixtureNar(t, proxy)
 
 	narHash := "1h6m2q7f8zq5z4kvn8j5wiz05jdic77df1x68dfwqg149jsy7gyp"
 	inputNarinfo := makeNarinfoXz(narHash, 512, "0rjb49w7dldq79d3ax30gw279bnbn48w9q925g3lr0rhrl0ycxvs", 220)

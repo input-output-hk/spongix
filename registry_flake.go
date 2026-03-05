@@ -16,21 +16,23 @@ var flakeTemplate = template.Must(template.New("flake.nix").Parse(`{
         toPath = "{{ .ToPath }}";
         fromStore = "{{ .FromStore }}";
       };
-    in (derivation {
-      name = "{{ $.Name }}-{{ $.Version }}";
-      system = "{{ .System }}";
-      builder = "${self}/bin/symlink";
-      args = [storePath (placeholder "out")];
-      pathToLink = storePath;
-    }) // {
-      version = "{{ $.Version }}";
+      drv = derivation {
+        name = "{{ $.Name }}-{{ $.Version }}";
+        system = "{{ .System }}";
+        builder = "${self}/bin/symlink";
+        args = [storePath (placeholder "out")];
+        pathToLink = storePath;
+      };
+      attrs = {
+        version = "{{ $.Version }}";
 {{- if .MainProgram }}
-      mainProgram = "{{ .MainProgram }}";
-      meta.mainProgram = "{{ .MainProgram }}";
-      passthru.shellPath = "/bin/{{ .MainProgram }}";
-      shellPath = "/bin/{{ .MainProgram }}";
+        mainProgram = "{{ .MainProgram }}";
+        meta.mainProgram = "{{ .MainProgram }}";
+        passthru.shellPath = "/bin/{{ .MainProgram }}";
+        shellPath = "/bin/{{ .MainProgram }}";
 {{- end }}
-    };
+      };
+    in drv // attrs // { out = drv.out // attrs; };
     packages.{{ .System }}.{{ $.Name }} = self.packages.{{ .System }}.default;
 {{- end }}
   };

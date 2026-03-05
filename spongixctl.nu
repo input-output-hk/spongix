@@ -35,7 +35,7 @@ def extract-hash [input: string]: nothing -> string {
 
 def build-ca [installable: string]: nothing -> record {
   log info $"Building ($installable)..."
-  let from_path = ^nix build --no-link --print-out-paths $installable | str trim
+  let from_path = ^nix build --no-link --print-out-paths $installable | lines | first
   log info $"Making content-addressed: ($from_path)"
   let ca = ^nix store make-content-addressed --json $from_path | from json
   $ca.rewrites | transpose from to | get 0

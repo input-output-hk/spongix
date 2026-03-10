@@ -34,7 +34,7 @@ func chunkRefPrefix(id desync.ChunkID) []byte {
 }
 
 // narRefKey returns the key for a store path's references: r/<storePathHash>
-func narRefKey(storePathHash string) []byte {
+func narRefKey(storePathHash StorePathHash32) []byte {
 	key := make([]byte, 2+len(storePathHash))
 	key[0] = 'r'
 	key[1] = '/'
@@ -44,7 +44,7 @@ func narRefKey(storePathHash string) []byte {
 
 // narHashKey returns the Pebble key for a NarHash mapping: nh/<narHash52>
 // Maps a 52-char nix-base32 NarHash to a 32-char store path hash.
-func narHashKey(narHash52 string) []byte {
+func narHashKey(narHash52 NarHash52) []byte {
 	key := make([]byte, 3+len(narHash52))
 	key[0] = 'n'
 	key[1] = 'h'
@@ -55,7 +55,7 @@ func narHashKey(narHash52 string) []byte {
 
 // narHashReverseKey returns the Pebble key: nhr/<storePathHash32>
 // Reverse of nh/, enabling GC to efficiently find and delete nh/ entries.
-func narHashReverseKey(storePathHash string) []byte {
+func narHashReverseKey(storePathHash StorePathHash32) []byte {
 	key := make([]byte, 4+len(storePathHash))
 	copy(key, "nhr/")
 	copy(key[4:], storePathHash)
@@ -63,22 +63,33 @@ func narHashReverseKey(storePathHash string) []byte {
 }
 
 // encodeNARRefs encodes a list of store path hashes as newline-separated bytes.
-func encodeNARRefs(refs []string) []byte {
-	return []byte(strings.Join(refs, "\n"))
+func encodeNARRefs(refs []StorePathHash32) []byte {
+	strs := make([]string, len(refs))
+	for i, r := range refs {
+		strs[i] = string(r)
+	}
+	return []byte(strings.Join(strs, "\n"))
 }
 
 // decodeNARRefs decodes a newline-separated list of store path hashes.
-func decodeNARRefs(data []byte) []string {
+func decodeNARRefs(data []byte) []StorePathHash32 {
 	if len(data) == 0 {
 		return nil
 	}
-	return strings.Split(string(data), "\n")
+	parts := strings.Split(string(data), "\n")
+	refs := make([]StorePathHash32, len(parts))
+	for i, p := range parts {
+		refs[i] = StorePathHash32(p)
+	}
+	return refs
 }
 
-// extractStorePathHash extracts the store path hash from an index name.
+// extractPathHash extracts the hash from an index name (last path component).
 // Index names look like "indices/narinfo/hyhr/hyhrnrnpsz9fw5p9dk85a58y31ink18c"
-// Returns the full hash (last path component).
-func extractStorePathHash(name string) string {
+// or "indices/nar/0bmw/0bmwc9fqyilxy46nmvy5wkdfbkqwvi7y80wlw5nks7l7xydzkfnp".
+// The returned string may be a StorePathHash32 or NarHash52 depending on
+// the index kind; callers must cast based on the path prefix.
+func extractPathHash(name string) string {
 	parts := strings.Split(name, "/")
 	if len(parts) < 2 {
 		return ""
@@ -116,7 +127,7 @@ func (rt *RefTracker) GetChunkRefCount(id desync.ChunkID) (int, error) {
 }
 
 // GetNARRefs returns the store path hashes referenced by a given store path.
-func (rt *RefTracker) GetNARRefs(storePathHash string) ([]string, error) {
+func (rt *RefTracker) GetNARRefs(storePathHash StorePathHash32) ([]StorePathHash32, error) {
 	key := narRefKey(storePathHash)
 	val, closer, err := rt.db.db.Get(key)
 	if errors.Is(err, pebble.ErrNotFound) {
@@ -142,7 +153,7 @@ func (rt *RefTracker) DeleteChunkRefsForIndex(indexPath string, chunkIDs []desyn
 }
 
 // DeleteNARRef deletes the r/ entry for a store path hash.
-func (rt *RefTracker) DeleteNARRef(storePathHash string) error {
+func (rt *RefTracker) DeleteNARRef(storePathHash StorePathHash32) error {
 	return rt.db.db.Delete(narRefKey(storePathHash), pebble.Sync)
 }
 

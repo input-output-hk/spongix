@@ -15,7 +15,7 @@ import (
 // GCConfig holds configuration for the garbage collector.
 type GCConfig struct {
 	DryRun       bool
-	PinnedHashes map[string]struct{}
+	PinnedHashes map[StorePathHash32]struct{}
 	// RetentionPeriod controls how long narinfos are kept.
 	// Narinfos newer than this are roots (kept alive).
 	// Zero means only pinned hashes survive.
@@ -32,6 +32,7 @@ type GCStats struct {
 	UnreachableNarinfos int
 	DeletedIndices      int
 	CorruptIndices      int
+	NHLookupErrors      int
 	OrphanChunks        int
 	DeletedChunks       int
 	DeletedBytes        uint64
@@ -69,6 +70,7 @@ func GC(db *DB, cfg GCConfig) (GCStats, error) {
 	stats.DeletedIndices = deleted.count
 	stats.UnreachableNarinfos = deleted.unreachable
 	stats.CorruptIndices = deleted.corruptIndices
+	stats.NHLookupErrors = deleted.nhLookupErrors
 
 	// Phase 4: Delete orphan chunks
 	orphans, err := deleteOrphanChunks(db, cfg.DryRun)
@@ -115,7 +117,7 @@ func sizeEvict(db *DB, cfg GCConfig) (sizeEvictResult, error) {
 	}
 
 	// Merge all pin sources for exclusion.
-	allPins := make(map[string]struct{}, len(cfg.PinnedHashes))
+	allPins := make(map[StorePathHash32]struct{}, len(cfg.PinnedHashes))
 	for h := range cfg.PinnedHashes {
 		allPins[h] = struct{}{}
 	}
@@ -141,7 +143,7 @@ func sizeEvict(db *DB, cfg GCConfig) (sizeEvictResult, error) {
 	var candidates []timestampedIndex
 	for iter.First(); iter.Valid(); iter.Next() {
 		indexPath := strings.TrimPrefix(string(iter.Key()), "i/")
-		hash := extractStorePathHash(indexPath)
+		hash := StorePathHash32(extractPathHash(indexPath))
 		if hash == "" {
 			continue
 		}
@@ -208,7 +210,7 @@ func addEvictionDeletes(db *DB, batch *pebble.Batch, cand timestampedIndex) int 
 	_ = batch.Delete(indexKey(cand.path), nil)
 	_ = batch.Delete(timestampKey(cand.path), nil)
 
-	hash := extractStorePathHash(cand.path)
+	hash := StorePathHash32(extractPathHash(cand.path))
 	_ = batch.Delete(narRefKey(hash), nil)
 
 	// Delete nh/ and nhr/ entries if present.
@@ -218,7 +220,7 @@ func addEvictionDeletes(db *DB, batch *pebble.Batch, cand timestampedIndex) int 
 		nh52 := make([]byte, len(nhrVal))
 		copy(nh52, nhrVal)
 		_ = nhrCloser.Close()
-		_ = batch.Delete(narHashKey(string(nh52)), nil)
+		_ = batch.Delete(narHashKey(NarHash52(nh52)), nil)
 		_ = batch.Delete(nhrKey, nil)
 	}
 
@@ -243,12 +245,12 @@ func addEvictionDeletes(db *DB, batch *pebble.Batch, cand timestampedIndex) int 
 
 // findRoots scans all narinfo indices and returns store path hashes that
 // are roots (within retention, file-pinned, or Pebble-pinned).
-func findRoots(db *DB, cfg GCConfig) (map[string]struct{}, error) {
-	roots := make(map[string]struct{})
+func findRoots(db *DB, cfg GCConfig) (map[StorePathHash32]struct{}, error) {
+	roots := make(map[StorePathHash32]struct{})
 	now := time.Now()
 
 	// Merge Pebble-managed pins (p/ keys) into the pin set.
-	allPins := make(map[string]struct{}, len(cfg.PinnedHashes))
+	allPins := make(map[StorePathHash32]struct{}, len(cfg.PinnedHashes))
 	for h := range cfg.PinnedHashes {
 		allPins[h] = struct{}{}
 	}
@@ -273,7 +275,7 @@ func findRoots(db *DB, cfg GCConfig) (map[string]struct{}, error) {
 	for iter.First(); iter.Valid(); iter.Next() {
 		key := string(iter.Key())
 		indexPath := strings.TrimPrefix(key, "i/")
-		hash := extractStorePathHash(indexPath)
+		hash := StorePathHash32(extractPathHash(indexPath))
 		if hash == "" {
 			continue
 		}
@@ -310,9 +312,9 @@ func findRoots(db *DB, cfg GCConfig) (map[string]struct{}, error) {
 
 // transitiveClose performs BFS over r/ references starting from roots,
 // returning the full set of reachable store path hashes.
-func transitiveClose(db *DB, roots map[string]struct{}) (map[string]struct{}, error) {
-	reachable := make(map[string]struct{}, len(roots))
-	queue := make([]string, 0, len(roots))
+func transitiveClose(db *DB, roots map[StorePathHash32]struct{}) (map[StorePathHash32]struct{}, error) {
+	reachable := make(map[StorePathHash32]struct{}, len(roots))
+	queue := make([]StorePathHash32, 0, len(roots))
 
 	for hash := range roots {
 		reachable[hash] = struct{}{}
@@ -351,12 +353,17 @@ type deleteResult struct {
 	count          int
 	unreachable    int
 	corruptIndices int
+	nhLookupErrors int
 }
 
 // deleteUnreachableIndices scans ALL index types (narinfo, nar, realisations, log)
 // and deletes those whose store path hash is not in the reachable set.
-// Also deletes associated cr/, r/, and t/ entries.
-func deleteUnreachableIndices(db *DB, reachable map[string]struct{}, dryRun bool) (deleteResult, error) {
+// Also deletes associated cr/, r/, nh/, nhr/, and t/ entries.
+//
+// BUG FIX: NAR index paths use NarHash52, not StorePathHash32. The reachable set
+// contains StorePathHash32 values. Before this fix, NAR indices were NEVER matched
+// and always deleted — even when their narinfo was pinned.
+func deleteUnreachableIndices(db *DB, reachable map[StorePathHash32]struct{}, dryRun bool) (deleteResult, error) {
 	var result deleteResult
 
 	// Scan ALL index types — narinfo, nar, realisations, log
@@ -393,13 +400,36 @@ func deleteUnreachableIndices(db *DB, reachable map[string]struct{}, dryRun bool
 	for iter.First(); iter.Valid(); iter.Next() {
 		key := string(iter.Key())
 		indexPath := strings.TrimPrefix(key, "i/")
-		hash := extractStorePathHash(indexPath)
+		hash := extractPathHash(indexPath)
 		if hash == "" {
 			continue
 		}
 
-		if _, ok := reachable[hash]; ok {
-			continue
+		// Resolve to StorePathHash32 based on index kind.
+		var storeHash StorePathHash32
+		if strings.HasPrefix(indexPath, "indices/nar/") {
+			// NAR index paths use NarHash52 — resolve via nh/ mapping.
+			resolved, err := db.GetStorePathByNarHash(NarHash52(hash))
+			if err != nil {
+				// DB error reading nh/ mapping; treat as unreachable so we don't
+				// block the entire GC run for a transient read failure.
+				result.nhLookupErrors++
+			} else {
+				storeHash = resolved
+			}
+		} else if strings.HasPrefix(indexPath, "indices/narinfo/") {
+			storeHash = StorePathHash32(hash)
+		} else {
+			// Realisations and logs use non-StorePathHash formats (64-char SHA256
+			// hex for realisations, "hash-name" for logs). Leave storeHash empty
+			// so they always fail the reachability check and get deleted, matching
+			// current behavior.
+		}
+
+		if storeHash != "" {
+			if _, ok := reachable[storeHash]; ok {
+				continue
+			}
 		}
 
 		result.unreachable++
@@ -412,18 +442,29 @@ func deleteUnreachableIndices(db *DB, reachable map[string]struct{}, dryRun bool
 		_ = batch.Delete([]byte(key), nil)
 		// Delete the timestamp
 		_ = batch.Delete(timestampKey(indexPath), nil)
-		// Delete NAR refs (if any)
-		_ = batch.Delete(narRefKey(hash), nil)
 
-		// Delete nh/ and nhr/ entries if present.
-		nhrKey := narHashReverseKey(hash)
-		if nhrVal, nhrCloser, nhrErr := db.db.Get(nhrKey); nhrErr == nil {
-			nh52 := make([]byte, len(nhrVal))
-			copy(nh52, nhrVal)
-			_ = nhrCloser.Close()
-			_ = batch.Delete(narHashKey(string(nh52)), nil)
-			_ = batch.Delete(nhrKey, nil)
+		// Clean up r/, nh/, and nhr/ entries based on index kind.
+		if strings.HasPrefix(indexPath, "indices/nar/") {
+			// NAR indices don't have r/ entries (only narinfos do).
+			// Delete nh/<NarHash52> directly.
+			_ = batch.Delete(narHashKey(NarHash52(hash)), nil)
+			// If we resolved the StorePathHash32 earlier, also delete nhr/.
+			if storeHash != "" {
+				_ = batch.Delete(narHashReverseKey(storeHash), nil)
+			}
+		} else if strings.HasPrefix(indexPath, "indices/narinfo/") {
+			// Narinfo: delete r/ and look up nhr/ -> nh/ as before.
+			_ = batch.Delete(narRefKey(storeHash), nil)
+			nhrKey := narHashReverseKey(storeHash)
+			if nhrVal, nhrCloser, nhrErr := db.db.Get(nhrKey); nhrErr == nil {
+				nh52 := make([]byte, len(nhrVal))
+				copy(nh52, nhrVal)
+				_ = nhrCloser.Close()
+				_ = batch.Delete(narHashKey(NarHash52(nh52)), nil)
+				_ = batch.Delete(nhrKey, nil)
+			}
 		}
+		// Realisations/logs: no r/, nh/, or nhr/ entries to clean up.
 
 		// Read the index to get chunk IDs for cr/ cleanup
 		idx, err := desync.IndexFromReader(strings.NewReader(string(iter.Value())))

@@ -154,6 +154,7 @@ func (gc *GC) gcPebble() {
 		zap.Int("reachable_narinfos", stats.ReachableNarinfos),
 		zap.Int("unreachable_narinfos", stats.UnreachableNarinfos),
 		zap.Int("deleted_indices", stats.DeletedIndices),
+		zap.Int("nh_lookup_errors", stats.NHLookupErrors),
 		zap.Int("orphan_chunks", stats.OrphanChunks),
 		zap.Int("deleted_chunks", stats.DeletedChunks),
 		zap.Uint64("deleted_bytes", stats.DeletedBytes),

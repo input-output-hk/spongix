@@ -56,7 +56,7 @@ func (p *Proxy) registryPut(w http.ResponseWriter, r *http.Request) {
 	if fromHash != "" {
 		label := fmt.Sprintf("%s@%s", pkg, version)
 		if err := p.pebbleDB.PinHash(fromHash, label); err != nil {
-			p.log.Error("auto-pinning registry entry", zap.String("hash", fromHash), zap.Error(err))
+			p.log.Error("auto-pinning registry entry", zap.String("hash", string(fromHash)), zap.Error(err))
 		}
 	}
 

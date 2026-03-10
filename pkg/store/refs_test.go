@@ -35,7 +35,7 @@ func TestIncrementKeyTrailingFF(t *testing.T) {
 }
 
 func TestEncodeDecodeNARRefs(t *testing.T) {
-	refs := []string{
+	refs := []StorePathHash32{
 		"5b4cprjhjw35wyzvgmgvqay4hjf59h7x",
 		"hyhrnrnpsz9fw5p9dk85a58y31ink18c",
 		"914ivbx6hfpgczwphndm0vc4z6q2c8a1",
@@ -66,25 +66,25 @@ func TestDecodeNARRefsSingle(t *testing.T) {
 	if len(decoded) != 1 {
 		t.Fatalf("expected 1 ref, got %d", len(decoded))
 	}
-	if decoded[0] != "5b4cprjhjw35wyzvgmgvqay4hjf59h7x" {
+	if decoded[0] != StorePathHash32("5b4cprjhjw35wyzvgmgvqay4hjf59h7x") {
 		t.Fatalf("got %q, want %q", decoded[0], "5b4cprjhjw35wyzvgmgvqay4hjf59h7x")
 	}
 }
 
 func TestExtractStorePathHash(t *testing.T) {
 	name := "indices/narinfo/hyhr/hyhrnrnpsz9fw5p9dk85a58y31ink18c"
-	got := extractStorePathHash(name)
+	got := extractPathHash(name)
 	want := "hyhrnrnpsz9fw5p9dk85a58y31ink18c"
 	if got != want {
-		t.Fatalf("extractStorePathHash(%q) = %q, want %q", name, got, want)
+		t.Fatalf("extractPathHash(%q) = %q, want %q", name, got, want)
 	}
 }
 
 func TestExtractStorePathHashMalformed(t *testing.T) {
 	name := "noslashes"
-	got := extractStorePathHash(name)
+	got := extractPathHash(name)
 	if got != "" {
-		t.Fatalf("extractStorePathHash(%q) = %q, want empty string", name, got)
+		t.Fatalf("extractPathHash(%q) = %q, want empty string", name, got)
 	}
 }
 
@@ -92,8 +92,8 @@ func TestDeleteNARRef(t *testing.T) {
 	db := tempDB(t)
 	rt := NewRefTracker(db)
 
-	hash := "hyhrnrnpsz9fw5p9dk85a58y31ink18c"
-	refs := []string{"5b4cprjhjw35wyzvgmgvqay4hjf59h7x"}
+	hash := StorePathHash32("hyhrnrnpsz9fw5p9dk85a58y31ink18c")
+	refs := []StorePathHash32{"5b4cprjhjw35wyzvgmgvqay4hjf59h7x"}
 
 	// Store a NAR ref directly via the underlying Pebble DB.
 	key := narRefKey(hash)
@@ -129,7 +129,7 @@ func TestGetNARRefsNotFound(t *testing.T) {
 	db := tempDB(t)
 	rt := NewRefTracker(db)
 
-	got, err := rt.GetNARRefs("nonexistent_hash")
+	got, err := rt.GetNARRefs(StorePathHash32("nonexistent_hash"))
 	if err != nil {
 		t.Fatalf("expected nil error, got %v", err)
 	}
@@ -165,8 +165,8 @@ func TestDecodeTimestampInvalid(t *testing.T) {
 func TestNarHashMapping(t *testing.T) {
 	db := tempDB(t)
 
-	narHash52 := "1h6m2q7f8zq5z4kvn8j5wiz05jdic77df1x68dfwqg149jsy7gyp"
-	storePathHash := "hyhrnrnpsz9fw5p9dk85a58y31ink18c"
+	narHash52 := NarHash52("1h6m2q7f8zq5z4kvn8j5wiz05jdic77df1x68dfwqg149jsy7gyp")
+	storePathHash := StorePathHash32("hyhrnrnpsz9fw5p9dk85a58y31ink18c")
 
 	// Store mapping directly via batch
 	batch := db.NewBatch()
@@ -186,7 +186,7 @@ func TestNarHashMapping(t *testing.T) {
 	}
 
 	// Not found
-	got, err = db.GetStorePathByNarHash("nonexistent")
+	got, err = db.GetStorePathByNarHash(NarHash52("nonexistent"))
 	if err != nil {
 		t.Fatal(err)
 	}

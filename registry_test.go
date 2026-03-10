@@ -584,7 +584,7 @@ func TestRegistryAutoPin(t *testing.T) {
 		End()
 
 	// Verify the fromPath hash was auto-pinned with label.
-	pinned, err := proxy.pebbleDB.IsPinned("abc00000000000000000000000000001")
+	pinned, err := proxy.pebbleDB.IsPinned(store.StorePathHash32("abc00000000000000000000000000001"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -622,7 +622,7 @@ func TestRegistryPutOverwriteUnpinsOld(t *testing.T) {
 		End()
 
 	// Verify old hash is pinned.
-	pinned, err := proxy.pebbleDB.IsPinned("aaa00000000000000000000000000001")
+	pinned, err := proxy.pebbleDB.IsPinned(store.StorePathHash32("aaa00000000000000000000000000001"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -643,7 +643,7 @@ func TestRegistryPutOverwriteUnpinsOld(t *testing.T) {
 		End()
 
 	// Old hash should be unpinned.
-	pinned, err = proxy.pebbleDB.IsPinned("aaa00000000000000000000000000001")
+	pinned, err = proxy.pebbleDB.IsPinned(store.StorePathHash32("aaa00000000000000000000000000001"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -652,7 +652,7 @@ func TestRegistryPutOverwriteUnpinsOld(t *testing.T) {
 	}
 
 	// New hash should be pinned.
-	pinned, err = proxy.pebbleDB.IsPinned("bbb00000000000000000000000000001")
+	pinned, err = proxy.pebbleDB.IsPinned(store.StorePathHash32("bbb00000000000000000000000000001"))
 	if err != nil {
 		t.Fatal(err)
 	}

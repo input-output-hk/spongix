@@ -1185,11 +1185,11 @@ func TestNarRaceConditionFileHashURL(t *testing.T) {
 	}
 
 	// Verify: nh/ mapping should exist now (stored during proxyNarinfo).
-	gotSPH, err := db.GetStorePathByNarHash(narHash)
+	gotSPH, err := db.GetStorePathByNarHash(store.NarHash52(narHash))
 	if err != nil {
 		t.Fatalf("GetStorePathByNarHash: %v", err)
 	}
-	if gotSPH != storePathHash {
+	if gotSPH != store.StorePathHash32(storePathHash) {
 		t.Fatalf("nh/ mapping: got %q, want %q", gotSPH, storePathHash)
 	}
 

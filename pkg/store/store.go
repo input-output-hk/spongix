@@ -122,7 +122,7 @@ func (d *DB) Close() error {
 func (d *DB) NewBatch() *pebble.Batch { return d.db.NewBatch() }
 
 // GetStorePathByNarHash looks up the store path hash for a 52-char NarHash.
-func (d *DB) GetStorePathByNarHash(narHash52 string) (string, error) {
+func (d *DB) GetStorePathByNarHash(narHash52 NarHash52) (StorePathHash32, error) {
 	key := narHashKey(narHash52)
 	val, closer, err := d.db.Get(key)
 	if errors.Is(err, pebble.ErrNotFound) {
@@ -134,14 +134,14 @@ func (d *DB) GetStorePathByNarHash(narHash52 string) (string, error) {
 	data := make([]byte, len(val))
 	copy(data, val)
 	_ = closer.Close()
-	return string(data), nil
+	return StorePathHash32(data), nil
 }
 
 // SetNarHashMapping stores the bidirectional mapping between a 52-char NarHash
 // and a 32-char store path hash. This is called eagerly during narinfo proxy
 // so that proxyNar's fallback can resolve NarHash→storePathHash before doCache
 // completes.
-func (d *DB) SetNarHashMapping(narHash52, storePathHash string) error {
+func (d *DB) SetNarHashMapping(narHash52 NarHash52, storePathHash StorePathHash32) error {
 	batch := d.db.NewBatch()
 	_ = batch.Set(narHashKey(narHash52), []byte(storePathHash), nil)
 	_ = batch.Set(narHashReverseKey(storePathHash), []byte(narHash52), nil)

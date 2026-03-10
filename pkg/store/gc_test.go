@@ -20,7 +20,7 @@ func setupGCTestDB(t *testing.T) (*DB, *ChunkStore, *IndexStore) {
 // defaultFeatureFlags for test indices — desync requires CaFormatSHA512256.
 const testFeatureFlags = desync.CaFormatExcludeNoDump | desync.CaFormatSHA512256
 
-func makeTestIndexKind(t *testing.T, cs *ChunkStore, is *IndexStore, kind, hash string, data []byte, narRefs []string) desync.ChunkID {
+func makeTestIndexKind(t *testing.T, cs *ChunkStore, is *IndexStore, kind, hash string, data []byte, narRefs []StorePathHash32) desync.ChunkID {
 	t.Helper()
 	chunk := desync.NewChunk(data)
 	if err := cs.StoreChunk(chunk); err != nil {
@@ -49,7 +49,7 @@ func makeTestIndexKind(t *testing.T, cs *ChunkStore, is *IndexStore, kind, hash 
 	return chunk.ID()
 }
 
-func makeTestIndex(t *testing.T, cs *ChunkStore, is *IndexStore, hash string, data []byte, narRefs []string) desync.ChunkID {
+func makeTestIndex(t *testing.T, cs *ChunkStore, is *IndexStore, hash string, data []byte, narRefs []StorePathHash32) desync.ChunkID {
 	t.Helper()
 	return makeTestIndexKind(t, cs, is, "narinfo", hash, data, narRefs)
 }
@@ -58,12 +58,12 @@ func TestGCPreservesReachable(t *testing.T) {
 	db, cs, is := setupGCTestDB(t)
 
 	// Create two narinfos: A references B
-	makeTestIndex(t, cs, is, "aaaa1111aaaa1111aaaa1111aaaa1111", []byte("data A"), []string{"bbbb2222bbbb2222bbbb2222bbbb2222"})
+	makeTestIndex(t, cs, is, "aaaa1111aaaa1111aaaa1111aaaa1111", []byte("data A"), []StorePathHash32{"bbbb2222bbbb2222bbbb2222bbbb2222"})
 	chunkB := makeTestIndex(t, cs, is, "bbbb2222bbbb2222bbbb2222bbbb2222", []byte("data B"), nil)
 
 	// A is pinned (root), B is referenced by A's r/ entry → both reachable
 	stats, err := GC(db, GCConfig{
-		PinnedHashes: map[string]struct{}{
+		PinnedHashes: map[StorePathHash32]struct{}{
 			"aaaa1111aaaa1111aaaa1111aaaa1111": {},
 		},
 	})
@@ -104,7 +104,7 @@ func TestGCDeletesOrphanChunks(t *testing.T) {
 
 	// Pin the narinfo so it stays; orphan chunk still gets deleted
 	stats, err := GC(db, GCConfig{
-		PinnedHashes: map[string]struct{}{
+		PinnedHashes: map[StorePathHash32]struct{}{
 			"aaaa1111aaaa1111aaaa1111aaaa1111": {},
 		},
 	})
@@ -166,14 +166,14 @@ func TestGCTransitiveClosure(t *testing.T) {
 
 	// Create a chain: A -> B -> C
 	makeTestIndex(t, cs, is, "aaaa1111aaaa1111aaaa1111aaaa1111", []byte("data A"),
-		[]string{"bbbb2222bbbb2222bbbb2222bbbb2222"})
+		[]StorePathHash32{"bbbb2222bbbb2222bbbb2222bbbb2222"})
 	makeTestIndex(t, cs, is, "bbbb2222bbbb2222bbbb2222bbbb2222", []byte("data B"),
-		[]string{"cccc3333cccc3333cccc3333cccc3333"})
+		[]StorePathHash32{"cccc3333cccc3333cccc3333cccc3333"})
 	chunkC := makeTestIndex(t, cs, is, "cccc3333cccc3333cccc3333cccc3333", []byte("data C"), nil)
 
 	// A is pinned, B reachable via A→B, C reachable via B→C
 	stats, err := GC(db, GCConfig{
-		PinnedHashes: map[string]struct{}{
+		PinnedHashes: map[StorePathHash32]struct{}{
 			"aaaa1111aaaa1111aaaa1111aaaa1111": {},
 		},
 	})
@@ -215,6 +215,9 @@ func TestGCEmptyDB(t *testing.T) {
 func TestGCNonNarinfoIndicesPreserved(t *testing.T) {
 	db, cs, is := setupGCTestDB(t)
 
+	storeHash := StorePathHash32("aaaa1111aaaa1111aaaa1111aaaa1111")
+	narHash := NarHash52("1h6m2q7f8zq5z4kvn8j5wiz05jdic77df1x68dfwqg149jsy7gyp")
+
 	// Create a narinfo that references a NAR index.
 	// The narinfo is pinned, so the NAR's chunks survive GC via cr/ refs.
 	narData := []byte("narinfo data")
@@ -233,12 +236,12 @@ func TestGCNonNarinfoIndicesPreserved(t *testing.T) {
 			{ID: narChunk.ID(), Start: 0, Size: uint64(len(narData))},
 		},
 	}
-	narinfoName := "indices/narinfo/1h6m/1h6m2q7f8zq5z4kvn8j5wiz05jdic77df1x68dfwqg149jsy7gyp"
+	narinfoName := "indices/narinfo/aaaa/" + string(storeHash)
 	if err := is.StoreIndexWithRefs(narinfoName, narinfoIdx, nil); err != nil {
 		t.Fatal(err)
 	}
 
-	// Create a companion NAR index sharing the same store path hash
+	// Create a companion NAR index keyed by NarHash52
 	data := []byte("nar data")
 	chunk := desync.NewChunk(data)
 	if err := cs.StoreChunk(chunk); err != nil {
@@ -255,14 +258,19 @@ func TestGCNonNarinfoIndicesPreserved(t *testing.T) {
 			{ID: chunk.ID(), Start: 0, Size: uint64(len(data))},
 		},
 	}
-	narName := "indices/nar/1h6m/1h6m2q7f8zq5z4kvn8j5wiz05jdic77df1x68dfwqg149jsy7gyp"
+	narName := "indices/nar/1h6m/" + string(narHash)
 	if err := is.StoreIndexWithRefs(narName, narIdx, nil); err != nil {
 		t.Fatal(err)
 	}
 
+	// Set up nh/ mapping so GC can resolve NarHash52 -> StorePathHash32
+	if err := db.SetNarHashMapping(narHash, storeHash); err != nil {
+		t.Fatal(err)
+	}
+
 	stats, err := GC(db, GCConfig{
-		PinnedHashes: map[string]struct{}{
-			"1h6m2q7f8zq5z4kvn8j5wiz05jdic77df1x68dfwqg149jsy7gyp": {},
+		PinnedHashes: map[StorePathHash32]struct{}{
+			storeHash: {},
 		},
 	})
 	if err != nil {
@@ -274,7 +282,7 @@ func TestGCNonNarinfoIndicesPreserved(t *testing.T) {
 		t.Errorf("expected 1 reachable narinfo, got %d", stats.ReachableNarinfos)
 	}
 
-	// The NAR index should still exist — same store path hash is reachable.
+	// The NAR index should still exist — resolved via nh/ mapping to reachable store hash.
 	_, err = is.GetIndex(narName)
 	if err != nil {
 		t.Fatalf("NAR index should still exist: %v", err)
@@ -298,7 +306,7 @@ func TestGCCorruptIndex(t *testing.T) {
 
 	// Pin the good one; the corrupt one (baad...) is not pinned, so it WILL be deleted.
 	stats, err := GC(db, GCConfig{
-		PinnedHashes: map[string]struct{}{
+		PinnedHashes: map[StorePathHash32]struct{}{
 			"aaaa1111aaaa1111aaaa1111aaaa1111": {},
 		},
 	})
@@ -335,7 +343,7 @@ func TestGCDeletesUnpinnedNarinfos(t *testing.T) {
 	chunkB := makeTestIndex(t, cs, is, "bbbb2222bbbb2222bbbb2222bbbb2222", []byte("unpinned data"), nil)
 
 	stats, err := GC(db, GCConfig{
-		PinnedHashes: map[string]struct{}{
+		PinnedHashes: map[StorePathHash32]struct{}{
 			"aaaa1111aaaa1111aaaa1111aaaa1111": {},
 		},
 	})
@@ -521,11 +529,13 @@ func TestGCDeletesOrphanNARIndices(t *testing.T) {
 func TestGCPinnedNarinfoPreservesNARIndex(t *testing.T) {
 	db, cs, is := setupGCTestDB(t)
 
-	hash := "aaaa1111aaaa1111aaaa1111aaaa1111"
+	storeHash := StorePathHash32("aaaa1111aaaa1111aaaa1111aaaa1111")
+	narHash := NarHash52("1h6m2q7f8zq5z4kvn8j5wiz05jdic77df1x68dfwqg149jsy7gyp")
 
-	// Create narinfo + NAR with same hash
-	makeTestIndex(t, cs, is, hash, []byte("narinfo data"), nil)
+	// Create narinfo
+	makeTestIndex(t, cs, is, string(storeHash), []byte("narinfo data"), nil)
 
+	// Create NAR index keyed by NarHash52
 	narData := []byte("nar data")
 	narChunk := desync.NewChunk(narData)
 	if err := cs.StoreChunk(narChunk); err != nil {
@@ -540,14 +550,19 @@ func TestGCPinnedNarinfoPreservesNARIndex(t *testing.T) {
 			{ID: narChunk.ID(), Start: 0, Size: uint64(len(narData))},
 		},
 	}
-	narName := "indices/nar/aaaa/" + hash
+	narName := "indices/nar/1h6m/" + string(narHash)
 	if err := is.StoreIndexWithRefs(narName, narIdx, nil); err != nil {
 		t.Fatal(err)
 	}
 
-	// Pin the narinfo: both narinfo and NAR should survive (same store path hash)
+	// Set up nh/ mapping so GC can resolve NarHash52 -> StorePathHash32
+	if err := db.SetNarHashMapping(narHash, storeHash); err != nil {
+		t.Fatal(err)
+	}
+
+	// Pin the narinfo: both narinfo and NAR should survive
 	stats, err := GC(db, GCConfig{
-		PinnedHashes: map[string]struct{}{hash: {}},
+		PinnedHashes: map[StorePathHash32]struct{}{storeHash: {}},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -558,13 +573,13 @@ func TestGCPinnedNarinfoPreservesNARIndex(t *testing.T) {
 	}
 
 	// Both should still exist
-	_, err = is.GetIndex("indices/narinfo/aaaa/" + hash)
+	_, err = is.GetIndex("indices/narinfo/aaaa/" + string(storeHash))
 	if err != nil {
 		t.Fatal("pinned narinfo should exist:", err)
 	}
 	_, err = is.GetIndex(narName)
 	if err != nil {
-		t.Fatal("NAR index should exist (same hash as pinned narinfo):", err)
+		t.Fatal("NAR index should exist (resolved via nh/ to pinned store hash):", err)
 	}
 }
 
@@ -595,18 +610,26 @@ func TestGCBatchOverflow(t *testing.T) {
 func TestGCNeverDeletesPinnedChunks(t *testing.T) {
 	db, cs, is := setupGCTestDB(t)
 
-	pinnedHash := "aaaa1111aaaa1111aaaa1111aaaa1111"
-	unpinnedHash := "bbbb2222bbbb2222bbbb2222bbbb2222"
+	pinnedHash := StorePathHash32("aaaa1111aaaa1111aaaa1111aaaa1111")
+	pinnedNarHash := NarHash52("1h6m2q7f8zq5z4kvn8j5wiz05jdic77df1x68dfwqg149jsy7gyp")
+	unpinnedHash := StorePathHash32("bbbb2222bbbb2222bbbb2222bbbb2222")
 
-	// Create pinned narinfo + companion NAR index (same hash, different indices/ prefix)
-	pinnedNarinfoChunk := makeTestIndex(t, cs, is, pinnedHash, []byte("pinned narinfo"), nil)
-	pinnedNARChunk := makeTestIndexKind(t, cs, is, "nar", pinnedHash, []byte("pinned nar data"), nil)
+	// Create pinned narinfo
+	pinnedNarinfoChunk := makeTestIndex(t, cs, is, string(pinnedHash), []byte("pinned narinfo"), nil)
+
+	// Create companion NAR index keyed by NarHash52
+	pinnedNARChunk := makeTestIndexKind(t, cs, is, "nar", string(pinnedNarHash), []byte("pinned nar data"), nil)
+
+	// Set up nh/ mapping so GC can resolve NarHash52 -> StorePathHash32
+	if err := db.SetNarHashMapping(pinnedNarHash, pinnedHash); err != nil {
+		t.Fatal(err)
+	}
 
 	// Create expired unpinned narinfo
-	unpinnedChunk := makeTestIndex(t, cs, is, unpinnedHash, []byte("unpinned narinfo"), nil)
+	unpinnedChunk := makeTestIndex(t, cs, is, string(unpinnedHash), []byte("unpinned narinfo"), nil)
 
 	// Backdate the unpinned narinfo to 2 hours ago so it's expired
-	unpinnedPath := "indices/narinfo/bbbb/" + unpinnedHash
+	unpinnedPath := "indices/narinfo/bbbb/" + string(unpinnedHash)
 	oldTime := time.Now().Add(-2 * time.Hour)
 	if err := db.db.Set(timestampKey(unpinnedPath), encodeTimestamp(oldTime), pebble.Sync); err != nil {
 		t.Fatal(err)
@@ -615,7 +638,7 @@ func TestGCNeverDeletesPinnedChunks(t *testing.T) {
 	// Run GC with 1-hour retention; pin the pinned hash
 	stats, err := GC(db, GCConfig{
 		RetentionPeriod: 1 * time.Hour,
-		PinnedHashes: map[string]struct{}{
+		PinnedHashes: map[StorePathHash32]struct{}{
 			pinnedHash: {},
 		},
 	})
@@ -642,13 +665,13 @@ func TestGCNeverDeletesPinnedChunks(t *testing.T) {
 	}
 
 	// Pinned narinfo index should still exist
-	_, err = is.GetIndex("indices/narinfo/aaaa/" + pinnedHash)
+	_, err = is.GetIndex("indices/narinfo/aaaa/" + string(pinnedHash))
 	if err != nil {
 		t.Fatal("pinned narinfo should survive:", err)
 	}
 
 	// Pinned NAR index should still exist
-	_, err = is.GetIndex("indices/nar/aaaa/" + pinnedHash)
+	_, err = is.GetIndex("indices/nar/1h6m/" + string(pinnedNarHash))
 	if err != nil {
 		t.Fatal("pinned NAR index should survive:", err)
 	}
@@ -677,10 +700,10 @@ func TestGCNeverDeletesPinnedChunks(t *testing.T) {
 func TestGCSizeEvictionRespectsPins(t *testing.T) {
 	db, cs, is := setupGCTestDB(t)
 
-	pinnedHash := "aaaa1111aaaa1111aaaa1111aaaa1111"
+	pinnedHash := StorePathHash32("aaaa1111aaaa1111aaaa1111aaaa1111")
 
 	// Create 1 pinned narinfo
-	pinnedChunk := makeTestIndex(t, cs, is, pinnedHash, []byte("pinned narinfo data"), nil)
+	pinnedChunk := makeTestIndex(t, cs, is, string(pinnedHash), []byte("pinned narinfo data"), nil)
 
 	// Create 20 unpinned narinfos
 	for i := 0; i < 20; i++ {
@@ -691,7 +714,7 @@ func TestGCSizeEvictionRespectsPins(t *testing.T) {
 
 	// Pin the pinned hash, run GC with MaxBytes: 1 to force size-based eviction
 	stats, err := GC(db, GCConfig{
-		PinnedHashes: map[string]struct{}{
+		PinnedHashes: map[StorePathHash32]struct{}{
 			pinnedHash: {},
 		},
 		MaxBytes: 1, // force eviction of everything possible
@@ -706,7 +729,7 @@ func TestGCSizeEvictionRespectsPins(t *testing.T) {
 	}
 
 	// Pinned narinfo should survive even under extreme size pressure
-	_, err = is.GetIndex("indices/narinfo/aaaa/" + pinnedHash)
+	_, err = is.GetIndex("indices/narinfo/aaaa/" + string(pinnedHash))
 	if err != nil {
 		t.Fatal("pinned narinfo should survive size eviction:", err)
 	}

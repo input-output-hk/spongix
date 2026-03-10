@@ -10,7 +10,7 @@ import (
 func TestPinHashRoundTrip(t *testing.T) {
 	db := tempDB(t)
 
-	hash := "aaaa1111aaaa1111aaaa1111aaaa1111"
+	hash := StorePathHash32("aaaa1111aaaa1111aaaa1111aaaa1111")
 
 	// Initially not pinned.
 	pinned, err := db.IsPinned(hash)
@@ -61,10 +61,10 @@ func TestListPins(t *testing.T) {
 	}
 
 	// Add two pins.
-	if err := db.PinHash("aaaa1111aaaa1111aaaa1111aaaa1111", "label-a"); err != nil {
+	if err := db.PinHash(StorePathHash32("aaaa1111aaaa1111aaaa1111aaaa1111"), "label-a"); err != nil {
 		t.Fatal(err)
 	}
-	if err := db.PinHash("bbbb2222bbbb2222bbbb2222bbbb2222", "label-b"); err != nil {
+	if err := db.PinHash(StorePathHash32("bbbb2222bbbb2222bbbb2222bbbb2222"), "label-b"); err != nil {
 		t.Fatal(err)
 	}
 
@@ -76,10 +76,10 @@ func TestListPins(t *testing.T) {
 	if len(pins) != 2 {
 		t.Fatalf("expected 2 pins, got %d", len(pins))
 	}
-	if pins[0].Hash != "aaaa1111aaaa1111aaaa1111aaaa1111" || pins[0].Label != "label-a" {
+	if pins[0].Hash != StorePathHash32("aaaa1111aaaa1111aaaa1111aaaa1111") || pins[0].Label != "label-a" {
 		t.Fatalf("unexpected pin[0]: %+v", pins[0])
 	}
-	if pins[1].Hash != "bbbb2222bbbb2222bbbb2222bbbb2222" || pins[1].Label != "label-b" {
+	if pins[1].Hash != StorePathHash32("bbbb2222bbbb2222bbbb2222bbbb2222") || pins[1].Label != "label-b" {
 		t.Fatalf("unexpected pin[1]: %+v", pins[1])
 	}
 }
@@ -119,7 +119,7 @@ func TestLoadPinnedHashesFile(t *testing.T) {
 	if len(pins) != 3 {
 		t.Fatalf("expected 3 pins, got %d", len(pins))
 	}
-	for _, h := range []string{
+	for _, h := range []StorePathHash32{
 		"aaaa1111aaaa1111aaaa1111aaaa1111",
 		"bbbb2222bbbb2222bbbb2222bbbb2222",
 		"cccc3333cccc3333cccc3333cccc3333",
@@ -133,8 +133,8 @@ func TestLoadPinnedHashesFile(t *testing.T) {
 func TestGCPebblePinsProtectNarinfos(t *testing.T) {
 	db, cs, is := setupGCTestDB(t)
 
-	hash := "aaaa1111aaaa1111aaaa1111aaaa1111"
-	chunkA := makeTestIndex(t, cs, is, hash, []byte("pinned via pebble"), nil)
+	hash := StorePathHash32("aaaa1111aaaa1111aaaa1111aaaa1111")
+	chunkA := makeTestIndex(t, cs, is, string(hash), []byte("pinned via pebble"), nil)
 
 	// Pin via Pebble (not via file pins).
 	if err := db.PinHash(hash, "gc-test"); err != nil {

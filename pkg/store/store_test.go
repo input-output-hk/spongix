@@ -214,7 +214,7 @@ func TestStoreIndexWithRefs(t *testing.T) {
 	}
 
 	name := "indices/narinfo/hyhr/hyhrnrnpsz9fw5p9dk85a58y31ink18c"
-	narRefs := []string{"5b4cprjhjw35wyzvgmgvqay4hjf59h7x"}
+	narRefs := []StorePathHash32{"5b4cprjhjw35wyzvgmgvqay4hjf59h7x"}
 
 	if err := indexStore.StoreIndexWithRefs(name, idx, narRefs); err != nil {
 		t.Fatal(err)
@@ -230,11 +230,11 @@ func TestStoreIndexWithRefs(t *testing.T) {
 	}
 
 	// Check NAR refs
-	gotRefs, err := refs.GetNARRefs("hyhrnrnpsz9fw5p9dk85a58y31ink18c")
+	gotRefs, err := refs.GetNARRefs(StorePathHash32("hyhrnrnpsz9fw5p9dk85a58y31ink18c"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(gotRefs) != 1 || gotRefs[0] != "5b4cprjhjw35wyzvgmgvqay4hjf59h7x" {
+	if len(gotRefs) != 1 || gotRefs[0] != StorePathHash32("5b4cprjhjw35wyzvgmgvqay4hjf59h7x") {
 		t.Fatalf("expected [5b4cprjhjw35wyzvgmgvqay4hjf59h7x], got %v", gotRefs)
 	}
 }

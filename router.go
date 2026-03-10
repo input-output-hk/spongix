@@ -149,10 +149,10 @@ func (p *Proxy) requireBearerToken(next http.HandlerFunc) http.HandlerFunc {
 // scanned past this hash in findRoots, the data may be evicted this cycle.
 // The pin persists in Pebble and takes effect on the next GC cycle.
 func (p *Proxy) pinHash(w http.ResponseWriter, r *http.Request) {
-	hash := mux.Vars(r)["hash"]
+	hash := store.StorePathHash32(mux.Vars(r)["hash"])
 	label, _ := io.ReadAll(r.Body)
 	if err := p.pebbleDB.PinHash(hash, string(label)); err != nil {
-		p.log.Error("pinning hash", zap.String("hash", hash), zap.Error(err))
+		p.log.Error("pinning hash", zap.String("hash", string(hash)), zap.Error(err))
 		answer(w, http.StatusInternalServerError, mimeText, err.Error())
 		return
 	}
@@ -161,9 +161,9 @@ func (p *Proxy) pinHash(w http.ResponseWriter, r *http.Request) {
 
 // unpinHash handles DELETE /pin/{hash}.
 func (p *Proxy) unpinHash(w http.ResponseWriter, r *http.Request) {
-	hash := mux.Vars(r)["hash"]
+	hash := store.StorePathHash32(mux.Vars(r)["hash"])
 	if err := p.pebbleDB.UnpinHash(hash); err != nil {
-		p.log.Error("unpinning hash", zap.String("hash", hash), zap.Error(err))
+		p.log.Error("unpinning hash", zap.String("hash", string(hash)), zap.Error(err))
 		answer(w, http.StatusInternalServerError, mimeText, err.Error())
 		return
 	}
@@ -420,10 +420,10 @@ func (p *Proxy) proxyNar(location string, w http.ResponseWriter, r *http.Request
 	// This avoids the slow HEAD scan below, which tries NarHash-based URLs that
 	// don't exist on upstream caches like cache.nixos.org.
 	if p.pebbleDB != nil {
-		narHash := mux.Vars(r)["hash"] // 52-char nix-base32 hash from URL
+		narHash := store.NarHash52(mux.Vars(r)["hash"]) // 52-char nix-base32 hash from URL
 		storePathHash, err := p.pebbleDB.GetStorePathByNarHash(narHash)
 		if err != nil {
-			p.log.Error("looking up NarHash mapping", zap.String("narHash", narHash), zap.Error(err))
+			p.log.Error("looking up NarHash mapping", zap.String("narHash", string(narHash)), zap.Error(err))
 		} else if storePathHash != "" {
 			if p.proxyNarViaUpstreamNarinfo(namespace, storePathHash, location, w, r) {
 				return
@@ -516,13 +516,13 @@ func (p *Proxy) proxyNar(location string, w http.ResponseWriter, r *http.Request
 // proxyNarViaUpstreamNarinfo fetches the narinfo from upstream using the store path
 // hash, extracts the original (compressed) NAR URL, downloads it, decompresses,
 // stores locally, and serves to the client. Returns true if successful.
-func (p *Proxy) proxyNarViaUpstreamNarinfo(namespace, storePathHash, location string, w http.ResponseWriter, r *http.Request) bool {
+func (p *Proxy) proxyNarViaUpstreamNarinfo(namespace string, storePathHash store.StorePathHash32, location string, w http.ResponseWriter, r *http.Request) bool {
 	ns, ok := p.config.Namespaces[namespace]
 	if !ok {
 		return false
 	}
 
-	narinfoPath := storePathHash + ".narinfo"
+	narinfoPath := string(storePathHash) + ".narinfo"
 
 	for _, substituter := range ns.Substituters {
 		buf, ok := p.tryFetchNarFromSubstituter(substituter, narinfoPath, r.Context())
@@ -747,8 +747,8 @@ func (p *Proxy) insert(ctx context.Context, namespace, location string, body io.
 	}
 
 	// For narinfos, buffer the body to parse References and NarHash for reference tracking.
-	var narRefs []string
-	var narHash52 string
+	var narRefs []store.StorePathHash32
+	var narHash52 store.NarHash52
 	isNarinfo := strings.HasPrefix(location, "indices/narinfo/")
 	if isNarinfo {
 		bodyBytes, err := io.ReadAll(body)
@@ -856,7 +856,7 @@ func (p *Proxy) rewriteNarinfo(body []byte) ([]byte, error) {
 }
 
 // parseNarinfoNarHash52 extracts the 52-char nix-base32 NarHash from narinfo bytes.
-func parseNarinfoNarHash52(body []byte) string {
+func parseNarinfoNarHash52(body []byte) store.NarHash52 {
 	scanner := bufio.NewScanner(bytes.NewReader(body))
 	for scanner.Scan() {
 		line := scanner.Text()
@@ -864,7 +864,7 @@ func parseNarinfoNarHash52(body []byte) string {
 			val := strings.TrimSpace(strings.TrimPrefix(line, "NarHash:"))
 			parts := strings.SplitN(val, ":", 2)
 			if len(parts) == 2 {
-				return parts[1]
+				return store.NarHash52(parts[1])
 			}
 		}
 	}
@@ -873,7 +873,7 @@ func parseNarinfoNarHash52(body []byte) string {
 
 // parseNarinfoStorePathHash extracts the 32-char store path hash from a narinfo's StorePath field.
 // StorePath looks like "/nix/store/hyhrnrnpsz9fw5p9dk85a58y31ink18c-test".
-func parseNarinfoStorePathHash(body []byte) string {
+func parseNarinfoStorePathHash(body []byte) store.StorePathHash32 {
 	scanner := bufio.NewScanner(bytes.NewReader(body))
 	for scanner.Scan() {
 		line := scanner.Text()
@@ -882,7 +882,7 @@ func parseNarinfoStorePathHash(body []byte) string {
 			// Extract hash from "/nix/store/{hash}-{name}"
 			storePath = strings.TrimPrefix(storePath, "/nix/store/")
 			if idx := strings.IndexByte(storePath, '-'); idx >= 32 {
-				return storePath[:32]
+				return store.StorePathHash32(storePath[:32])
 			}
 		}
 	}
@@ -892,7 +892,7 @@ func parseNarinfoStorePathHash(body []byte) string {
 // parseNarinfoReferences extracts store path hashes from a narinfo's References field.
 // References is a space-separated list of store paths like "hash1-name1 hash2-name2".
 // Returns the hash portion (first 32 chars) of each reference.
-func parseNarinfoReferences(body []byte) []string {
+func parseNarinfoReferences(body []byte) []store.StorePathHash32 {
 	scanner := bufio.NewScanner(bytes.NewReader(body))
 	for scanner.Scan() {
 		line := scanner.Text()
@@ -903,11 +903,11 @@ func parseNarinfoReferences(body []byte) []string {
 				return nil
 			}
 			parts := strings.Fields(refsStr)
-			refs := make([]string, 0, len(parts))
+			refs := make([]store.StorePathHash32, 0, len(parts))
 			for _, part := range parts {
 				// Store paths look like "hash-name", extract the hash (before first '-')
 				if idx := strings.IndexByte(part, '-'); idx > 0 {
-					refs = append(refs, part[:idx])
+					refs = append(refs, store.StorePathHash32(part[:idx]))
 				}
 			}
 			return refs

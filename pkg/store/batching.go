@@ -129,7 +129,7 @@ func (b *BatchingChunkStore) String() string {
 
 // CommitWithIndex atomically writes buffered chunks and index entries to Pebble.
 // If chunks were already flushed (exceeded maxBytes), only index entries are written.
-func (b *BatchingChunkStore) CommitWithIndex(name string, idx desync.Index, narRefs []string, narHash52 string) error {
+func (b *BatchingChunkStore) CommitWithIndex(name string, idx desync.Index, narRefs []StorePathHash32, narHash52 NarHash52) error {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 

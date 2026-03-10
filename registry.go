@@ -23,21 +23,21 @@ var storePathRe = regexp.MustCompile(`^/nix/store/([0-9a-df-np-sv-z]{32})-(.+)$`
 
 // ValidateStorePath checks that a string looks like a valid Nix store path
 // and returns the 32-char hash.
-func ValidateStorePath(p string) (string, error) {
+func ValidateStorePath(p string) (store.StorePathHash32, error) {
 	m := storePathRe.FindStringSubmatch(p)
 	if m == nil {
 		return "", fmt.Errorf("invalid store path: %q", p)
 	}
-	return m[1], nil
+	return store.StorePathHash32(m[1]), nil
 }
 
 // StorePathHash extracts the 32-char hash from a Nix store path.
-func StorePathHash(p string) string {
+func StorePathHash(p string) store.StorePathHash32 {
 	m := storePathRe.FindStringSubmatch(p)
 	if m == nil {
 		return ""
 	}
-	return m[1]
+	return store.StorePathHash32(m[1])
 }
 
 // ValidateRegistryPut validates a PUT request and returns a RegistryEntry.

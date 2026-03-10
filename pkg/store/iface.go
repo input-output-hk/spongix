@@ -8,5 +8,5 @@ import "github.com/folbricht/desync"
 // alongside indices for GC's transitive closure.
 type RefTrackingIndexStore interface {
 	desync.IndexWriteStore
-	StoreIndexWithRefs(name string, idx desync.Index, narRefs []string) error
+	StoreIndexWithRefs(name string, idx desync.Index, narRefs []StorePathHash32) error
 }

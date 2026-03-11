@@ -197,8 +197,9 @@ func TestMetricsCacheJobsActive(t *testing.T) {
 	started := make(chan struct{})
 	release := make(chan struct{})
 
+	var once sync.Once
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		close(started)
+		once.Do(func() { close(started) })
 		<-release
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte(fixtureNarinfoNone))
@@ -208,15 +209,13 @@ func TestMetricsCacheJobsActive(t *testing.T) {
 	before := metricCacheJobsActive.Get()
 
 	var wg sync.WaitGroup
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
+	wg.Go(func() {
 		proxy.doCache(&cacheRequest{
 			namespace: testNamespace,
 			url:       ts.URL,
 			location:  "indices/narinfo/test/test",
 		})
-	}()
+	})
 
 	<-started
 	during := metricCacheJobsActive.Get()

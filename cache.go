@@ -1,8 +1,7 @@
 package main
 
 const (
-	headerContentType   = "Content-Type"
-	headerContentLength = "Content-Length"
+	headerContentType = "Content-Type"
 
 	headerCache       = "X-Cache"
 	headerCacheHit    = "HIT"

@@ -20,6 +20,7 @@ import (
 	"github.com/input-output-hk/spongix/pkg/store"
 	"github.com/smarty/assertions"
 	"github.com/steinfletcher/apitest"
+	"go.uber.org/zap"
 	"gotest.tools/v3/assert"
 )
 
@@ -199,7 +200,7 @@ func testProxy(t *testing.T) *Proxy {
 	// proxy.setupKeys()
 
 	// NOTE: comment the next line to enable logging
-	// proxy.log = zap.NewNop()
+	proxy.log = zap.NewNop()
 	return proxy
 }
 
@@ -405,6 +406,47 @@ func TestRouterNarinfoGet(t *testing.T) {
 	})
 }
 
+// TestRouterNarinfoGetCorruptedIndex verifies that when a narinfo index in the
+// store contains non-narinfo data (e.g. binary NAR bytes from an older code
+// version), the GET handler treats it as a cache miss and falls through to the
+// upstream instead of returning 500. Data from the store is untrusted input.
+func TestRouterNarinfoGetCorruptedIndex(t *testing.T) {
+	proxy := testProxy(t)
+
+	// Store a valid narinfo+NAR via PUT so chunks are in the store.
+	putFixtureNar(t, proxy)
+	apitest.New().
+		Handler(proxy.router()).
+		Method(http.MethodPut).
+		URL(nsNarinfo).
+		Body(fixtureNarinfoNone).
+		Expect(t).
+		Status(http.StatusCreated).
+		End()
+
+	// Overwrite the narinfo index with the NAR index, simulating corruption
+	// from an older code version. Reassembly now produces binary NAR data.
+	fakeIdx := proxy.indexStores[testNamespace].(*fakeIndex)
+	narLocation := "indices/nar/1h6m/1h6m2q7f8zq5z4kvn8j5wiz05jdic77df1x68dfwqg149jsy7gyp"
+	narinfoLocation := "indices/narinfo/hyhr/hyhrnrnpsz9fw5p9dk85a58y31ink18c"
+	narIndex, err := fakeIdx.GetIndex(narLocation)
+	assert.NilError(t, err)
+	assert.NilError(t, fakeIdx.StoreIndex(narinfoLocation, narIndex))
+
+	// GET should treat the corrupted narinfo as a cache miss and proxy from
+	// upstream, not return 500.
+	apitest.New().
+		Mocks(mockHeadNarinfo200, mockGetNarinfo200).
+		Handler(proxy.router()).
+		Method(http.MethodGet).
+		URL(nsNarinfo).
+		Expect(t).
+		Status(http.StatusOK).
+		Header(headerContentType, mimeNarinfo).
+		Header(headerCache, headerCacheMiss).
+		End()
+}
+
 func TestRouterNarinfoPut(t *testing.T) {
 	t.Run("upload success", func(tt *testing.T) {
 		proxy := testProxy(tt)
@@ -578,12 +620,9 @@ func TestDoCacheTimeout(t *testing.T) {
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(200)
 		chunkSize := len(body) / 4
-		for i := 0; i < 4; i++ {
+		for i := range 4 {
 			start := i * chunkSize
-			end := start + chunkSize
-			if end > len(body) {
-				end = len(body)
-			}
+			end := min(start+chunkSize, len(body))
 			_, _ = w.Write(body[start:end])
 			if f, ok := w.(http.Flusher); ok {
 				f.Flush()

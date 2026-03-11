@@ -677,8 +677,13 @@ func (p *Proxy) largeHeadAndGet(prefix, mime string) func(w http.ResponseWriter,
 			}
 			body, err = p.rewriteNarinfo(body)
 			if err != nil {
-				p.log.Error("rewriting narinfo", zap.String("index", location), zap.Error(err))
-				answer(w, http.StatusInternalServerError, mimeText, err.Error())
+				// Corrupted narinfo (e.g. binary NAR data stored under a narinfo key
+				// by an older code version). Treat as cache miss and fall through to
+				// upstream rather than serving a 500.
+				p.log.Warn("corrupted narinfo in store, treating as miss",
+					zap.String("index", location), zap.Error(err))
+				metricRequests(namespace, prefix, "miss").Add(1)
+				p.redirectToUpstream(prefix, location, w, r)
 				return
 			}
 

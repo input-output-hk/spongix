@@ -326,7 +326,7 @@ func TestRegistryTarballNixFetch(t *testing.T) {
 	if err != nil {
 		t.Fatal("registering package:", err)
 	}
-	resp.Body.Close()
+	_ = resp.Body.Close()
 	if resp.StatusCode != http.StatusCreated {
 		t.Fatalf("PUT returned %d, want 201", resp.StatusCode)
 	}
@@ -337,7 +337,7 @@ func TestRegistryTarballNixFetch(t *testing.T) {
 	if err != nil {
 		t.Fatal("fetching tarball:", err)
 	}
-	defer tarResp.Body.Close()
+	defer func() { _ = tarResp.Body.Close() }()
 	if tarResp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(tarResp.Body)
 		t.Fatalf("tarball returned %d: %s", tarResp.StatusCode, body)
@@ -394,7 +394,7 @@ func TestRegistryTarballNixFetch(t *testing.T) {
 	if err != nil {
 		t.Fatal("fetching latest:", err)
 	}
-	latestResp.Body.Close()
+	_ = latestResp.Body.Close()
 	if latestResp.StatusCode != http.StatusTemporaryRedirect {
 		t.Fatalf("*.tar.gz returned %d, want 307", latestResp.StatusCode)
 	}
@@ -426,7 +426,7 @@ func TestRegistryFlakeAttributes(t *testing.T) {
 	if err != nil {
 		t.Fatal("registering package:", err)
 	}
-	resp.Body.Close()
+	_ = resp.Body.Close()
 	if resp.StatusCode != http.StatusCreated {
 		t.Fatalf("PUT returned %d, want 201", resp.StatusCode)
 	}
@@ -437,7 +437,7 @@ func TestRegistryFlakeAttributes(t *testing.T) {
 	if err != nil {
 		t.Fatal("fetching tarball:", err)
 	}
-	defer tarResp.Body.Close()
+	defer func() { _ = tarResp.Body.Close() }()
 	tarData, _ := io.ReadAll(tarResp.Body)
 
 	flakeDir := filepath.Join(t.TempDir(), "source")
@@ -448,7 +448,7 @@ func TestRegistryFlakeAttributes(t *testing.T) {
 	if err != nil {
 		t.Fatalf("invalid gzip: %v", err)
 	}
-	defer gr.Close()
+	defer func() { _ = gr.Close() }()
 	tr := tar.NewReader(gr)
 	for {
 		hdr, err := tr.Next()
@@ -462,12 +462,18 @@ func TestRegistryFlakeAttributes(t *testing.T) {
 		}
 		target := filepath.Join(flakeDir, name)
 		if hdr.Typeflag == tar.TypeDir {
-			os.MkdirAll(target, 0o755)
+			if err := os.MkdirAll(target, 0o755); err != nil {
+				t.Fatal(err)
+			}
 			continue
 		}
-		os.MkdirAll(filepath.Dir(target), 0o755)
+		if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+			t.Fatal(err)
+		}
 		data, _ := io.ReadAll(tr)
-		os.WriteFile(target, data, os.FileMode(hdr.Mode))
+		if err := os.WriteFile(target, data, os.FileMode(hdr.Mode)); err != nil {
+			t.Fatal(err)
+		}
 	}
 
 	// Initialize git repo (required for nix flake eval).
@@ -586,7 +592,7 @@ func TestRegistryFlakeAttributesViaTarball(t *testing.T) {
 	if err != nil {
 		t.Fatal("registering package:", err)
 	}
-	resp.Body.Close()
+	_ = resp.Body.Close()
 	if resp.StatusCode != http.StatusCreated {
 		t.Fatalf("PUT returned %d, want 201", resp.StatusCode)
 	}
@@ -734,7 +740,7 @@ func TestCapushPushIntegration(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer regResp.Body.Close()
+	defer func() { _ = regResp.Body.Close() }()
 	if regResp.StatusCode != http.StatusCreated {
 		body, _ := io.ReadAll(regResp.Body)
 		t.Fatalf("registry PUT: expected 201, got %d: %s", regResp.StatusCode, body)
@@ -745,7 +751,7 @@ func TestCapushPushIntegration(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
 		t.Fatalf("expected 200, got %d: %s", resp.StatusCode, body)
@@ -756,7 +762,7 @@ func TestCapushPushIntegration(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer tarResp.Body.Close()
+	defer func() { _ = tarResp.Body.Close() }()
 	if tarResp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(tarResp.Body)
 		t.Fatalf("tarball: expected 200, got %d: %s", tarResp.StatusCode, body)

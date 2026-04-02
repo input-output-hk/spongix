@@ -47,6 +47,8 @@ const (
 	narinfoPrefix     = "narinfo"
 	realisationPrefix = "realisations"
 	logPrefix         = "log"
+
+	upstreamHeadTimeout = 5 * time.Second
 )
 
 func (proxy *Proxy) router() *mux.Router {
@@ -344,8 +346,6 @@ func (p *Proxy) redirectToUpstream(prefix, location string, w http.ResponseWrite
 			http.Redirect(w, r, found, http.StatusFound)
 		}
 	case <-done:
-		serveNotFound(w)
-	case <-time.After(500 * time.Millisecond):
 		serveNotFound(w)
 	}
 }
@@ -860,18 +860,22 @@ func (p *Proxy) rewriteNarinfo(body []byte) ([]byte, error) {
 	return []byte(info.String()), nil
 }
 
-// parseNarinfoNarHash52 extracts the 52-char nix-base32 NarHash from narinfo bytes.
-func parseNarinfoNarHash52(body []byte) store.NarHash52 {
+// narinfoField extracts the value of a narinfo field by key (e.g. "NarHash", "StorePath").
+func narinfoField(body []byte, key string) string {
 	scanner := bufio.NewScanner(bytes.NewReader(body))
 	for scanner.Scan() {
-		line := scanner.Text()
-		if strings.HasPrefix(line, "NarHash:") {
-			val := strings.TrimSpace(strings.TrimPrefix(line, "NarHash:"))
-			parts := strings.SplitN(val, ":", 2)
-			if len(parts) == 2 {
-				return store.NarHash52(parts[1])
-			}
+		if val, ok := strings.CutPrefix(scanner.Text(), key+":"); ok {
+			return strings.TrimSpace(val)
 		}
+	}
+	return ""
+}
+
+// parseNarinfoNarHash52 extracts the 52-char nix-base32 NarHash from narinfo bytes.
+func parseNarinfoNarHash52(body []byte) store.NarHash52 {
+	val := narinfoField(body, "NarHash")
+	if parts := strings.SplitN(val, ":", 2); len(parts) == 2 {
+		return store.NarHash52(parts[1])
 	}
 	return ""
 }
@@ -879,17 +883,9 @@ func parseNarinfoNarHash52(body []byte) store.NarHash52 {
 // parseNarinfoStorePathHash extracts the 32-char store path hash from a narinfo's StorePath field.
 // StorePath looks like "/nix/store/hyhrnrnpsz9fw5p9dk85a58y31ink18c-test".
 func parseNarinfoStorePathHash(body []byte) store.StorePathHash32 {
-	scanner := bufio.NewScanner(bytes.NewReader(body))
-	for scanner.Scan() {
-		line := scanner.Text()
-		if strings.HasPrefix(line, "StorePath:") {
-			storePath := strings.TrimSpace(strings.TrimPrefix(line, "StorePath:"))
-			// Extract hash from "/nix/store/{hash}-{name}"
-			storePath = strings.TrimPrefix(storePath, "/nix/store/")
-			if idx := strings.IndexByte(storePath, '-'); idx >= 32 {
-				return store.StorePathHash32(storePath[:32])
-			}
-		}
+	storePath := strings.TrimPrefix(narinfoField(body, "StorePath"), "/nix/store/")
+	if idx := strings.IndexByte(storePath, '-'); idx >= 32 {
+		return store.StorePathHash32(storePath[:32])
 	}
 	return ""
 }
@@ -898,25 +894,16 @@ func parseNarinfoStorePathHash(body []byte) store.StorePathHash32 {
 // References is a space-separated list of store paths like "hash1-name1 hash2-name2".
 // Returns the hash portion (first 32 chars) of each reference.
 func parseNarinfoReferences(body []byte) []store.StorePathHash32 {
-	scanner := bufio.NewScanner(bytes.NewReader(body))
-	for scanner.Scan() {
-		line := scanner.Text()
-		if strings.HasPrefix(line, "References:") {
-			refsStr := strings.TrimPrefix(line, "References:")
-			refsStr = strings.TrimSpace(refsStr)
-			if refsStr == "" {
-				return nil
-			}
-			parts := strings.Fields(refsStr)
-			refs := make([]store.StorePathHash32, 0, len(parts))
-			for _, part := range parts {
-				// Store paths look like "hash-name", extract the hash (before first '-')
-				if idx := strings.IndexByte(part, '-'); idx > 0 {
-					refs = append(refs, store.StorePathHash32(part[:idx]))
-				}
-			}
-			return refs
+	refsStr := narinfoField(body, "References")
+	if refsStr == "" {
+		return nil
+	}
+	parts := strings.Fields(refsStr)
+	refs := make([]store.StorePathHash32, 0, len(parts))
+	for _, part := range parts {
+		if idx := strings.IndexByte(part, '-'); idx > 0 {
+			refs = append(refs, store.StorePathHash32(part[:idx]))
 		}
 	}
-	return nil
+	return refs
 }

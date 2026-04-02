@@ -48,14 +48,20 @@ func testRegistryProxy(t *testing.T) *Proxy {
 		chunkStore:        newFakeStore(),
 		indexStores:      map[string]desync.IndexWriteStore{"cache": newFakeIndex()},
 		pebbleDB:       db,
-		httpHeadClient: &http.Client{},
-		httpGetClient:  &http.Client{},
-		symlinkBinData: []byte("fake-symlink-binary"),
+		httpHeadClient:  &http.Client{},
+		httpGetClient:   &http.Client{},
+		httpCacheClient: &http.Client{},
+		symlinkBinData:  []byte("fake-symlink-binary"),
 	}
 
 	if err := proxy.config.Prepare(); err != nil {
 		t.Fatal(err)
 	}
+
+	t.Cleanup(func() {
+		proxy.cachePool.StopAndWait()
+		proxy.headPool.StopAndWait()
+	})
 
 	return proxy
 }
@@ -132,9 +138,10 @@ func TestRegistryPutNoPinAPI(t *testing.T) {
 		chunkStore:     newFakeStore(),
 		indexStores:    map[string]desync.IndexWriteStore{"cache": newFakeIndex()},
 		pebbleDB:       db,
-		httpHeadClient: &http.Client{},
-		httpGetClient:  &http.Client{},
-		symlinkBinData: []byte("fake-symlink-binary"),
+		httpHeadClient:  &http.Client{},
+		httpGetClient:   &http.Client{},
+		httpCacheClient: &http.Client{},
+		symlinkBinData:  []byte("fake-symlink-binary"),
 	}
 	if err := proxy.config.Prepare(); err != nil {
 		t.Fatal(err)
@@ -334,7 +341,7 @@ func TestRegistryFlakeTarball(t *testing.T) {
 	if err != nil {
 		t.Fatalf("tarball is not valid gzip: %v", err)
 	}
-	defer gr.Close()
+	defer func() { _ = gr.Close() }()
 	tr := tar.NewReader(gr)
 	foundFlake := false
 	foundSymlink := false
@@ -500,7 +507,7 @@ func TestRegistryMultiSystem(t *testing.T) {
 	if err != nil {
 		t.Fatalf("tarball is not valid gzip: %v", err)
 	}
-	defer gr.Close()
+	defer func() { _ = gr.Close() }()
 	tr := tar.NewReader(gr)
 	for {
 		hdr, err := tr.Next()
@@ -545,7 +552,7 @@ func TestRegistryFlakeNamedOutput(t *testing.T) {
 	if err != nil {
 		t.Fatalf("tarball is not valid gzip: %v", err)
 	}
-	defer gr.Close()
+	defer func() { _ = gr.Close() }()
 	tr := tar.NewReader(gr)
 	for {
 		hdr, err := tr.Next()

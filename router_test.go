@@ -201,6 +201,12 @@ func testProxy(t *testing.T) *Proxy {
 
 	// NOTE: comment the next line to enable logging
 	proxy.log = zap.NewNop()
+
+	t.Cleanup(func() {
+		proxy.cachePool.StopAndWait()
+		proxy.headPool.StopAndWait()
+	})
+
 	return proxy
 }
 
@@ -1001,37 +1007,39 @@ func TestDoCacheEagerNarCachingRootURL(t *testing.T) {
 	}
 }
 
-func TestRedirectToUpstreamGroupWaitBlocking(t *testing.T) {
-	// Start a test server that sleeps 800ms then returns 404
+func TestSlowUpstreamCompletesWithinTimeout(t *testing.T) {
+	// HEAD delay of 2s exceeds the old timeouts (500ms select + 1s client)
+	// but fits within the current 5s upstreamHeadTimeout. If someone
+	// reverts the timeout, this test will fail with a 404 (timeout hit).
+	const headDelay = 2 * time.Second
+
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		time.Sleep(800 * time.Millisecond)
-		w.WriteHeader(http.StatusNotFound)
+		if r.Method == http.MethodHead {
+			time.Sleep(headDelay)
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		w.Header().Set("Content-Type", mimeNarinfo)
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(fixtureNarinfoNone))
 	}))
 	defer ts.Close()
 
 	proxy := testProxy(t)
-	// Replace substituters with 3 copies of the slow upstream
-	proxy.config.Namespaces[testNamespace].Substituters = []string{
-		ts.URL, ts.URL, ts.URL,
-	}
+	proxy.config.Namespaces[testNamespace].Substituters = []string{ts.URL}
 
 	start := time.Now()
 	apitest.New().
 		Handler(proxy.router()).
-		Method(http.MethodHead).
+		Method(http.MethodGet).
 		URL(nsNarinfo).
 		Expect(t).
-		Status(http.StatusNotFound).
+		Status(http.StatusOK).
 		End()
 	elapsed := time.Since(start)
 
-	// The 500ms timeout at router.go:172 should cap the total wait. But because
-	// group.Wait() runs BEFORE the select (not concurrently), the timeout is
-	// additive: ~800ms for group.Wait + 500ms select = ~1300ms total.
-	if elapsed > 600*time.Millisecond {
-		t.Errorf("HEAD request took %v, but should complete within 600ms "+
-			"(BUG: group.Wait() at router.go:172 blocks before the select timeout, "+
-			"making the 500ms timeout additive not concurrent)", elapsed)
+	if elapsed > headDelay+1*time.Second {
+		t.Errorf("request took %v, expected under %v", elapsed, headDelay+1*time.Second)
 	}
 }
 

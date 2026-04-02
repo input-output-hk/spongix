@@ -218,8 +218,9 @@ type Proxy struct {
 	headPool  *pond.WorkerPool
 	cachePool *pond.WorkerPool
 
-	httpHeadClient *http.Client
-	httpGetClient  *http.Client
+	httpHeadClient  *http.Client
+	httpGetClient   *http.Client
+	httpCacheClient *http.Client
 
 	// pebbleDB is the shared Pebble database for chunks and indices.
 	pebbleDB *store.DB
@@ -235,19 +236,27 @@ func NewProxy(config *config.Config) *Proxy {
 	}
 
 	httpHeadClient := &http.Client{}
-	httpHeadClient.Timeout = 1 * time.Second
+	httpHeadClient.Timeout = upstreamHeadTimeout
 
 	httpGetClient := &http.Client{}
 	httpGetClient.Timeout = 0 // disabled — let context govern timeouts
 
+	// httpCacheClient has its own transport so background caching goroutines
+	// don't share http.DefaultTransport with the request-serving path.
+	httpCacheClient := &http.Client{
+		Transport: http.DefaultTransport.(*http.Transport).Clone(),
+		Timeout:   5 * time.Minute,
+	}
+
 	return &Proxy{
-		config:         config,
-		log:            devLog,
-		headPool:       pond.New(10, 1000),
-		cachePool:      pond.New(10, 1000),
-		indexStores:      map[string]desync.IndexWriteStore{},
-		httpHeadClient: httpHeadClient,
-		httpGetClient:  httpGetClient,
+		config:          config,
+		log:             devLog,
+		headPool:        pond.New(10, 1000),
+		cachePool:       pond.New(10, 1000),
+		indexStores:     map[string]desync.IndexWriteStore{},
+		httpHeadClient:  httpHeadClient,
+		httpGetClient:   httpGetClient,
+		httpCacheClient: httpCacheClient,
 	}
 }
 
@@ -414,7 +423,7 @@ func (proxy *Proxy) doCache(req *cacheRequest) {
 		return
 	}
 
-	response, err := proxy.httpGetClient.Do(httpReq)
+	response, err := proxy.httpCacheClient.Do(httpReq)
 	if err != nil {
 		metricCacheJobs("error").Add(1)
 		proxy.log.Error("failed downloading file", zap.Error(err), zap.String("url", req.url))
@@ -514,7 +523,7 @@ func (proxy *Proxy) cacheNarFromUpstream(ctx context.Context, info *narinfo.NarI
 		return false
 	}
 
-	narResp, err := proxy.httpGetClient.Do(narReq)
+	narResp, err := proxy.httpCacheClient.Do(narReq)
 	if err != nil {
 		proxy.log.Error("downloading NAR", zap.String("url", narURL), zap.Error(err))
 		return false
@@ -550,7 +559,7 @@ func (proxy *Proxy) cacheNarFromUpstream(ctx context.Context, info *narinfo.NarI
 
 // doCacheNonNarinfo handles caching of non-narinfo content (NARs, realisations, logs).
 func (proxy *Proxy) doCacheNonNarinfo(ctx context.Context, req *cacheRequest, responseBody io.Reader) {
-	var body io.Reader = responseBody
+	var body = responseBody
 	if strings.HasPrefix(req.location, "indices/nar/") && req.ext != "" {
 		rc, err := decompressReader(req.ext, responseBody)
 		if err != nil {

@@ -6,7 +6,6 @@ import (
 	"io"
 	"net/http"
 	"os"
-	"strings"
 	"testing"
 
 	"github.com/klauspost/compress/zstd"
@@ -76,16 +75,6 @@ Sig: kappa:sn5s/RrqEI+YG6/PjwdbPjcAC7rcta7sJU4mFOawGvJBLsWkyLtBrT2EuFt/LJjWkTZ+Z
 `, narHash, fileHash, fileSize, narHash, narSize)
 }
 
-// parseNarinfoField extracts a single field value from a narinfo string.
-func parseNarinfoField(narinfo, field string) string {
-	for line := range strings.SplitSeq(narinfo, "\n") {
-		if val, ok := strings.CutPrefix(line, field+":"); ok {
-			return strings.TrimSpace(val)
-		}
-	}
-	return ""
-}
-
 // narinfoFieldEquals returns an apitest Assert function that checks a specific
 // narinfo field has the expected value.
 func narinfoFieldEquals(t *testing.T, field, expected string) func(*http.Response, *http.Request) error {
@@ -97,7 +86,7 @@ func narinfoFieldEquals(t *testing.T, field, expected string) func(*http.Respons
 		// Reset body so subsequent assertions can also read it
 		resp.Body = io.NopCloser(bytes.NewReader(body))
 
-		actual := parseNarinfoField(string(body), field)
+		actual := narinfoField(body, field)
 		if actual != expected {
 			t.Errorf("narinfo field %s: got %q, want %q", field, actual, expected)
 		}

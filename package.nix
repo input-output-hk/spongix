@@ -8,7 +8,7 @@
   package = vendorHash:
     buildGoModule {
       pname = "spongix";
-      version = "2025.01.01.001";
+      version = "2026.04.02.001";
       inherit vendorHash;
 
       passthru.invalidHash =

@@ -419,12 +419,11 @@ func deleteUnreachableIndices(db *DB, reachable map[StorePathHash32]struct{}, dr
 			}
 		} else if strings.HasPrefix(indexPath, "indices/narinfo/") {
 			storeHash = StorePathHash32(hash)
-		} else {
-			// Realisations and logs use non-StorePathHash formats (64-char SHA256
-			// hex for realisations, "hash-name" for logs). Leave storeHash empty
-			// so they always fail the reachability check and get deleted, matching
-			// current behavior.
 		}
+		// Realisations and logs use non-StorePathHash formats (64-char SHA256
+		// hex for realisations, "hash-name" for logs). Leave storeHash empty
+		// so they always fail the reachability check and get deleted, matching
+		// current behavior.
 
 		if storeHash != "" {
 			if _, ok := reachable[storeHash]; ok {

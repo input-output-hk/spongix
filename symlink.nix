@@ -26,6 +26,7 @@ stdenvNoCC.mkDerivation {
         }
         .${stdenvNoCC.hostPlatform.system}
       } \
+      ${lib.optionalString stdenvNoCC.hostPlatform.isDarwin "-lc"} \
       -OReleaseSmall \
       -fstrip \
       --name symlink

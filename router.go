@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bufio"
 	"bytes"
 	"compress/bzip2"
 	"context"
@@ -22,6 +21,7 @@ import (
 	"github.com/gorilla/mux"
 
 	"github.com/input-output-hk/spongix/pkg/compress"
+	"github.com/input-output-hk/spongix/pkg/narinfox"
 	"github.com/input-output-hk/spongix/pkg/store"
 	"github.com/klauspost/compress/zstd"
 	"github.com/nix-community/go-nix/pkg/nar"
@@ -366,14 +366,7 @@ func (p *Proxy) proxyNarinfo(upstreamURL string, w http.ResponseWriter) {
 		return
 	}
 
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		p.log.Error("reading upstream narinfo", zap.String("url", upstreamURL), zap.Error(err))
-		answer(w, http.StatusInternalServerError, mimeText, err.Error())
-		return
-	}
-
-	body, err = p.rewriteNarinfo(body)
+	doc, err := narinfox.Open(resp.Body, p.signer)
 	if err != nil {
 		p.log.Error("rewriting upstream narinfo", zap.String("url", upstreamURL), zap.Error(err))
 		answer(w, http.StatusInternalServerError, mimeText, err.Error())
@@ -384,10 +377,9 @@ func (p *Proxy) proxyNarinfo(upstreamURL string, w http.ResponseWriter) {
 	// can resolve the mapping before doCache completes. Without this, NAR
 	// requests arriving before doCache finishes return 404.
 	if p.pebbleDB != nil {
-		narHash52 := parseNarinfoNarHash52(body)
-		storePathHash := parseNarinfoStorePathHash(body)
-		if narHash52 != "" && storePathHash != "" {
-			if err := p.pebbleDB.SetNarHashMapping(narHash52, storePathHash); err != nil {
+		meta := doc.Metadata()
+		if meta.NarHash52 != "" && meta.StorePathHash != "" {
+			if err := p.pebbleDB.SetNarHashMapping(meta.NarHash52, meta.StorePathHash); err != nil {
 				p.log.Error("storing NarHash mapping", zap.Error(err))
 			}
 		}
@@ -396,7 +388,7 @@ func (p *Proxy) proxyNarinfo(upstreamURL string, w http.ResponseWriter) {
 	w.Header().Set(headerContentType, mimeNarinfo)
 	w.Header().Set(headerCache, headerCacheMiss)
 	w.WriteHeader(http.StatusOK)
-	_, _ = w.Write(body)
+	_, _ = w.Write(doc.Bytes())
 }
 
 // proxyNar handles NAR cache misses. It searches upstreams for the NAR,
@@ -669,17 +661,11 @@ func (p *Proxy) largeHeadAndGet(prefix, mime string) func(w http.ResponseWriter,
 		// get URLs pointing to plain .nar files.
 		if prefix == narinfoPrefix {
 			rd := desync.NewIndexReadSeeker(index, p.chunkStore)
-			body, err := io.ReadAll(rd)
+			doc, err := narinfox.Open(rd, p.signer)
 			if err != nil {
-				p.log.Error("reading narinfo", zap.String("index", location), zap.Error(err))
-				answer(w, http.StatusInternalServerError, mimeText, err.Error())
-				return
-			}
-			body, err = p.rewriteNarinfo(body)
-			if err != nil {
-				// Corrupted narinfo (e.g. binary NAR data stored under a narinfo key
-				// by an older code version). Treat as cache miss and fall through to
-				// upstream rather than serving a 500.
+				// Stored-but-corrupted narinfo (binary NAR data under a narinfo
+				// key from an older code version, or a malformed NarHash). Fall
+				// through to upstream rather than serving a 500.
 				p.log.Warn("corrupted narinfo in store, treating as miss",
 					zap.String("index", location), zap.Error(err))
 				metricRequests(namespace, prefix, "miss").Add(1)
@@ -688,8 +674,8 @@ func (p *Proxy) largeHeadAndGet(prefix, mime string) func(w http.ResponseWriter,
 			}
 
 			// Verify companion NAR index exists before serving.
-			narHash52 := parseNarinfoNarHash52(body)
-			if narHash52 != "" && len(narHash52) > 4 {
+			narHash52 := doc.Metadata().NarHash52
+			if len(narHash52) > 4 {
 				narLocation := fmt.Sprintf("indices/nar/%s/%s", narHash52[:4], narHash52)
 				if _, narErr := indices.GetIndex(narLocation); narErr != nil {
 					p.log.Warn("narinfo cached but NAR missing, treating as miss",
@@ -700,7 +686,7 @@ func (p *Proxy) largeHeadAndGet(prefix, mime string) func(w http.ResponseWriter,
 				}
 			}
 			metricRequests(namespace, prefix, "hit").Add(1)
-			http.ServeContent(w, r, r.URL.Path, time.Now(), bytes.NewReader(body))
+			http.ServeContent(w, r, r.URL.Path, time.Now(), bytes.NewReader(doc.Bytes()))
 			return
 		}
 
@@ -751,22 +737,18 @@ func (p *Proxy) insert(ctx context.Context, namespace, location string, body io.
 		return fmt.Errorf("namespace '%s' not found", namespace)
 	}
 
-	// For narinfos, buffer the body to parse References and NarHash for reference tracking.
+	// For narinfos, parse once and project metadata for reference tracking.
 	var narRefs []store.StorePathHash32
 	var narHash52 store.NarHash52
-	isNarinfo := strings.HasPrefix(location, "indices/narinfo/")
-	if isNarinfo {
-		bodyBytes, err := io.ReadAll(body)
+	if strings.HasPrefix(location, "indices/narinfo/") {
+		doc, err := narinfox.Open(body, p.signer)
 		if err != nil {
-			return fmt.Errorf("failed reading narinfo body: %w", err)
+			return fmt.Errorf("opening narinfo: %w", err)
 		}
-		bodyBytes, err = p.rewriteNarinfo(bodyBytes)
-		if err != nil {
-			return fmt.Errorf("failed rewriting narinfo: %w", err)
-		}
-		narRefs = parseNarinfoReferences(bodyBytes)
-		narHash52 = parseNarinfoNarHash52(bodyBytes)
-		body = bytes.NewReader(bodyBytes)
+		meta := doc.Metadata()
+		narRefs = meta.References
+		narHash52 = meta.NarHash52
+		body = bytes.NewReader(doc.Bytes())
 	}
 
 	chunker, err := desync.NewChunker(body, p.config.Chunks.MinSize, p.config.Chunks.AvgSize, p.config.Chunks.MaxSize)
@@ -806,104 +788,4 @@ func (p *Proxy) insert(ctx context.Context, namespace, location string, body io.
 
 	p.log.Info("stored", zap.String("location", location), zap.Int("chunks", len(index.Chunks)))
 	return nil
-}
-
-// rewriteNarinfo rewrites a narinfo to reflect that the NAR is stored uncompressed
-// and appends the proxy's signature if not already present. Existing upstream
-// signatures are preserved since the fingerprint (StorePath, NarHash, NarSize,
-// References) is unchanged.
-func (p *Proxy) rewriteNarinfo(body []byte) ([]byte, error) {
-	info, err := narinfo.Parse(bytes.NewReader(body))
-	if err != nil {
-		return nil, fmt.Errorf("parsing narinfo: %w", err)
-	}
-
-	// Normalize compression fields to uncompressed.
-	if info.Compression != "none" && info.Compression != "" {
-		info.Compression = "none"
-		info.FileHash = info.NarHash
-		info.FileSize = info.NarSize
-	}
-
-	// Always normalize URL to nar/{narHash}.nar, regardless of compression.
-	// Upstream URLs use the compressed file hash (e.g., nar/{compressedHash}.nar.xz),
-	// but spongix stores NARs keyed by NarHash. Without this normalization,
-	// the URL hash and storage key diverge, causing 404s on cache misses.
-	narHashStr := info.NarHash.String() // "sha256:base32hash"
-	parts := strings.SplitN(narHashStr, ":", 2)
-	if len(parts) == 2 {
-		info.URL = "nar/" + parts[1] + ".nar"
-	} else {
-		p.log.Warn("malformed NarHash in narinfo, URL not normalized", zap.String("narhash", narHashStr))
-	}
-
-	// Append our signature if a signing key is configured and not already present.
-	if p.signingKey != nil {
-		keyName := p.signingKey.ToPublicKey().Name
-		alreadySigned := false
-		for _, s := range info.Signatures {
-			if s.Name == keyName {
-				alreadySigned = true
-				break
-			}
-		}
-		if !alreadySigned {
-			fingerprint := info.Fingerprint()
-			sig, err := p.signingKey.Sign(nil, fingerprint)
-			if err != nil {
-				return nil, fmt.Errorf("signing narinfo: %w", err)
-			}
-			info.Signatures = append(info.Signatures, sig)
-		}
-	}
-
-	return []byte(info.String()), nil
-}
-
-// narinfoField extracts the value of a narinfo field by key (e.g. "NarHash", "StorePath").
-func narinfoField(body []byte, key string) string {
-	scanner := bufio.NewScanner(bytes.NewReader(body))
-	for scanner.Scan() {
-		if val, ok := strings.CutPrefix(scanner.Text(), key+":"); ok {
-			return strings.TrimSpace(val)
-		}
-	}
-	return ""
-}
-
-// parseNarinfoNarHash52 extracts the 52-char nix-base32 NarHash from narinfo bytes.
-func parseNarinfoNarHash52(body []byte) store.NarHash52 {
-	val := narinfoField(body, "NarHash")
-	if parts := strings.SplitN(val, ":", 2); len(parts) == 2 {
-		return store.NarHash52(parts[1])
-	}
-	return ""
-}
-
-// parseNarinfoStorePathHash extracts the 32-char store path hash from a narinfo's StorePath field.
-// StorePath looks like "/nix/store/hyhrnrnpsz9fw5p9dk85a58y31ink18c-test".
-func parseNarinfoStorePathHash(body []byte) store.StorePathHash32 {
-	storePath := strings.TrimPrefix(narinfoField(body, "StorePath"), "/nix/store/")
-	if idx := strings.IndexByte(storePath, '-'); idx >= 32 {
-		return store.StorePathHash32(storePath[:32])
-	}
-	return ""
-}
-
-// parseNarinfoReferences extracts store path hashes from a narinfo's References field.
-// References is a space-separated list of store paths like "hash1-name1 hash2-name2".
-// Returns the hash portion (first 32 chars) of each reference.
-func parseNarinfoReferences(body []byte) []store.StorePathHash32 {
-	refsStr := narinfoField(body, "References")
-	if refsStr == "" {
-		return nil
-	}
-	parts := strings.Fields(refsStr)
-	refs := make([]store.StorePathHash32, 0, len(parts))
-	for _, part := range parts {
-		if idx := strings.IndexByte(part, '-'); idx > 0 {
-			refs = append(refs, store.StorePathHash32(part[:idx]))
-		}
-	}
-	return refs
 }

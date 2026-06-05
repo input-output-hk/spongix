@@ -1,11 +1,13 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"fmt"
 	"io"
 	"net/http"
 	"os"
+	"strings"
 	"testing"
 
 	"github.com/klauspost/compress/zstd"
@@ -13,6 +15,19 @@ import (
 	"github.com/ulikunitz/xz"
 	"gotest.tools/v3/assert"
 )
+
+// scanNarinfoField returns the value of a single narinfo field by key
+// (e.g. "NarHash"). Test-only helper; production code projects fields via
+// pkg/narinfox.Metadata instead of scanning bytes.
+func scanNarinfoField(body []byte, key string) string {
+	scanner := bufio.NewScanner(bytes.NewReader(body))
+	for scanner.Scan() {
+		if val, ok := strings.CutPrefix(scanner.Text(), key+":"); ok {
+			return strings.TrimSpace(val)
+		}
+	}
+	return ""
+}
 
 // Test helpers for compression fixtures.
 
@@ -86,7 +101,7 @@ func narinfoFieldEquals(t *testing.T, field, expected string) func(*http.Respons
 		// Reset body so subsequent assertions can also read it
 		resp.Body = io.NopCloser(bytes.NewReader(body))
 
-		actual := narinfoField(body, field)
+		actual := scanNarinfoField(body, field)
 		if actual != expected {
 			t.Errorf("narinfo field %s: got %q, want %q", field, actual, expected)
 		}

@@ -22,6 +22,7 @@ import (
 	"github.com/folbricht/desync"
 	"github.com/input-output-hk/spongix/pkg/config"
 	"github.com/input-output-hk/spongix/pkg/logger"
+	"github.com/input-output-hk/spongix/pkg/narinfox"
 	"github.com/input-output-hk/spongix/pkg/store"
 	"github.com/minio/minio-go/v6"
 	"github.com/minio/minio-go/v6/pkg/credentials"
@@ -116,8 +117,8 @@ func main() {
 		if err != nil {
 			log.Fatal("loading signing key", zap.Error(err))
 		}
-		proxy.signingKey = &key
-		proxy.log.Info("loaded signing key", zap.String("name", key.ToPublicKey().Name))
+		proxy.signer = narinfox.NewSigner(&key)
+		proxy.log.Info("loaded signing key", zap.String("name", proxy.signer.Name()))
 	}
 
 	go func() {
@@ -225,8 +226,8 @@ type Proxy struct {
 	// pebbleDB is the shared Pebble database for chunks and indices.
 	pebbleDB *store.DB
 
-	signingKey     *signature.SecretKey // nil if no key configured
-	symlinkBinData []byte              // raw symlink binary for registry tarballs
+	signer         narinfox.Signer // nil if no key configured
+	symlinkBinData []byte          // raw symlink binary for registry tarballs
 }
 
 func NewProxy(config *config.Config) *Proxy {

@@ -212,7 +212,7 @@ func main() {
 type Proxy struct {
 	config *config.Config
 
-	chunkStore   desync.WriteStore
+	chunkStore  desync.WriteStore
 	indexStores map[string]desync.IndexWriteStore
 
 	log       *zap.Logger
@@ -607,4 +607,3 @@ func narExtFromURL(u string) string {
 	}
 	return ""
 }
-

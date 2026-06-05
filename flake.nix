@@ -49,8 +49,7 @@
             gotools
             gopls
             nodejs
-            minio
-            minio-client
+            garage
             watchexec
           ];
         };

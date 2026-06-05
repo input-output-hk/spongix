@@ -7,6 +7,10 @@
   publicKey = "local:ofkVmBSyP+DC5o+oDnrWe2PCxQp34E4OLHH2WdRaFKw=";
 
   cacheUrl = "http://localhost:8888/public";
+  # Spongix stores/serves NARs uncompressed and rejects compressed uploads.
+  # Newer Nix compresses `nix copy --to` uploads (.nar.xz) by default, so push
+  # URLs must request compression=none (matches the spongixctl push flow).
+  pushUrl = "${cacheUrl}?compression=none";
 
   spongixConfig = pkgs.writeText "spongix-config.json" (builtins.toJSON {
     listen = "0.0.0.0:8888";
@@ -36,7 +40,7 @@
     set -eu
     export IFS=' '
     echo "post-build-hook: uploading $OUT_PATHS" >&2
-    exec nix copy --to ${cacheUrl} $OUT_PATHS
+    exec nix copy --to "${pushUrl}" $OUT_PATHS
   '';
 
   system = pkgs.stdenv.hostPlatform.system;
@@ -119,7 +123,7 @@ in
       machine.log(f"Built: {out1}")
 
       # Push to spongix
-      machine.succeed(f"nix copy --to http://localhost:8888/public {out1}")
+      machine.succeed(f'nix copy --to "${pushUrl}" {out1}')
       machine.log("nix copy --to succeeded")
 
       # Verify narinfo is in the cache
@@ -210,9 +214,9 @@ in
       # Pebble DB). nix-serve serves it, spongix proxies to it.
       #
       # Flow:
-      #   1st request → spongix has no index → HEAD nix-serve → 302 redirect
-      #                 + background cache job downloads and stores in Pebble
-      #   2nd request → spongix has the index → 200 direct serve
+      #   1st request → spongix has no index → HEAD nix-serve → proxies the
+      #                 narinfo (200, X-Cache: MISS) + background cache job
+      #   later        → spongix has the index → 200 direct serve (X-Cache: HIT)
 
       # Add a file to the nix store without building (no post-build-hook)
       machine.succeed("echo proxy-test-content > /tmp/proxy-test-file")
@@ -227,39 +231,31 @@ in
       # Verify proxy namespace is up
       machine.succeed("curl -sf http://localhost:8888/proxy/nix-cache-info")
 
-      # First request through proxy: content is NOT in Pebble, only in nix-serve.
-      # Spongix should HEAD nix-serve, find it, and redirect (302).
-      status_first = machine.succeed(
-          f"curl -s -o /dev/null -w '%{{http_code}}' http://localhost:8888/proxy/{hash4}.narinfo"
-      ).strip()
-      assert status_first == "302", f"Expected 302 redirect on first proxy request, got {status_first}"
-      machine.log(f"first proxy request: {status_first} (redirect to upstream)")
-
-      # Follow the redirect to verify content is reachable end-to-end
-      narinfo_proxy = machine.succeed(
-          f"curl -sfL http://localhost:8888/proxy/{hash4}.narinfo"
+      # First request: content is NOT in Pebble, only in nix-serve. Spongix
+      # HEADs nix-serve, finds it, and proxies the narinfo (200, X-Cache: MISS),
+      # rewriting the compression fields, and kicks off a background cache job.
+      # Narinfos are proxied (not redirected) so spongix can rewrite Compression
+      # for uncompressed storage before the client sees it.
+      first = machine.succeed(
+          f"curl -s -o /dev/null -D - -w 'code=%{{http_code}}' "
+          f"http://localhost:8888/proxy/{hash4}.narinfo"
       )
-      assert "StorePath:" in narinfo_proxy, f"Bad narinfo via proxy: {narinfo_proxy}"
-      machine.log("proxy redirect serves valid narinfo")
+      assert "code=200" in first, f"Expected 200 on first proxy request: {first!r}"
+      assert "X-Cache: MISS" in first, f"Expected X-Cache: MISS on first proxy request: {first!r}"
+      machine.log("first proxy request: 200, X-Cache: MISS")
 
-      # Wait for the background cache job to complete
-      import time
-      time.sleep(3)
-
-      # Second request: should be a direct cache hit (200, no redirect)
-      status_second = machine.succeed(
-          f"curl -s -o /dev/null -w '%{{http_code}}' http://localhost:8888/proxy/{hash4}.narinfo"
-      ).strip()
-      assert status_second == "200", f"Expected 200 cache hit on second proxy request, got {status_second}"
-      machine.log(f"second proxy request: {status_second} (served from cache)")
-
-      # Verify the cached narinfo content
-      narinfo_cached = machine.succeed(
-          f"curl -sf http://localhost:8888/proxy/{hash4}.narinfo"
+      # Wait for the background cache job to store the path in Pebble, after
+      # which requests are served directly from cache (X-Cache: HIT).
+      machine.wait_until_succeeds(
+          f"curl -s -o /dev/null -D - http://localhost:8888/proxy/{hash4}.narinfo | grep -qi '^X-Cache: HIT'"
       )
+      machine.log("background cache populated (X-Cache: HIT)")
+
+      # Cache HIT: served from Pebble and signed by spongix.
+      narinfo_cached = machine.succeed(f"curl -sf http://localhost:8888/proxy/{hash4}.narinfo")
       assert "StorePath:" in narinfo_cached, f"Bad cached narinfo: {narinfo_cached}"
       assert "Sig:" in narinfo_cached, f"Missing signature in cached narinfo: {narinfo_cached}"
-      machine.log("proxy cached narinfo verified")
+      machine.log("proxy cached narinfo verified (signed)")
 
       # Note: NAR fetch through proxy is not tested here because nix-serve
       # generates NAR URLs with a different format ({storehash}-{narhash}.nar)

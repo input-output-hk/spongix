@@ -316,7 +316,7 @@ func (p *Proxy) redirectToUpstream(prefix, location string, w http.ResponseWrite
 			substituterUrl.Path = filepath.Join(substituterUrl.Path, strings.TrimPrefix(r.URL.Path, "/"+namespace))
 			substituterUrlString := substituterUrl.String()
 
-			if response, err := p.httpHeadClient.Head(substituterUrlString); err == nil {
+			if response, err := p.headUpstream(substituterUrlString); err == nil {
 				defer func() { _ = response.Body.Close() }()
 				if response.StatusCode == http.StatusOK {
 					first <- substituterUrlString
@@ -391,6 +391,20 @@ func (p *Proxy) proxyNarinfo(upstreamURL string, w http.ResponseWriter) {
 	_, _ = w.Write(doc.Bytes())
 }
 
+// headUpstream probes an upstream with a HEAD request. The connection is closed
+// afterward (Close: true) instead of being pooled: some upstreams (e.g.
+// nix-serve) erroneously send a body on a HEAD response, which would poison the
+// reused connection in http.DefaultTransport — shared with httpGetClient — so
+// the next GET on it reads leftover body bytes as the status line and fails.
+func (p *Proxy) headUpstream(url string) (*http.Response, error) {
+	req, err := http.NewRequest(http.MethodHead, url, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Close = true
+	return p.httpHeadClient.Do(req)
+}
+
 // proxyNar handles NAR cache misses. It searches upstreams for the NAR,
 // trying compressed variants (.xz, .zst, .bz2, .br) when the uncompressed
 // URL isn't found. The NAR is decompressed, served to the client, and
@@ -441,7 +455,7 @@ func (p *Proxy) proxyNar(location string, w http.ResponseWriter, r *http.Request
 			tryURL.Path = filepath.Join(base.Path, narPath+ext)
 			tryURLStr := tryURL.String()
 
-			headResp, err := p.httpHeadClient.Head(tryURLStr)
+			headResp, err := p.headUpstream(tryURLStr)
 			if err != nil {
 				continue
 			}

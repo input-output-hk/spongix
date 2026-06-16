@@ -1,7 +1,6 @@
 {
   lib,
   buildGoModule,
-  symlinkBin,
 }: let
   # TODO: split into multiple packages for each command.
   final = package "sha256-tXGraMNI2VmtretUcm4yrcbPvIEvg4LVXPjUJJnHb94=";
@@ -28,10 +27,6 @@
           ./log_record.go
           ./main.go
           ./metrics.go
-          ./registry.go
-          ./registry_flake.go
-          ./registry_handlers.go
-          ./registry_test.go
           ./router.go
           ./router_test.go
         ];
@@ -42,7 +37,6 @@
       ldflags = [
         "-s"
         "-w"
-        "-X main.symlinkBinStorePath=${symlinkBin}"
       ];
     };
 in

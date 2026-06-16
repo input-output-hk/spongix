@@ -12,7 +12,6 @@ import (
 	"os"
 	"os/signal"
 	"path"
-	"path/filepath"
 	"strings"
 	"syscall"
 	"time"
@@ -169,9 +168,6 @@ func main() {
 		}
 	}()
 
-	// Load symlink binary for registry tarballs (if configured).
-	proxy.loadSymlinkBin()
-
 	<-sc
 	signal.Stop(sc)
 
@@ -226,8 +222,7 @@ type Proxy struct {
 	// pebbleDB is the shared Pebble database for chunks and indices.
 	pebbleDB *store.DB
 
-	signer         narinfox.Signer // nil if no key configured
-	symlinkBinData []byte          // raw symlink binary for registry tarballs
+	signer narinfox.Signer // nil if no key configured
 }
 
 func NewProxy(config *config.Config) *Proxy {
@@ -260,8 +255,6 @@ func NewProxy(config *config.Config) *Proxy {
 		httpCacheClient: httpCacheClient,
 	}
 }
-
-var symlinkBinStorePath = "" // set by ldflags: store path of the symlink binary
 
 func (proxy *Proxy) setupChunks() {
 	switch proxy.config.Chunks.StoreType {
@@ -311,10 +304,6 @@ func (proxy *Proxy) setupChunks() {
 		}
 		proxy.pebbleDB = db
 		proxy.chunkStore = store.NewChunkStore(db)
-
-		if err := db.MigrateRegistryDropOwner(); err != nil {
-			proxy.log.Fatal("registry migration failed", zap.Error(err))
-		}
 	}
 }
 
@@ -366,40 +355,6 @@ func (proxy *Proxy) defaultStoreOptions() desync.StoreOptions {
 		Timeout:    30 * time.Second,
 		ErrorRetry: 1,
 	}
-}
-
-// loadSymlinkBin reads the symlink binary from the Nix store path (injected
-// via ldflags at build time) and caches it in memory. The binary is included
-// directly in registry tarballs so clients don't need a separate fetchClosure.
-func (proxy *Proxy) loadSymlinkBin() {
-	if symlinkBinStorePath == "" {
-		proxy.log.Warn("symlinkBinStorePath not set, registry flakes will not work")
-		return
-	}
-
-	// Check if any namespace has registry enabled.
-	hasRegistry := false
-	for _, ns := range proxy.config.Namespaces {
-		if ns.Registry != nil && ns.Registry.Enable {
-			hasRegistry = true
-			break
-		}
-	}
-	if !hasRegistry {
-		return
-	}
-
-	binPath := filepath.Join(symlinkBinStorePath, "bin", "symlink")
-	data, err := os.ReadFile(binPath)
-	if err != nil {
-		proxy.log.Fatal("reading symlink binary", zap.Error(err), zap.String("path", binPath))
-	}
-
-	proxy.symlinkBinData = data
-	proxy.log.Info("loaded symlink binary",
-		zap.String("path", binPath),
-		zap.Int("size", len(data)),
-	)
 }
 
 func (proxy *Proxy) setupLogger() {

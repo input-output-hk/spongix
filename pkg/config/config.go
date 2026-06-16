@@ -54,16 +54,11 @@ func (c *Config) Prepare() error {
 }
 
 type Namespace struct {
-	Substituters      []string  `json:"substituters"`
-	CacheInfoPriority uint64    `json:"cache_info_priority"`
-	S3                *S3       `json:"s3"`
-	Registry          *Registry `json:"registry"`
+	Substituters      []string `json:"substituters"`
+	CacheInfoPriority uint64   `json:"cache_info_priority"`
+	S3                *S3      `json:"s3"`
 	// StoreType selects the index storage backend: "pebble" (default) or "s3".
 	StoreType string `json:"store_type"`
-}
-
-type Registry struct {
-	Enable bool `json:"enable"`
 }
 
 func (n *Namespace) Prepare() error {

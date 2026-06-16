@@ -35,9 +35,6 @@
     }
     // lib.optionalAttrs (value.storeType == "s3") {
       s3 = mapS3 "namespace_${name}" value.s3;
-    }
-    // lib.optionalAttrs (value.registry.enable) {
-      registry = {enable = true;};
     };
 
   configFile = builtins.toFile "spongix.json" (builtins.toJSON ({
@@ -297,21 +294,6 @@ in {
             };
 
             s3 = s3Option;
-
-            registry = lib.mkOption {
-              default = {};
-              description = ''
-                Per-package flake registry. When enabled, serves gzip-compressed
-                tarballs at `/{ns}/f/{pkg}/{version}.tar.gz` implementing
-                the Lockable HTTP Tarball Protocol. When PinAPI is also enabled,
-                write access (PUT/DELETE) requires bearer token auth.
-              '';
-              type = lib.types.submodule {
-                options = {
-                  enable = lib.mkEnableOption "package registry for this namespace";
-                };
-              };
-            };
           };
         }));
         default = {};

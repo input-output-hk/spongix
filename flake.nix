@@ -24,11 +24,7 @@
         ...
       }: {
         packages = {
-          symlink = pkgs.callPackage ./symlink.nix {};
-
-          spongix = pkgs.callPackage ./package.nix {
-            symlinkBin = self'.packages.symlink;
-          };
+          spongix = pkgs.callPackage ./package.nix {};
 
           spongixctl = pkgs.callPackage ./spongixctl.nix {};
 
